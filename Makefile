@@ -5,7 +5,7 @@ LDFLAGS := -s -w -X main.version=$(VERSION)
 GOFLAGS := -trimpath
 export CGO_ENABLED = 0
 
-.PHONY: build build-all test lint check selftest sbom dist clean license
+.PHONY: build build-all test lint check selftest sbom dist dist-dir clean license
 
 build:
 	go build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o bin/$(BINARY) $(PKG)
@@ -36,8 +36,11 @@ check: build
 selftest: build
 	./bin/$(BINARY) -config $(CONFIG) selftest
 
-sbom:
+sbom: | dist-dir
 	cyclonedx-gomod app -json -licenses -main $(PKG) -output dist/$(BINARY)-$(VERSION).cdx.json .
+
+dist-dir:
+	mkdir -p dist
 
 dist: build-all sbom
 	cd bin && sha256sum * > ../dist/SHA256SUMS
