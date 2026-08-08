@@ -1,0 +1,203 @@
+# smtprelayd — Open Source SMTP Relay for Windows & Linux — example configuration
+# Copy to /etc/smtprelayd/smtprelayd.toml or %ProgramData%\SMTPRelayd\smtprelayd.toml
+
+[service]
+data_dir  = "/var/lib/smtprelayd"   # Windows: C:\ProgramData\SMTPRelayd
+log_level = "info"                 # debug | info | warn | error
+
+[log]
+file        = "smtprelayd.log"      # relative to data_dir
+max_size_mb = 50
+max_backups = 10
+max_age_days = 90
+
+# ---------------------------------------------------------------------------
+# Listeners
+# ---------------------------------------------------------------------------
+
+# A non-loopback listener with no matching client CIDR is a startup error.
+[[listener]]
+name        = "smtp"
+address     = "10.0.0.10:25"        # bind the internal interface, not 0.0.0.0
+tls         = "starttls"           # none | starttls | implicit
+min_tls     = "1.0"                # legacy devices frequently cannot do 1.2
+require_tls = false                # plaintext allowed, IP allowlist still applies
+
+[[listener]]
+name        = "submission"
+address     = "0.0.0.0:587"
+tls         = "starttls"
+min_tls     = "1.2"
+require_tls = true
+
+[[listener]]
+name        = "smtps"
+address     = "0.0.0.0:465"
+tls         = "implicit"
+min_tls     = "1.2"
+
+[tls]
+cert_file = "/etc/smtprelayd/tls/relay.crt"
+key_file  = "/etc/smtprelayd/tls/relay.key"
+
+# ---------------------------------------------------------------------------
+# Clients — matched by source address, longest prefix wins
+# ---------------------------------------------------------------------------
+
+[[client]]
+name             = "printers-vienna"
+cidr             = ["10.10.5.0/24"]
+route            = "m365"
+max_message_mb   = 25
+max_recipients   = 20
+rate_limit_per_min = 30
+max_connections  = 10
+
+  [client.rewrite]
+  mode          = "force"
+  envelope_from = "relay@example.at"
+  header_from   = "Printer Vienna <relay@example.at>"
+  reply_to      = "preserve"       # preserve | drop | fixed:<address>
+
+  [client.bounce]
+  notify = ["druckeradmin@example.at"]   # overrides [bounce].notify
+
+[[client]]
+name  = "erp"
+cidr  = ["10.20.0.15/32"]
+route = "m365"
+max_message_mb = 50
+
+  [client.rewrite]
+  mode            = "if_unauthorized"
+  allowed_senders = ["*@example.at"]
+  envelope_from   = "erp@example.at"
+  header_from     = "keep"         # keep the original when it is authorised
+
+[[client]]
+name = "monitoring"
+cidr = ["10.30.0.0/24"]
+route = "m365"
+
+  [client.rewrite]
+  mode = "off"
+
+# ---------------------------------------------------------------------------
+# Routes — where mail is delivered
+#
+# Route selection per recipient, in this order:
+#   1. route.domains matching the recipient domain
+#   2. route.sources matching the client address, if more specific than
+#      the client CIDR that matched
+#   3. the route named by the client
+#   4. the route marked default
+# Recipients of one message that resolve to different routes are split
+# into one queue entry per route.
+# ---------------------------------------------------------------------------
+
+# Outbound certificate verification is always on and has no disable switch.
+# ca_pin is optional and restricts the accepted issuer further.
+[[route]]
+name           = "m365"
+default        = true
+host           = "smtp.office365.com"
+port           = 587
+tls            = "starttls"
+min_tls        = "1.2"
+auth           = "xoauth2"
+max_concurrent = 8                 # Microsoft 365 tolerates about 10
+rate_limit_per_min = 25            # conservative, per connection limit is ~30
+
+  [route.oauth2]
+  tenant_id     = "00000000-0000-0000-0000-000000000000"
+  client_id     = "00000000-0000-0000-0000-000000000000"
+  client_secret = "${SMTPRELAYD_M365_SECRET}"   # env reference or file: path only
+  secret_expires = "2027-02-01"                # surfaced as a metric for alerting
+  scope         = "https://outlook.office365.com/.default"
+  mailbox       = "relay@example.at"
+
+[[route]]
+name = "partner-smarthost"
+host = "mail.partner.example"
+port = 587
+tls  = "starttls"
+auth = "plain"
+domains = ["partner.example"]      # recipient domains using this route
+# Source networks may deliberately overlap a client CIDR: the longer
+# prefix wins, so this /25 moves half of printers-vienna onto this route
+# without splitting the client. Two routes claiming the same network is
+# a startup error.
+sources = ["10.10.5.128/25"]
+
+  [route.credentials]
+  username = "relay@example.at"
+  password = "${SMTPRELAYD_PARTNER_PASSWORD}"
+
+# ---------------------------------------------------------------------------
+# Queue
+# ---------------------------------------------------------------------------
+
+[queue]
+retry_schedule_min = [1, 5, 15, 30, 60, 120]
+max_lifetime_hours = 96
+
+# ---------------------------------------------------------------------------
+# Bounces
+#
+# Covers failures the relay itself produced: a permanent 5xx from the smarthost,
+# or expiry after max_lifetime_hours. Bounces generated downstream by Microsoft
+# 365 after it accepted the message land in the rewritten sender's mailbox and
+# are not visible here. See MEMORY.md section 8.
+# ---------------------------------------------------------------------------
+
+[bounce]
+sender          = "postmaster@example.at"  # empty envelope sender is used on the wire
+notify          = []                       # global recipients, empty disables mail
+notify_route    = "m365"                   # route used to send notifications
+digest_minutes  = 15                       # batch failures into one message
+max_per_hour    = 12                       # cap, excess is recorded but not mailed
+
+# ---------------------------------------------------------------------------
+# Dashboard and metrics
+# ---------------------------------------------------------------------------
+
+# Binding beyond loopback requires TLS to be configured, else startup fails.
+[web]
+address = "127.0.0.1:8025"
+enabled = true
+
+# Bearer tokens for /api/v1. Scope is "read" or "admin".
+# Generate with: smtprelayd token new --name checkmk --scope read
+# The plaintext token is printed once; only its digest is stored here.
+[[web.token]]
+name        = "checkmk"
+scope       = "read"
+sha256      = "0000000000000000000000000000000000000000000000000000000000000000"
+
+[[web.token]]
+name        = "ops"
+scope       = "admin"
+sha256      = "0000000000000000000000000000000000000000000000000000000000000000"
+
+[metrics]
+address = "127.0.0.1:9025"
+path    = "/metrics"
+enabled = true
+
+[history]
+retention_days   = 90
+retain_subjects  = true    # subjects often contain personal data
+
+[limits]
+# Global ceiling. A client may lower it with max_message_mb but never
+# raise it; the loader refuses a client value above this one.
+max_message_mb       = 100
+max_hops             = 25
+max_headers          = 200
+max_header_bytes     = 262144
+max_connections      = 200
+read_timeout_sec     = 60
+write_timeout_sec    = 60
+data_timeout_sec     = 300
+spool_max_gb         = 10
+spool_warn_percent   = 80
