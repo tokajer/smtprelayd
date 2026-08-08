@@ -94,3 +94,7 @@ file is byte-exact rather than transcribed.
 
 The only third-party dependency, `github.com/BurntSushi/toml`, is MIT licensed
 and compatible with the GPL.
+
+## If you like my work you can
+
+[![Buy me a coffee](https://img.buymeacoffee.com/button-api/?text=Buy%20me%20a%20coffee&emoji=☕&slug=tokajer&button_colour=1e4c7a&font_colour=ffffff&font_family=Inter&outline_colour=ffffff&coffee_colour=FFDD00)](https://www.buymeacoffee.com/tokajer)
