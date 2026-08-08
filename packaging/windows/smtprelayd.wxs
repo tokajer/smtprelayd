@@ -60,7 +60,10 @@
       <!-- No inherited access from %ProgramData%: only the service account
            and local administrators may read the spool, history and any
            secret referenced from smtprelayd.toml. See docs/EXPLOIT-SURFACE.md. -->
-      <Component Id="DataFolderAcl" Guid="*" Win64="yes">
+      <!-- Explicit GUID, not "*": the KeyPath of this component is the
+           directory itself, for which WiX cannot derive a stable GUID.
+           Never regenerate it, or an upgrade will re-ACL a second folder. -->
+      <Component Id="DataFolderAcl" Guid="31B78A8A-3A73-417F-A500-5E8FEBFD9416" Win64="yes">
         <CreateFolder>
           <util:PermissionEx User="Administrators" GenericAll="yes" />
           <util:PermissionEx User="NT SERVICE\smtprelayd" GenericAll="yes" />
