@@ -24,6 +24,21 @@ import (
 
 const defaultMaxMessageMB = 50
 
+const (
+	// unmatchedMaxConns bounds how many sockets one unauthorised source may
+	// hold at a time. Such a source is refused at MAIL FROM, but the refusal
+	// happens several commands in, so without a cap here it competes for the
+	// global connection budget on equal terms with the devices that are
+	// actually allowed to relay.
+	unmatchedMaxConns = 2
+
+	// unmatchedMaxSession is how long an unauthorised source may keep a
+	// connection open. It only needs long enough to be told no; the per
+	// command read deadline alone does not bound this, because every NOOP
+	// resets it.
+	unmatchedMaxSession = 30 * time.Second
+)
+
 var (
 	errLineTooLong = errors.New("line exceeds 1000 octets")
 	errNulByte     = errors.New("NUL byte in input")
@@ -41,12 +56,16 @@ type session struct {
 	client     *config.Client
 	clientBits int
 	remote     netip.Addr
-	isTLS      bool
-	helo       string
-	from       string
-	fromSet    bool
-	rcpts      []string
-	declared   int64
+	// deadline caps the whole session, not one command. It is set only for
+	// unmatched sources; an allowlisted device may legitimately hold a
+	// connection open across many messages.
+	deadline time.Time
+	isTLS    bool
+	helo     string
+	from     string
+	fromSet  bool
+	rcpts    []string
+	declared int64
 }
 
 func (s *Server) handle(ctx context.Context, conn net.Conn) {
@@ -90,6 +109,17 @@ func (s *Server) handle(ctx context.Context, conn net.Conn) {
 		ss.client = client
 		ss.clientBits = bits
 		ss.log = ss.log.With("client", client.Name)
+	} else {
+		// The refusal itself still happens at MAIL FROM, so that the reply
+		// names the actual reason. What changes here is only how much of the
+		// server an unauthorised source may occupy while getting there.
+		key := "unmatched:" + ss.remote.String()
+		if !s.conns.acquire(key, unmatchedMaxConns) {
+			ss.reply(421, "4.7.0 too many connections")
+			return
+		}
+		defer s.conns.release(key, unmatchedMaxConns)
+		ss.deadline = time.Now().Add(unmatchedMaxSession)
 	}
 
 	ss.reply(220, s.cfg.Service.Hostname+" ESMTP smtprelayd")
@@ -102,7 +132,11 @@ func (s *session) loop(ctx context.Context) {
 			s.reply(421, "4.3.2 service shutting down")
 			return
 		}
-		_ = s.conn.SetReadDeadline(time.Now().Add(s.timeout(s.srv.cfg.Limits.ReadTimeoutSec)))
+		if !s.deadline.IsZero() && !time.Now().Before(s.deadline) {
+			s.reply(421, "4.7.0 session time limit reached")
+			return
+		}
+		_ = s.conn.SetReadDeadline(s.readDeadline(s.srv.cfg.Limits.ReadTimeoutSec))
 		line, err := readLineLimited(s.br, maxLineOctet)
 		if err != nil {
 			if errors.Is(err, errLineTooLong) || errors.Is(err, errNulByte) {
@@ -187,7 +221,7 @@ func (s *session) doStartTLS(ctx context.Context) bool {
 	s.reply(220, "2.0.0 ready to start TLS")
 
 	tc := tls.Server(s.conn, s.srv.tlsConf)
-	_ = tc.SetDeadline(time.Now().Add(s.timeout(s.srv.cfg.Limits.ReadTimeoutSec)))
+	_ = tc.SetDeadline(s.readDeadline(s.srv.cfg.Limits.ReadTimeoutSec))
 	if err := tc.HandshakeContext(ctx); err != nil {
 		s.log.Debug("starttls handshake failed", "error", err)
 		return false
@@ -304,7 +338,7 @@ func (s *session) doData() bool {
 	}
 
 	s.reply(354, "end data with <CR><LF>.<CR><LF>")
-	_ = s.conn.SetReadDeadline(time.Now().Add(s.timeout(s.srv.cfg.Limits.DataTimeoutSec)))
+	_ = s.conn.SetReadDeadline(s.readDeadline(s.srv.cfg.Limits.DataTimeoutSec))
 
 	dr := &dotReader{br: s.br}
 	hr := bufio.NewReader(dr)
@@ -428,6 +462,17 @@ func (s *session) maxMessageBytes() int64 {
 		mb = s.client.MaxMessageMB
 	}
 	return int64(mb) * 1024 * 1024
+}
+
+// readDeadline is the per-command deadline, clamped to the session deadline so
+// that a source which simply stops sending cannot outlive its session budget
+// inside a single blocking read.
+func (s *session) readDeadline(sec int) time.Time {
+	d := time.Now().Add(s.timeout(sec))
+	if !s.deadline.IsZero() && s.deadline.Before(d) {
+		return s.deadline
+	}
+	return d
 }
 
 func (s *session) timeout(sec int) time.Duration {

@@ -96,7 +96,9 @@ route = "m365"
 # ---------------------------------------------------------------------------
 
 # Outbound certificate verification is always on and has no disable switch.
-# ca_pin is optional and restricts the accepted issuer further.
+# ca_pin is optional and narrows the accepted chain further: the SHA-256
+# fingerprint must match a certificate in the chain that actually verified,
+# not merely one the smarthost presented alongside it.
 [[route]]
 name           = "m365"
 default        = true

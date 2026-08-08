@@ -5,6 +5,7 @@ package listener
 
 import (
 	"net/netip"
+	"strconv"
 	"testing"
 	"time"
 
@@ -72,5 +73,44 @@ func TestRateLimiter(t *testing.T) {
 	}
 	if !r.allow("unlimited", 0, now) {
 		t.Fatal("a limit of zero must mean unlimited")
+	}
+}
+
+func TestConnCounterEnforcesLimit(t *testing.T) {
+	c := newConnCounter()
+	for i := 0; i < 2; i++ {
+		if !c.acquire("k", 2) {
+			t.Fatalf("slot %d denied within the limit", i)
+		}
+	}
+	if c.acquire("k", 2) {
+		t.Fatal("limit was not enforced")
+	}
+	c.release("k", 2)
+	if !c.acquire("k", 2) {
+		t.Fatal("a released slot was not reusable")
+	}
+	if !c.acquire("unlimited", 0) {
+		t.Fatal("a limit of zero must mean unlimited")
+	}
+}
+
+// TestConnCounterDoesNotGrowPerAddress guards the unmatched-source path: its
+// keys are remote addresses, so an entry left behind at zero would let any
+// source grow this map without bound.
+func TestConnCounterDoesNotGrowPerAddress(t *testing.T) {
+	c := newConnCounter()
+	for i := 0; i < 1000; i++ {
+		key := "unmatched:198.51.100." + strconv.Itoa(i%256) + ":" + strconv.Itoa(i)
+		if !c.acquire(key, unmatchedMaxConns) {
+			t.Fatalf("acquire %d denied", i)
+		}
+		c.release(key, unmatchedMaxConns)
+	}
+	c.mu.Lock()
+	n := len(c.n)
+	c.mu.Unlock()
+	if n != 0 {
+		t.Fatalf("counter retained %d entries after every connection closed", n)
 	}
 }

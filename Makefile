@@ -26,6 +26,7 @@ test:
 lint:
 	gofmt -l .
 	go vet ./...
+	./scripts/check-banned-imports.sh
 
 # Validate a configuration without starting anything. CONFIG=<path> to override.
 CONFIG ?= configs/smtprelayd.example.toml

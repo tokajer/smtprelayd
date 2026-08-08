@@ -9,7 +9,28 @@ Keep it short — this file is pasted into every new chat.
 implemented; first compile done, clean. Packaging and the Windows service
 wrapper (normally phase 5) were pulled forward this session at the user's
 request, ahead of and independent from phase 3/4 delivery-path work.
-**Last session**: 2026-08-08 (second session) — added Windows SCM integration
+**Last session**: 2026-08-08 (third session) — full security review of the
+tree, then four fixes. No backdoor or hidden behaviour was found: the only two
+outbound destinations are the fixed token authority and the configured
+smarthost, there is no `init()`, no `go:embed`, no encoded blob and no tracked
+binary, and the runtime dependency set is two modules. Fixed: (1) an unmatched
+source used to hold a global connection slot indefinitely with a NOOP loop,
+because `conns.acquire` was only called on the matched path and the per command
+read deadline is refreshed by every command — unmatched sources now get a
+2-connection per-address cap and a 30 s session deadline that also clamps the
+read deadline; (2) `ca_pin` was checked against the certificates the smarthost
+sent rather than the chain that verified, so a MITM holding any publicly
+trusted certificate for the host could satisfy the pin by appending the pinned
+certificate as an unused chain element — it now runs on `VerifyConnection`
+against `VerifiedChains`, which also closes the session-resumption bypass gosec
+G123 flagged; (3) the release workflow interpolated the tag into a shell script
+before validating it, and a git ref name may legally contain `$( )` — verified
+by experiment — so it now arrives through `env:`; (4) the banned-import check
+that `CLAUDE.md` describes as "enforced by an import test in CI" did not exist
+anywhere, and there was no CI on push/PR at all. Both now exist. Open items
+from the review that were deliberately **not** fixed are listed under "Known
+gaps" below.
+**Previous session**: 2026-08-08 (second session) — added Windows SCM integration
 and a release pipeline. `cmd/smtprelayd` gained `install`/`uninstall`/
 `start`/`stop`, implemented only on Windows (`service_windows.go`, build-tag
 gated) via `github.com/kardianos/service`; `serve()` now takes a `context.Context`
@@ -150,11 +171,51 @@ Unchanged, plus:
       ACL setup, not yet done
 - [ ] Real end-to-end test of install → configure → start → stop → uninstall
       → upgrade on both platforms
-- [ ] CI workflow that runs on every push/PR (tests, vet, the banned-import
-      check `docs/SECURITY.md`/`CLAUDE.md` call for) — out of scope of this
-      session, which only built the tag-triggered release pipeline; the
-      banned-import check does not exist anywhere yet, it was verified by
-      hand with `go list -deps` for this change only
+- [x] CI workflow that runs on every push/PR (`.github/workflows/ci.yml`):
+      gofmt, vet, `go test -race`, the banned-import check and govulncheck,
+      plus a cross-compile job for all three targets
+- [x] The banned-import check `CLAUDE.md` calls for, in two halves:
+      `internal/buildpolicy` parses this module's own source for `unsafe`,
+      `os/exec`, `plugin`, cgo and the `html/template` escape hatches and runs
+      under `make test`; `scripts/check-banned-imports.sh` walks the full
+      dependency graph of `./cmd/smtprelayd` with `go list -deps` per target
+      under `CGO_ENABLED=0`, which is what catches a transitive reintroduction
+      such as the `kardianos/service` systemd backend. Both were confirmed to
+      fail on a deliberately planted violation, not just to pass
+- [x] Supply chain: every `actions/*` pinned to a commit SHA with the tag in a
+      trailing comment, `govulncheck` and `cyclonedx-gomod` pinned to versions
+      instead of `@latest` (`nfpm` already was)
+
+## Known gaps found in the 2026-08-08 security review, not yet fixed
+
+Ordered by how much they matter, all judged lower priority than the four that
+were fixed. None is a confidentiality or relay-authorisation defect.
+
+- `limits.spool_max_gb` and `limits.spool_warn_percent` are parsed, defaulted
+  and never read: there is no disk quota in the spool at all. A documented
+  limit that does nothing is worse than an absent one. Needs a decision on
+  whether enforcement is a reject at MAIL FROM or a watermark warning.
+- `config.CheckConfigFile` checks the configuration file but not the directory
+  holding it, while the data and binary directories are both checked. A
+  group-writable `/etc/smtprelayd` lets the file be replaced by unlink and
+  create, which the file's own mode check cannot see.
+- `checkSecretFile` verifies mode and symlink status but not ownership, unlike
+  `checkTrusted`.
+- `spool.syncDir` returns nil on every path, so a failed directory fsync is
+  silently ignored on Linux too. The durability sequence in `MEMORY.md` §4 is
+  therefore unverified rather than wrong.
+- `limits.max_headers` and `limits.max_header_bytes` are not validated as
+  positive, unlike every other limit; a value of 0 rejects every message.
+- `MAIL FROM ... SIZE=` is parsed into `session.declared` and never read; the
+  real ceiling is enforced by `spool.Stage`.
+- The token client uses `http.ProxyFromEnvironment`, which sits oddly beside
+  the "authority is a constant so the secret cannot be sent elsewhere"
+  decision. TLS keeps the body confidential, so this is metadata only, but the
+  systemd unit does not clear the proxy variables either.
+- The selftest still uses `InsecureSkipVerify` plus an exact certificate pin
+  and so trips gosec G123. That is the deliberate exception already recorded in
+  the decision log; it dials fresh with no session cache, so resumption cannot
+  occur.
 
 ## Open questions
 
@@ -222,3 +283,8 @@ Unchanged, plus:
 | 2026-08-08 | Neither the `.deb`/`.rpm` postinstall script nor the MSI starts the service | A fresh install has no tenant, mailbox or client configuration yet; auto-starting would just crash-loop until someone edits the config, which is a worse first impression than a clear "now configure and start it" message |
 | 2026-08-08 | Release tags must match `vMAJOR.MINOR.PATCH`, enforced by the workflow before any build step | The MSI's `ProductVersion` must be three numeric fields; failing fast on a malformed tag is better than silently truncating it into a version nobody asked for |
 | 2026-08-08 | `nfpm` and WiX invoked as pinned build tools (`go run pkg@version`, the runner's preinstalled WiX), not vendored into `go.mod` | Neither is a runtime dependency of the relay itself; adding them to the module would blur that line for no benefit |
+| 2026-08-08 | An unmatched source keeps its 220 banner and is still refused at MAIL FROM, but gets a per-address connection cap and a session deadline | Refusing at connect would make the reply less informative and would break the selftest's expectation of a 220; the actual problem was resource occupancy, not the point of refusal, so only that was bounded |
+| 2026-08-08 | `connCounter` deletes an entry at zero instead of leaving it | Its keys are now remote addresses for unmatched sources, so a retained zero entry would let any source grow the map without bound — the fix for one exhaustion path must not open another |
+| 2026-08-08 | `ca_pin` is checked on `VerifyConnection` against `VerifiedChains`, not on `VerifyPeerCertificate` against the raw certificates | `VerifyPeerCertificate` receives what the server sent rather than the chain that was built, so appending the pinned certificate as an unused element satisfied the pin; it is also skipped entirely on a resumed session. Both defeat exactly the attacker `ca_pin` exists for |
+| 2026-08-08 | Workflow inputs reach the shell through `env:`, never through `${{ }}` in a script body | A git ref name may legally contain `$( )` and a `workflow_dispatch` input is unconstrained, so the validating pattern ran strictly after the value had already been substituted into the script |
+| 2026-08-08 | The import ban is enforced in two halves: an AST test over first-party source and a `go list -deps` script over the full graph | `unsafe` is unavoidable transitively through the standard library, so it is only meaningful as a first-party rule; a transitive `os/exec` is only visible in the graph, and only per GOOS. Neither half alone covers the ban `CLAUDE.md` states |

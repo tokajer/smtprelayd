@@ -1,0 +1,59 @@
+name: CI
+
+# The release workflow gates on the same checks, but it only ever runs on a
+# tag. Without this workflow a regression is found at release time, which is
+# the worst moment to find one.
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+
+permissions:
+  contents: read
+
+env:
+  GO_VERSION: "1.23"
+  GOVULNCHECK_VERSION: "v1.6.0"
+
+jobs:
+  check:
+    name: Vet, test, policy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: Format
+        run: test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test
+        run: go test -race ./...
+
+      - name: Banned imports across the full dependency graph
+        run: ./scripts/check-banned-imports.sh
+
+      - name: Vulnerability scan
+        run: go run golang.org/x/vuln/cmd/govulncheck@${{ env.GOVULNCHECK_VERSION }} ./...
+
+  build:
+    name: Cross-compile
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      # Every phase's definition of done requires both platforms to compile,
+      # so this is a gate and not a release-time discovery.
+      - name: Build linux/amd64, linux/arm64, windows/amd64
+        run: make build-all

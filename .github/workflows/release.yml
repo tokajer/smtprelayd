@@ -22,6 +22,8 @@ permissions:
 env:
   GO_VERSION: "1.23"
   NFPM_VERSION: "v2.47.0"
+  GOVULNCHECK_VERSION: "v1.6.0"
+  CYCLONEDX_VERSION: "v1.10.0"
 
 jobs:
   build:
@@ -31,47 +33,56 @@ jobs:
       version: ${{ steps.version.outputs.version }}
       pkg_version: ${{ steps.version.outputs.pkg_version }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version: ${{ env.GO_VERSION }}
 
       - name: Resolve version
         id: version
+        # The tag reaches the shell through the environment, never through
+        # ${{ }} interpolation into the script body: a ref name may legally
+        # contain $( ) and backticks, and a workflow_dispatch input is not
+        # constrained at all, so interpolating either would execute it here
+        # before the pattern below ever ran.
+        env:
+          RAW_TAG: ${{ inputs.tag || github.ref_name }}
         run: |
-          TAG="${{ inputs.tag || github.ref_name }}"
-          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "release tags must look like vMAJOR.MINOR.PATCH, got: $TAG" >&2
+          if [[ ! "$RAW_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "release tags must look like vMAJOR.MINOR.PATCH, got: $RAW_TAG" >&2
             exit 1
           fi
-          echo "version=$TAG" >> "$GITHUB_OUTPUT"
-          echo "pkg_version=${TAG#v}" >> "$GITHUB_OUTPUT"
+          echo "version=$RAW_TAG" >> "$GITHUB_OUTPUT"
+          echo "pkg_version=${RAW_TAG#v}" >> "$GITHUB_OUTPUT"
 
       - name: Vet, format, test, vulnerability scan
         run: |
           go vet ./...
           test -z "$(gofmt -l .)"
           go test -race ./...
-          go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+          go run golang.org/x/vuln/cmd/govulncheck@${{ env.GOVULNCHECK_VERSION }} ./...
+
+      - name: Banned imports across the full dependency graph
+        run: ./scripts/check-banned-imports.sh
 
       - name: Build linux/amd64, linux/arm64, windows/amd64
         run: make build-all VERSION=${{ steps.version.outputs.version }}
 
       - name: SBOM
         run: |
-          go install github.com/CycloneDX/cyclonedx-gomod/cmd/cyclonedx-gomod@latest
+          go install github.com/CycloneDX/cyclonedx-gomod/cmd/cyclonedx-gomod@${{ env.CYCLONEDX_VERSION }}
           make sbom VERSION=${{ steps.version.outputs.version }}
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: binaries
           path: bin
           retention-days: 7
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: sbom
           path: dist
@@ -82,13 +93,13 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version: ${{ env.GO_VERSION }}
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: binaries
           path: bin
@@ -107,7 +118,7 @@ jobs:
             done
           done
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: linux-packages
           path: dist
@@ -118,9 +129,9 @@ jobs:
     needs: build
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: binaries
           path: bin
@@ -144,7 +155,7 @@ jobs:
             "obj\smtprelayd.wixobj"
           if ($LASTEXITCODE -ne 0) { throw "light.exe failed" }
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: windows-installer
           path: dist
@@ -159,24 +170,24 @@ jobs:
       id-token: write
       attestations: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: binaries
           path: release
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: sbom
           path: release
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: linux-packages
           path: release
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: windows-installer
           path: release
@@ -187,7 +198,7 @@ jobs:
           sha256sum * > SHA256SUMS
 
       - name: Attest build provenance
-        uses: actions/attest-build-provenance@v2
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2
         with:
           subject-path: "release/*"
 
@@ -195,7 +206,15 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release create "${{ needs.build.outputs.version }}" release/* \
+          # gh release create has no --clobber; a re-run of the same tag
+          # (e.g. after a fix later in this job) must replace the existing
+          # release rather than fail, so delete it first if present. The git
+          # tag itself is left alone.
+          TAG="${{ needs.build.outputs.version }}"
+          if gh release view "$TAG" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            gh release delete "$TAG" --repo "${{ github.repository }}" --yes
+          fi
+          gh release create "$TAG" release/* \
             --repo "${{ github.repository }}" \
-            --title "smtprelayd ${{ needs.build.outputs.version }}" \
+            --title "smtprelayd ${TAG}" \
             --generate-notes

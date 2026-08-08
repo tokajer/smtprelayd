@@ -97,7 +97,9 @@ func (r *rateLimiter) allow(name string, limit int, now time.Time) bool {
 	return true
 }
 
-// connCounter enforces per-client concurrent connection caps.
+// connCounter enforces concurrent connection caps. Keys are client names for
+// allowlisted sources and the remote address for unmatched ones, so a key is
+// attacker-influenced and an exhausted entry must not be left behind.
 type connCounter struct {
 	mu sync.Mutex
 	n  map[string]int
@@ -124,7 +126,12 @@ func (c *connCounter) release(name string, limit int) {
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.n[name] > 0 {
+	// Dropping the entry at zero rather than leaving it at zero is what keeps
+	// the map bounded by concurrent connections instead of by the number of
+	// distinct source addresses that have ever connected.
+	if c.n[name] > 1 {
 		c.n[name]--
+		return
 	}
+	delete(c.n, name)
 }

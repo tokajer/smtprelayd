@@ -8,7 +8,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"crypto/tls"
-	"crypto/x509"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -77,7 +76,7 @@ func Deliver(ctx context.Context, route config.Route, msg Message, timeout time.
 	}
 	if route.CAPin != "" {
 		pin := strings.ToLower(strings.ReplaceAll(route.CAPin, ":", ""))
-		tlsConf.VerifyPeerCertificate = pinVerifier(pin)
+		tlsConf.VerifyConnection = pinVerifier(pin)
 	}
 
 	addr := net.JoinHostPort(route.Host, strconv.Itoa(route.Port))
@@ -213,18 +212,29 @@ func (a *loginAuth) Next(fromServer []byte, more bool) ([]byte, error) {
 	return nil, errors.New("smarthost: unexpected LOGIN challenge")
 }
 
-// pinVerifier restricts the accepted chain to one whose issuing certificate
-// matches the configured SHA-256 fingerprint. Chain verification itself has
+// pinVerifier restricts the accepted chain to one that contains a certificate
+// matching the configured SHA-256 fingerprint. Chain verification itself has
 // already happened by the time this runs; the pin only narrows it further.
-func pinVerifier(pin string) func([][]byte, [][]*x509.Certificate) error {
-	return func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
-		for _, raw := range rawCerts {
-			sum := sha256.Sum256(raw)
-			if hex.EncodeToString(sum[:]) == pin {
-				return nil
+//
+// It is installed on VerifyConnection rather than VerifyPeerCertificate, for
+// two reasons that both defeat the pin. VerifyPeerCertificate is handed the
+// certificates the server sent, not the chain that was actually built from
+// them, so a server holding any publicly trusted certificate for the host
+// could satisfy the pin by appending the pinned certificate as an unused
+// extra element. And it is skipped entirely on a resumed session, whereas
+// VerifyConnection runs on every handshake and carries the verified chain
+// restored from the session state.
+func pinVerifier(pin string) func(tls.ConnectionState) error {
+	return func(cs tls.ConnectionState) error {
+		for _, chain := range cs.VerifiedChains {
+			for _, cert := range chain {
+				sum := sha256.Sum256(cert.Raw)
+				if hex.EncodeToString(sum[:]) == pin {
+					return nil
+				}
 			}
 		}
-		return errors.New("smarthost: no certificate in the chain matches ca_pin")
+		return errors.New("smarthost: no certificate in the verified chain matches ca_pin")
 	}
 }
 
