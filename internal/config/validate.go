@@ -114,9 +114,9 @@ func (c *Config) Validate() error {
 		prefix netip.Prefix
 		owner  string
 	}
-	var         prefixes []owned
+	var prefixes []owned
 	clientNames := map[string]bool{}
-	for         i := range c.Clients {
+	for i := range c.Clients {
 		cl := &c.Clients[i]
 		where := fmt.Sprintf("client[%d] %q", i, cl.Name)
 		if cl.Name == "" {

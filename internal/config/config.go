@@ -188,7 +188,7 @@ func (s *Secret) UnmarshalText(b []byte) error {
 	return nil
 }
 
-func (s Secret) String() string  { return "[redacted]" }
+func (s Secret) String() string   { return "[redacted]" }
 func (s Secret) GoString() string { return "[redacted]" }
 
 // Value returns the resolved secret. It is only populated after resolve.

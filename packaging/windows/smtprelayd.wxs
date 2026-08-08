@@ -1,0 +1,95 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Built with WiX Toolset v3 (candle.exe / light.exe -ext WixUtilExtension),
+  preinstalled on the windows-latest GitHub Actions runner image, so no
+  third-party build tool needs to be installed in CI.
+
+  Variables supplied at candle.exe time (-d<Name>=<Value>):
+    Version              MSI ProductVersion, numeric major.minor.build only
+    BinaryPath            path to the built smtprelayd.exe (windows/amd64)
+    ExampleConfigPath      path to configs/smtprelayd.example.toml
+
+  Registers the Windows service by running "smtprelayd.exe install" /
+  "uninstall" as deferred custom actions, rather than WiX's own
+  ServiceInstall element: the SCM registration must match exactly what
+  cmd/smtprelayd/service_windows.go configures (service name, the
+  NT SERVICE\smtprelayd virtual account, recovery action), and keeping that
+  in one place avoids the two drifting apart. The service is installed but
+  never started automatically: it has no usable configuration until the
+  operator edits smtprelayd.toml.
+-->
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi"
+     xmlns:util="http://schemas.microsoft.com/wix/UtilExtension">
+
+  <Product Id="*"
+           Name="smtprelayd"
+           Language="1033"
+           Version="$(var.Version)"
+           Manufacturer="Tokajer"
+           UpgradeCode="64270ec1-058e-489e-bd2d-284e42cb37af">
+
+    <Package InstallerVersion="500" Compressed="yes" InstallScope="perMachine" Platform="x64" />
+
+    <MajorUpgrade
+      Schedule="afterInstallInitialize"
+      DowngradeErrorMessage="A newer version of smtprelayd is already installed." />
+
+    <MediaTemplate EmbedCab="yes" />
+
+    <Directory Id="TARGETDIR" Name="SourceDir">
+      <Directory Id="ProgramFiles64Folder">
+        <Directory Id="INSTALLFOLDER" Name="SMTPRelayd" />
+      </Directory>
+      <Directory Id="CommonAppDataFolder">
+        <Directory Id="DATAFOLDER" Name="SMTPRelayd" />
+      </Directory>
+    </Directory>
+
+    <DirectoryRef Id="INSTALLFOLDER">
+      <Component Id="ServiceBinary" Guid="*" Win64="yes">
+        <File Id="smtprelaydEXE" Source="$(var.BinaryPath)" KeyPath="yes" />
+      </Component>
+    </DirectoryRef>
+
+    <DirectoryRef Id="DATAFOLDER">
+      <Component Id="ExampleConfig" Guid="*" Win64="yes">
+        <File Id="ExampleConfigFile" Name="smtprelayd.toml.example"
+              Source="$(var.ExampleConfigPath)" KeyPath="yes" />
+      </Component>
+
+      <!-- No inherited access from %ProgramData%: only the service account
+           and local administrators may read the spool, history and any
+           secret referenced from smtprelayd.toml. See docs/EXPLOIT-SURFACE.md. -->
+      <Component Id="DataFolderAcl" Guid="*" Win64="yes">
+        <CreateFolder>
+          <util:PermissionEx User="Administrators" GenericAll="yes" />
+          <util:PermissionEx User="NT SERVICE\smtprelayd" GenericAll="yes" />
+        </CreateFolder>
+        <RemoveFolder Id="RemoveDataFolder" On="uninstall" />
+      </Component>
+    </DirectoryRef>
+
+    <Feature Id="Complete" Title="smtprelayd" Level="1">
+      <ComponentRef Id="ServiceBinary" />
+      <ComponentRef Id="ExampleConfig" />
+      <ComponentRef Id="DataFolderAcl" />
+    </Feature>
+
+    <CustomAction Id="InstallServiceCA" FileKey="smtprelaydEXE" ExeCommand="install"
+                  Execute="deferred" Impersonate="no" Return="check" />
+    <CustomAction Id="StopServiceCA" FileKey="smtprelaydEXE" ExeCommand="stop"
+                  Execute="deferred" Impersonate="no" Return="ignore" />
+    <CustomAction Id="UninstallServiceCA" FileKey="smtprelaydEXE" ExeCommand="uninstall"
+                  Execute="deferred" Impersonate="no" Return="ignore" />
+
+    <InstallExecuteSequence>
+      <!-- Only on a genuinely fresh install: never on repair (Installed is
+           already set) and never on the old side of a major upgrade, so an
+           in-place version bump does not stop and re-register the service. -->
+      <Custom Action="InstallServiceCA" After="InstallFiles">NOT Installed AND NOT UPGRADINGPRODUCTCODE</Custom>
+      <Custom Action="StopServiceCA" Before="RemoveFiles">REMOVE="ALL" AND NOT UPGRADINGPRODUCTCODE</Custom>
+      <Custom Action="UninstallServiceCA" After="StopServiceCA">REMOVE="ALL" AND NOT UPGRADINGPRODUCTCODE</Custom>
+    </InstallExecuteSequence>
+
+  </Product>
+</Wix>

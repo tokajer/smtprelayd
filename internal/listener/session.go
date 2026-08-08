@@ -62,8 +62,8 @@ func (s *Server) handle(ctx context.Context, conn net.Conn) {
 	}
 
 	ss := &session{
-		srv:    s,
-		conn:   conn,
+		srv:        s,
+		conn:       conn,
 		br:         bufio.NewReaderSize(conn, 4096),
 		bw:         bufio.NewWriter(conn),
 		remote:     addr.Unmap(),

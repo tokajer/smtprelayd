@@ -39,6 +39,15 @@ commands:
   selftest   attempt to relay through the running instance and fail if it works
   version    print the version and exit
 
+Windows only, requires an elevated prompt:
+  install    register as a Windows service (runs as NT SERVICE\smtprelayd)
+  uninstall  remove the Windows service
+  start      start the registered Windows service
+  stop       stop the registered Windows service
+
+On Linux the service is managed with systemctl instead; the packaged unit
+file registers it as smtprelayd.service.
+
 smtprelayd is free software under the GNU GPL version 3 or later and comes
 with absolutely no warranty. See the LICENSE file.
 `
@@ -53,6 +62,27 @@ func main() {
 	cmd := "run"
 	if fs.NArg() > 0 {
 		cmd = fs.Arg(0)
+	}
+
+	switch cmd {
+	case "install", "uninstall", "start", "stop":
+		if err := controlService(cmd, *configPath); err != nil {
+			fmt.Fprintln(os.Stderr, "smtprelayd:", err)
+			os.Exit(1)
+		}
+		fmt.Printf("smtprelayd: %s ok\n", cmd)
+		return
+	}
+
+	// A service started by the Windows SCM has no console and must go through
+	// kardianos/service so Stop() is reachable; svc.IsWindowsService() is what
+	// isWindowsService() reports on Windows and is always false elsewhere.
+	if cmd == "run" && isWindowsService() {
+		if err := runWindowsService(*configPath, *console); err != nil {
+			fmt.Fprintln(os.Stderr, "smtprelayd:", err)
+			os.Exit(1)
+		}
+		return
 	}
 
 	if err := run(cmd, *configPath, *console); err != nil {
@@ -88,14 +118,18 @@ func run(cmd, configPath string, console bool) error {
 		return nil
 
 	case "run":
-		return serve(configPath, console)
+		return serve(context.Background(), configPath, console)
 
 	default:
 		return fmt.Errorf("unknown command %q, see -h", cmd)
 	}
 }
 
-func serve(configPath string, console bool) error {
+// serve runs the relay until ctx is cancelled. The foreground and systemd
+// paths pass context.Background(), relying solely on the signal.NotifyContext
+// below; the Windows service path passes a context it cancels itself from
+// Stop(), since a service has no process group to signal.
+func serve(ctx context.Context, configPath string, console bool) error {
 	cfg, err := config.Load(configPath)
 	if err != nil {
 		return err
@@ -130,7 +164,7 @@ func serve(configPath string, console bool) error {
 		return err
 	}
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
 	dm, err := delivery.New(cfg, sp, log)

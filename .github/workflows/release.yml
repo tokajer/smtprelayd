@@ -1,0 +1,201 @@
+name: Release
+
+# Only third-party build TOOLS are used here (nfpm, WiX — both already
+# preinstalled or fetched via `go run`), never a third-party release/publish
+# ACTION: the release itself is created with the gh CLI and provenance comes
+# from GitHub's own attest-build-provenance action. See the "Release
+# provenance and SBOM in CI" decision in PROGRESS.md.
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to release (defaults to the current ref)"
+        required: false
+
+permissions:
+  contents: read
+
+env:
+  GO_VERSION: "1.23"
+  NFPM_VERSION: "v2.47.0"
+
+jobs:
+  build:
+    name: Build binaries
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      pkg_version: ${{ steps.version.outputs.pkg_version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: Resolve version
+        id: version
+        run: |
+          TAG="${{ inputs.tag || github.ref_name }}"
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "release tags must look like vMAJOR.MINOR.PATCH, got: $TAG" >&2
+            exit 1
+          fi
+          echo "version=$TAG" >> "$GITHUB_OUTPUT"
+          echo "pkg_version=${TAG#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Vet, format, test, vulnerability scan
+        run: |
+          go vet ./...
+          test -z "$(gofmt -l .)"
+          go test -race ./...
+          go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+
+      - name: Build linux/amd64, linux/arm64, windows/amd64
+        run: make build-all VERSION=${{ steps.version.outputs.version }}
+
+      - name: SBOM
+        run: |
+          go install github.com/CycloneDX/cyclonedx-gomod/cmd/cyclonedx-gomod@latest
+          make sbom VERSION=${{ steps.version.outputs.version }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: binaries
+          path: bin
+          retention-days: 7
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sbom
+          path: dist
+          retention-days: 7
+
+  package-linux:
+    name: Package deb/rpm
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: binaries
+          path: bin
+
+      - name: Build .deb and .rpm for amd64 and arm64
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          chmod +x bin/* packaging/linux/*.sh
+          cd packaging/linux
+          for arch in amd64 arm64; do
+            for packager in deb rpm; do
+              VERSION="${{ needs.build.outputs.pkg_version }}" ARCH="$arch" \
+                go run github.com/goreleaser/nfpm/v2/cmd/nfpm@${{ env.NFPM_VERSION }} package \
+                --config nfpm.yaml --packager "$packager" --target ../../dist/
+            done
+          done
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-packages
+          path: dist
+          retention-days: 7
+
+  package-windows:
+    name: Build Windows installer
+    needs: build
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: binaries
+          path: bin
+
+      - name: Build MSI with WiX Toolset
+        shell: pwsh
+        run: |
+          if (-not $env:WIX) {
+            throw "WIX toolset not found on this runner image; update this step if the runner changed."
+          }
+          New-Item -ItemType Directory -Force -Path obj, dist | Out-Null
+          $wixBin = Join-Path $env:WIX "bin"
+          & "$wixBin\candle.exe" -ext WixUtilExtension `
+            -dVersion="${{ needs.build.outputs.pkg_version }}" `
+            -dBinaryPath="bin\smtprelayd-windows-amd64.exe" `
+            -dExampleConfigPath="configs\smtprelayd.example.toml" `
+            -out "obj\smtprelayd.wixobj" "packaging\windows\smtprelayd.wxs"
+          if ($LASTEXITCODE -ne 0) { throw "candle.exe failed" }
+          & "$wixBin\light.exe" -ext WixUtilExtension `
+            -out "dist\smtprelayd-${{ needs.build.outputs.pkg_version }}-amd64.msi" `
+            "obj\smtprelayd.wixobj"
+          if ($LASTEXITCODE -ne 0) { throw "light.exe failed" }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-installer
+          path: dist
+          retention-days: 7
+
+  release:
+    name: Publish release
+    needs: [build, package-linux, package-windows]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: binaries
+          path: release
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: sbom
+          path: release
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: linux-packages
+          path: release
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: windows-installer
+          path: release
+
+      - name: Checksums
+        run: |
+          cd release
+          sha256sum * > SHA256SUMS
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: "release/*"
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${{ needs.build.outputs.version }}" release/* \
+            --repo "${{ github.repository }}" \
+            --title "smtprelayd ${{ needs.build.outputs.version }}" \
+            --generate-notes

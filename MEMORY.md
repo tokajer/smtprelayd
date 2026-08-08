@@ -40,7 +40,7 @@ behaviour and diagnosability are.
 | SASL | `github.com/emersion/go-sasl` | PLAIN, LOGIN, XOAUTH2 |
 | Message parsing | `github.com/emersion/go-message` | Header rewriting without corrupting MIME |
 | OAuth2 | `golang.org/x/oauth2/clientcredentials` | Standard Entra ID client credentials flow |
-| Service wrapper | `github.com/kardianos/service` | One API for Windows SCM and systemd |
+| Service wrapper | `github.com/kardianos/service`, Windows-only | Its systemd backend shells out to `systemctl` via `os/exec`, which section 9 bans; imported only from a `_windows.go` file so that backend is never compiled in. Linux runs under the packaged systemd unit directly, no self-registration code needed |
 | Config | TOML via `github.com/BurntSushi/toml` | Comments allowed, readable for operators |
 | History store | `modernc.org/sqlite` | **Pure Go**, no cgo, keeps Windows builds trivial |
 | Logging | stdlib `log/slog` (JSON) + `gopkg.in/natefinch/lumberjack.v2` | Structured, rotating, no external agent |
@@ -266,3 +266,11 @@ The load-bearing principles:
 - Configuration reload without restart: SIGHUP on Linux, a service control code
   or a dashboard action on Windows. Listener socket changes require a restart
   and must be reported as such.
+- Packaging lives in `packaging/`: an nfpm config building `.deb`/`.rpm` with a
+  postinstall script that creates the `smtprelayd` system user, and a WiX
+  source building an `.msi` that registers the service by running
+  `smtprelayd.exe install` as a deferred custom action rather than WiX's own
+  `ServiceInstall`, so the SCM registration always matches what
+  `cmd/smtprelayd/service_windows.go` configures. `.github/workflows/release.yml`
+  builds and publishes all three on a `vX.Y.Z` tag. Neither package starts the
+  service automatically — there is no configuration yet on a fresh install.

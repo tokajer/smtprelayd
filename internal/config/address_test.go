@@ -19,10 +19,10 @@ func TestValidAddressRejectsInjection(t *testing.T) {
 		"a@example.at\n",
 		"a@example.at\x00",
 		"a@example.at\x7f",
-		"a@localhost",           // no dot: not a routable domain
-		"a@[192.0.2.1]",         // address literals are deliberately refused
-		"\"a\"@example.at",      // quoted local parts are not accepted
-		"a<b@example.at",        // could escape an angle-addr
+		"a@localhost",      // no dot: not a routable domain
+		"a@[192.0.2.1]",    // address literals are deliberately refused
+		"\"a\"@example.at", // quoted local parts are not accepted
+		"a<b@example.at",   // could escape an angle-addr
 		strings.Repeat("x", 65) + "@example.at",
 		"a@" + strings.Repeat("x", 250) + ".example.at",
 	}

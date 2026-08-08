@@ -6,14 +6,39 @@ Keep it short — this file is pasted into every new chat.
 ## Current state
 
 **Phase**: 3 — client policy, sender rewriting and recipient routing
-implemented, nothing yet compiled or run.
-**Last session**: 2026-08-08 — recipient and source-network routing, per-route
-message splitting in the spool, sender rewriting, global message size ceiling.
-**Next action**: `gofmt -w . && go vet ./... && go test ./...` — phases 1, 2 and
-3 were all written without a Go toolchain available, so this is the first
-compile. Then end to end against the real tenant: `smtprelayd check`, a message
-through the m365 route, a message with recipients in two routes to confirm the
-split, and one deliberate wrong secret to confirm the queue defers.
+implemented; first compile done, clean. Packaging and the Windows service
+wrapper (normally phase 5) were pulled forward this session at the user's
+request, ahead of and independent from phase 3/4 delivery-path work.
+**Last session**: 2026-08-08 (second session) — added Windows SCM integration
+and a release pipeline. `cmd/smtprelayd` gained `install`/`uninstall`/
+`start`/`stop`, implemented only on Windows (`service_windows.go`, build-tag
+gated) via `github.com/kardianos/service`; `serve()` now takes a `context.Context`
+so both the foreground/systemd path (`context.Background()` plus
+`signal.NotifyContext`) and the Windows service path (cancelled from `Stop()`)
+share one code path. Confirmed with `go list -deps` on both GOOS that
+`os/exec` is absent from the dependency graph on either platform. `go.mod`
+bumped to `go 1.23.0` — required by `kardianos/service` v1.3.0. Added
+`packaging/linux` (systemd unit, nfpm config, pre/postinstall scripts) and
+`packaging/windows` (WiX source for the `.msi`); both build-tested locally
+(nfpm produced real `.deb`/`.rpm` and their contents were inspected with
+`dpkg-deb`/`rpm2cpio` — correct). The WiX source could not be compiled here
+(candle.exe/light.exe are Windows-only); it has not been built or installed
+on a real machine yet. Added `.github/workflows/release.yml`: builds all
+platforms, gates on vet/gofmt/test/govulncheck, produces an SBOM
+(`cyclonedx-gomod`), packages `.deb`+`.rpm` (two archs) and the `.msi`, then
+publishes via `gh release create` with `actions/attest-build-provenance` —
+no third-party release action, per the existing decision below. Added
+`.gitignore` (`/bin/`, `/dist/`, WiX build output) — none existed before.
+**Next action, phase 5**: a real Windows install/uninstall/upgrade cycle to
+validate the MSI and the SCM registration (the user will do this, only
+Windows is available to them for testing); then the deferred phase 1 item
+"Windows ACL verification at startup" fits naturally alongside it since both
+touch `golang.org/x/sys/windows`.
+**Next action, phase 3/4**: end to end against the real tenant: `smtprelayd
+check`, a message through the m365 route, a message with recipients in two
+routes to confirm the split, and one deliberate wrong secret to confirm the
+queue defers. Needs tenant, mailbox and sending-domain values (see Open
+questions).
 
 ## Phases
 
@@ -102,6 +127,34 @@ Unchanged, plus:
 
 - [ ] Log rotation (`[log] max_size_mb` and friends are parsed but the logger
       only appends; rotation needs a dependency decision)
+- [x] Windows SCM integration: `install`/`uninstall`/`start`/`stop`, virtual
+      account `NT SERVICE\smtprelayd`, automatic-start-type with restart on
+      failure, registered via `kardianos/service` (Windows-only import, see
+      the service wrapper row in `MEMORY.md` section 2)
+- [x] Linux systemd unit (`packaging/linux/smtprelayd.service`): capability
+      bound to `CAP_NET_BIND_SERVICE` instead of root, the hardening
+      directives from `docs/SECURITY.md` section on process isolation
+- [x] `.deb`/`.rpm` via nfpm (`packaging/linux/nfpm.yaml`), creates the
+      `smtprelayd` system user/group and fixes ownership on
+      `/etc/smtprelayd` and `/var/lib/smtprelayd` in a postinstall script;
+      never starts the service on install
+- [x] `.msi` via WiX (`packaging/windows/smtprelayd.wxs`), ACLs
+      `%ProgramData%\SMTPRelayd` to Administrators + the virtual service
+      account only, no inherited access; registers but does not start the
+      service — **not yet built or installed on a real Windows machine**
+- [x] `.github/workflows/release.yml`: builds, tests, SBOM, all three package
+      formats, SHA-256 checksums, build provenance attestation, `gh release
+      create` — no third-party release action
+- [ ] Windows ACL verification at startup (`golang.org/x/sys/windows`,
+      deferred from phase 1) — natural next step alongside the MSI's own
+      ACL setup, not yet done
+- [ ] Real end-to-end test of install → configure → start → stop → uninstall
+      → upgrade on both platforms
+- [ ] CI workflow that runs on every push/PR (tests, vet, the banned-import
+      check `docs/SECURITY.md`/`CLAUDE.md` call for) — out of scope of this
+      session, which only built the tag-triggered release pipeline; the
+      banned-import check does not exist anywhere yet, it was verified by
+      hand with `go list -deps` for this change only
 
 ## Open questions
 
@@ -161,3 +214,11 @@ Unchanged, plus:
 | 2026-08-08 | Licensed GPL-3.0-or-later, copyright Tokajer | Chosen over AGPL because the relay is meant to be run inside customer infrastructure without the network-use obligation attaching to every operator; revisit if the phase 4 dashboard is ever offered as a hosted service |
 | 2026-08-08 | The licence text is fetched by `make license`, not committed as a copy | A transcribed licence that differs from the canonical text is worse than none |
 | 2026-08-08 | No Postfix fork, no Windows-only build | A fork inherits the IPL/EPL licence and a process architecture that does not exist on Windows; dropping Linux would cost the CI and test platform for about a hundred lines of platform code |
+| 2026-08-08 | `kardianos/service` imported only from `service_windows.go` | Its Linux backend shells out to `systemctl` via `os/exec`, which is banned; the file-suffix build constraint keeps that code out of the linux/amd64 and linux/arm64 dependency graph entirely rather than trusting a code path to never run |
+| 2026-08-08 | `go.mod` bumped to `go 1.23.0` | Required by `kardianos/service` v1.3.0; "Go 1.22+" in `MEMORY.md` was a floor set for cross-compilation, not a ceiling, so raising it is not a restructuring decision |
+| 2026-08-08 | Windows service runs as the virtual account `NT SERVICE\smtprelayd`, never LocalSystem | No password to provision or rotate, and no manual local-account creation in the installer, while still meeting the "dedicated service account" requirement in `docs/EXPLOIT-SURFACE.md` |
+| 2026-08-08 | `serve()` takes a `context.Context` instead of creating one internally | The Windows service path has no process to send SIGTERM to; the SCM's Stop() call needs a cancel function it can call directly, and the foreground/systemd path keeps its exact previous behaviour by passing `context.Background()` |
+| 2026-08-08 | The MSI runs `smtprelayd.exe install`/`uninstall` as deferred custom actions instead of WiX's own `ServiceInstall` element | The SCM registration (name, account, recovery action) is defined once in `service_windows.go`; a second, WiX-side definition of the same service would drift from it silently |
+| 2026-08-08 | Neither the `.deb`/`.rpm` postinstall script nor the MSI starts the service | A fresh install has no tenant, mailbox or client configuration yet; auto-starting would just crash-loop until someone edits the config, which is a worse first impression than a clear "now configure and start it" message |
+| 2026-08-08 | Release tags must match `vMAJOR.MINOR.PATCH`, enforced by the workflow before any build step | The MSI's `ProductVersion` must be three numeric fields; failing fast on a malformed tag is better than silently truncating it into a version nobody asked for |
+| 2026-08-08 | `nfpm` and WiX invoked as pinned build tools (`go run pkg@version`, the runner's preinstalled WiX), not vendored into `go.mod` | Neither is a runtime dependency of the relay itself; adding them to the module would blur that line for no benefit |
