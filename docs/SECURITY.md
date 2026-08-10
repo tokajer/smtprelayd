@@ -124,7 +124,11 @@ attacker-influenced values and writes them into a message.
   administrators.
 - Spool files 0600, directories 0700. Permissions are verified at startup and
   a mismatch is a startup failure.
-- The service never executes external commands and never loads plugins.
+- The service never executes external commands and never loads plugins. No
+  first-party file imports `os/exec`. The pure-Go SQLite runtime
+  `modernc.org/libc` does, for the C `system()`/`popen()` shims that the
+  amalgamation never calls; it is the only importer CI accepts, and
+  `scripts/check-banned-imports.sh` fails on any other, per GOOS.
 
 ## 7. Dashboard and API
 

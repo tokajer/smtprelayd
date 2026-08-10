@@ -448,7 +448,9 @@ Unchanged, plus:
       under `make test`; `scripts/check-banned-imports.sh` walks the full
       dependency graph of `./cmd/smtprelayd` with `go list -deps` per target
       under `CGO_ENABLED=0`, which is what catches a transitive reintroduction
-      such as the `kardianos/service` systemd backend. Both were confirmed to
+      such as the `kardianos/service` systemd backend. The script matches
+      importer/banned pairs against an allowlist whose only entry is
+      `modernc.org/libc os/exec` (see the decision log). Both were confirmed to
       fail on a deliberately planted violation, not just to pass
 - [x] Supply chain: every `actions/*` pinned to a commit SHA with the tag in a
       trailing comment, `govulncheck` and `cyclonedx-gomod` pinned to versions
@@ -564,3 +566,4 @@ The selftest exception (8) remains deliberate and is not fixed.
 | 2026-08-11 | The volume cap carries a suppressed client's failures into the next hour's digest instead of dropping them | "Records them for the next hour" in the plan means the underlying event survives being capped; only the act of sending is suppressed, not the fact that a failure happened |
 | 2026-08-11 | A notification message's own delivery outcome updates a dedicated `smtprelayd_notification_failures_total` counter, never the triggering route's own delivered/bounced/deferred/auth-failure counters | Those describe the relay's client-facing traffic; folding postmaster mail into them would make a notify-route outage indistinguishable from a real production delivery problem on that route |
 | 2026-08-11 | Loop prevention is a persisted `spool.Envelope.Notification` bool, not an in-memory set of queue IDs the notifier created | An in-memory set is lost on restart while the notification message can still be sitting in the queue; a persisted flag survives exactly the case (crash or restart mid-retry) where losing the distinction would let a notification's own failure start a real loop |
+| 2026-08-11 | `scripts/check-banned-imports.sh` matches importer/banned pairs against a named allowlist instead of asserting the banned package is absent from the graph | `modernc.org/sqlite`, which the no-cgo rule forces, pulls `os/exec` in through `modernc.org/libc` on every GOOS, so the absence assertion could no longer hold. Allowing the package outright would have retired the rule; naming the single importer keeps `kardianos/service` — the regression the script exists for — a failure, and reports who imports what when it fires |

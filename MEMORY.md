@@ -42,7 +42,7 @@ behaviour and diagnosability are.
 | OAuth2 | `golang.org/x/oauth2/clientcredentials` | Standard Entra ID client credentials flow |
 | Service wrapper | `github.com/kardianos/service`, Windows-only | Its systemd backend shells out to `systemctl` via `os/exec`, which section 9 bans; imported only from a `_windows.go` file so that backend is never compiled in. Linux runs under the packaged systemd unit directly, no self-registration code needed |
 | Config | TOML via `github.com/BurntSushi/toml` | Comments allowed, readable for operators |
-| History store | `modernc.org/sqlite` | **Pure Go**, no cgo, keeps Windows builds trivial |
+| History store | `modernc.org/sqlite` | **Pure Go**, no cgo, keeps Windows builds trivial. Its `modernc.org/libc` runtime imports `os/exec` on every GOOS for the C `system()`/`popen()` shims; the SQLite amalgamation never calls either (`system()` belongs to the sqlite3 CLI, not the library), so the code is linked but unreachable. Recorded decision, 2026-08-11: this is the **only** accepted `os/exec` importer, named explicitly in `scripts/check-banned-imports.sh` |
 | Logging | stdlib `log/slog` (JSON) + `gopkg.in/natefinch/lumberjack.v2` | Structured, rotating, no external agent |
 | Dashboard | Go `html/template` + htmx, embedded via `embed.FS` | No Node build step, ships inside the binary |
 | TLS | stdlib `crypto/tls` | No OpenSSL linkage |
@@ -260,7 +260,9 @@ The load-bearing principles:
   steer a privileged process. See `docs/EXPLOIT-SURFACE.md`.
 - **No dynamic behaviour.** No `unsafe`, no cgo, no `os/exec`, no plugins, no
   auto-update. Command injection and updater escalation are made structurally
-  impossible rather than defended against.
+  impossible rather than defended against. First-party source carries no
+  exception; in the dependency graph the single accepted `os/exec` importer is
+  `modernc.org/libc` (see section 4), and the CI check fails on any other.
 
 ## 10. Deployment
 
