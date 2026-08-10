@@ -146,7 +146,14 @@ func serve(ctx context.Context, configPath string, console bool) error {
 	if cfg.Log.File != "" {
 		logFile = filepath.Join(cfg.Service.DataDir, cfg.Log.File)
 	}
-	log, closer, err := logging.New(logging.Options{Level: level, File: logFile, Console: console})
+	log, closer, err := logging.New(logging.Options{
+		Level:      level,
+		File:       logFile,
+		Console:    console,
+		MaxSizeMB:  cfg.Log.MaxSizeMB,
+		MaxBackups: cfg.Log.MaxBackups,
+		MaxAgeDays: cfg.Log.MaxAgeDays,
+	})
 	if err != nil {
 		return err
 	}
@@ -198,6 +205,9 @@ func checkEnvironment(cfg *config.Config) error {
 	}
 	if err := config.CheckDir(cfg.Service.DataDir); err != nil {
 		return fmt.Errorf("data directory: %w", err)
+	}
+	if err := verifyDataDirSecurity(cfg.Service.DataDir); err != nil {
+		return fmt.Errorf("data directory ACL: %w", err)
 	}
 	exe, err := os.Executable()
 	if err != nil {

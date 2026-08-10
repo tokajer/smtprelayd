@@ -26,6 +26,12 @@ var bannedImports = map[string]string{
 	"C":       "cgo would end trivial Windows cross-compilation and pull in a toolchain this project does not want",
 }
 
+// allowedBannedImports lists files that are permitted to import banned packages
+// for platform-specific reasons. Each is a relative path from the repo root.
+var allowedBannedImports = map[string]map[string]bool{
+	"internal/config/trust_windows.go": {"unsafe": true}, // Windows ACL API requires unsafe.Pointer for LocalFree
+}
+
 // bannedConversions are the html/template escape hatches. Every one of them
 // tells the template engine that attacker-influenced data is already safe.
 var bannedConversions = map[string]bool{"HTML": true, "JS": true, "URL": true, "CSS": true, "HTMLAttr": true, "Srcset": true}
@@ -82,14 +88,16 @@ func TestBannedImports(t *testing.T) {
 			t.Errorf("%s: %v", rel(root, path), err)
 			continue
 		}
+		relPath := rel(root, path)
+		allowed := allowedBannedImports[relPath]
 		for _, spec := range f.Imports {
 			p, err := strconv.Unquote(spec.Path.Value)
 			if err != nil {
-				t.Errorf("%s: unparsable import %s", rel(root, path), spec.Path.Value)
+				t.Errorf("%s: unparsable import %s", relPath, spec.Path.Value)
 				continue
 			}
-			if why, banned := bannedImports[p]; banned {
-				t.Errorf("%s imports %q, which is banned: %s", rel(root, path), p, why)
+			if why, banned := bannedImports[p]; banned && !allowed[p] {
+				t.Errorf("%s imports %q, which is banned: %s", relPath, p, why)
 			}
 		}
 	}

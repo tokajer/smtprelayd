@@ -4,7 +4,13 @@
       "Bash(go test *)",
       "Bash(go vet *)",
       "Bash(gofmt -l ./internal ./cmd)",
-      "Bash(gofmt -w /home/tokajer/Dokumente/GitHub/smtprelayd/internal/spool/spool.go)"
+      "Bash(gofmt -w /home/tokajer/Dokumente/GitHub/smtprelayd/internal/spool/spool.go)",
+      "Bash(go get *)",
+      "Bash(go build *)",
+      "Bash(gofmt -w ./internal ./cmd)",
+      "Bash(gofmt -w /home/tokajer/Dokumente/GitHub/smtprelayd/internal/logging/logging.go)",
+      "Bash(git add *)",
+      "Bash(git commit -m ' *)"
     ]
   }
 }
