@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(go test *)",
+      "Bash(go vet *)",
+      "Bash(gofmt -l ./internal ./cmd)",
+      "Bash(gofmt -w /home/tokajer/Dokumente/GitHub/smtprelayd/internal/spool/spool.go)"
+    ]
+  }
+}

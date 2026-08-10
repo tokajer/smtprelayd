@@ -340,6 +340,11 @@ func (s *session) doData() bool {
 	s.reply(354, "end data with <CR><LF>.<CR><LF>")
 	_ = s.conn.SetReadDeadline(s.readDeadline(s.srv.cfg.Limits.DataTimeoutSec))
 
+	if s.declared > 0 && s.declared > s.maxMessageBytes() {
+		s.reply(552, "5.3.4 message exceeds size limit")
+		return false
+	}
+
 	dr := &dotReader{br: s.br}
 	hr := bufio.NewReader(dr)
 	headers, hops, err := scanHeaders(hr, s.srv.cfg.Limits)

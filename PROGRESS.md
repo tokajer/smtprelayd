@@ -7,9 +7,11 @@ Keep it short — this file is pasted into every new chat.
 
 **Phase**: 3 — client policy, sender rewriting and recipient routing
 implemented; first compile done, clean. Packaging and the Windows service
-wrapper (normally phase 5) were pulled forward this session at the user's
-request, ahead of and independent from phase 3/4 delivery-path work.
-**Last session**: 2026-08-08 (third session) — full security review of the
+wrapper (normally phase 5) were pulled forward and validated. MSI installs and
+uninstalls; `install`/`uninstall`/`start`/`stop` work on Windows.
+**Last session**: 2026-08-10 (fourth session) — Windows validation of
+`install`/`uninstall`/`start`/`stop` and MSI complete.
+**Previous session**: 2026-08-08 (third session) — full security review of the
 tree, then four fixes. No backdoor or hidden behaviour was found: the only two
 outbound destinations are the fixed token authority and the configured
 smarthost, there is no `init()`, no `go:embed`, no encoded blob and no tracked
@@ -50,11 +52,9 @@ platforms, gates on vet/gofmt/test/govulncheck, produces an SBOM
 publishes via `gh release create` with `actions/attest-build-provenance` —
 no third-party release action, per the existing decision below. Added
 `.gitignore` (`/bin/`, `/dist/`, WiX build output) — none existed before.
-**Next action, phase 5**: a real Windows install/uninstall/upgrade cycle to
-validate the MSI and the SCM registration (the user will do this, only
-Windows is available to them for testing); then the deferred phase 1 item
-"Windows ACL verification at startup" fits naturally alongside it since both
-touch `golang.org/x/sys/windows`.
+**Next action, phase 5**: Windows ACL verification at startup — the deferred
+phase 1 item now fits naturally alongside the validated MSI since both touch
+`golang.org/x/sys/windows`. Can run in parallel with phase 3/4 end-to-end.
 **Next action, phase 3/4**: end to end against the real tenant: `smtprelayd
 check`, a message through the m365 route, a message with recipients in two
 routes to confirm the split, and one deliberate wrong secret to confirm the
@@ -162,15 +162,15 @@ Unchanged, plus:
 - [x] `.msi` via WiX (`packaging/windows/smtprelayd.wxs`), ACLs
       `%ProgramData%\SMTPRelayd` to Administrators + the virtual service
       account only, no inherited access; registers but does not start the
-      service — **not yet built or installed on a real Windows machine**
+      service — **tested on real Windows machine, install/uninstall/start/stop all work**
 - [x] `.github/workflows/release.yml`: builds, tests, SBOM, all three package
       formats, SHA-256 checksums, build provenance attestation, `gh release
       create` — no third-party release action
 - [ ] Windows ACL verification at startup (`golang.org/x/sys/windows`,
       deferred from phase 1) — natural next step alongside the MSI's own
       ACL setup, not yet done
-- [ ] Real end-to-end test of install → configure → start → stop → uninstall
-      → upgrade on both platforms
+- [x] Real end-to-end test of install → configure → start → stop on Windows
+- [ ] Upgrade cycle test and Linux install → configure → start → stop cycle
 - [x] CI workflow that runs on every push/PR (`.github/workflows/ci.yml`):
       gofmt, vet, `go test -race`, the banned-import check and govulncheck,
       plus a cross-compile job for all three targets

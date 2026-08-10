@@ -51,6 +51,9 @@ var ErrTooLarge = errors.New("spool: message exceeds size limit")
 // ErrNotFound is returned for an unknown queue ID.
 var ErrNotFound = errors.New("spool: message not found")
 
+// ErrQuotaExceeded is returned when the spool has exceeded its maximum size.
+var ErrQuotaExceeded = errors.New("spool: quota exceeded")
+
 // Spool is a crash-safe queue backed by a directory. A message is only
 // visible once its metadata file has been renamed into place, so a crash
 // halfway through an enqueue leaves rubbish in tmp and nothing in the queue.
@@ -60,9 +63,11 @@ type Spool struct {
 	queue  string
 	failed string
 
-	mu     sync.Mutex
-	index  map[ID]*Meta
-	leased map[ID]bool
+	mu               sync.Mutex
+	index            map[ID]*Meta
+	leased           map[ID]bool
+	maxQuotaBytes    int64
+	warnQuotaPercent int
 }
 
 // Open prepares the spool directories and recovers any prior state.
@@ -210,6 +215,11 @@ func (s *Spool) Commit(st *Staged, env Envelope, lifetime time.Duration, prefix 
 	if st == nil || st.path == "" {
 		return "", errors.New("spool: commit of a discarded stage")
 	}
+
+	if s.maxQuotaBytes > 0 && s.spoolSize()+st.size > s.maxQuotaBytes {
+		return "", ErrQuotaExceeded
+	}
+
 	id, err := NewID()
 	if err != nil {
 		return "", err
@@ -431,6 +441,25 @@ func (s *Spool) Len() int {
 	return len(s.index)
 }
 
+// spoolSize returns the total size in bytes of all queued messages.
+func (s *Spool) spoolSize() int64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var total int64
+	for _, m := range s.index {
+		total += m.Envelope.Size
+	}
+	return total
+}
+
+// SetQuota configures the maximum spool size and warning threshold.
+func (s *Spool) SetQuota(maxGB int, warnPercent int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.maxQuotaBytes = int64(maxGB) * 1024 * 1024 * 1024
+	s.warnQuotaPercent = warnPercent
+}
+
 // syncDir flushes a directory entry so that a rename survives a power loss.
 func syncDir(path string) error {
 	d, err := os.Open(path)
@@ -440,8 +469,12 @@ func syncDir(path string) error {
 	defer d.Close()
 	// Directory fsync is not supported on Windows and fails with EACCES or
 	// similar there; that is not an error worth aborting a delivery for.
-	if err := d.Sync(); err != nil && !errors.Is(err, os.ErrInvalid) {
-		return nil
+	// On other platforms, fsync errors should be reported.
+	if err := d.Sync(); err != nil {
+		if errors.Is(err, os.ErrInvalid) {
+			return nil
+		}
+		return err
 	}
 	return nil
 }

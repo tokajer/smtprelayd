@@ -107,7 +107,7 @@ func New(o Options) (*TokenSource, error) {
 				return errors.New("authms365: refusing to follow a redirect from the token endpoint")
 			},
 			Transport: &http.Transport{
-				Proxy:             http.ProxyFromEnvironment,
+				Proxy:             nil,
 				TLSClientConfig:   &tls.Config{MinVersion: tls.VersionTLS12},
 				ForceAttemptHTTP2: true,
 			},

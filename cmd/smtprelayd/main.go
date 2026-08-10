@@ -156,6 +156,7 @@ func serve(ctx context.Context, configPath string, console bool) error {
 	if err != nil {
 		return err
 	}
+	sp.SetQuota(cfg.Limits.SpoolMaxGB, cfg.Limits.SpoolWarnPercent)
 	log.Info("starting", "version", version, "config", cfg.Path,
 		"data_dir", cfg.Service.DataDir, "queued", sp.Len())
 

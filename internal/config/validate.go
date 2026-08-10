@@ -382,6 +382,12 @@ func (c *Config) Validate() error {
 	if c.Limits.MaxMessageMB <= 0 {
 		add("limits.max_message_mb must be positive")
 	}
+	if c.Limits.MaxHeaders <= 0 {
+		add("limits.max_headers must be positive")
+	}
+	if c.Limits.MaxHeaderBytes <= 0 {
+		add("limits.max_header_bytes must be positive")
+	}
 	for _, cl := range c.Clients {
 		if cl.MaxMessageMB > c.Limits.MaxMessageMB {
 			add("client %q: max_message_mb %d exceeds limits.max_message_mb %d",
