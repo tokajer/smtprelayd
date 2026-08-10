@@ -405,10 +405,28 @@ func (s *Spool) Remove(id ID) error {
 	if err := os.Remove(s.metaPath(id)); err != nil && !os.IsNotExist(err) {
 		return err
 	}
-	if err := os.Remove(s.dataPath(id)); err != nil && !os.IsNotExist(err) {
+	if err := removeRetry(s.dataPath(id)); err != nil && !os.IsNotExist(err) {
 		return err
 	}
 	return syncDir(s.queue)
+}
+
+// removeRetry unlinks a path, retrying briefly. On Windows an on-access
+// scanner or a backup agent can hold a handle for a few milliseconds after
+// the file was last written, which surfaces as a sharing violation rather
+// than as a missing file. Retrying costs nothing on Unix, where the first
+// attempt succeeds. A body left behind after the metadata was removed is not
+// redelivered -- Open() discards bodies without metadata at startup -- so
+// this only avoids the disk staying occupied until the next restart.
+func removeRetry(path string) error {
+	var err error
+	for i := 0; i < 5; i++ {
+		if err = os.Remove(path); err == nil || os.IsNotExist(err) {
+			return err
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	return err
 }
 
 // Fail moves a permanently undeliverable message aside. Phase 5 turns these

@@ -89,12 +89,19 @@ attacker-influenced values and writes them into a message.
 
 ## 5. Transport security
 
-- Outbound: certificate verification is **mandatory**. There is no
-  configuration option to disable it — no `insecure_skip_verify` exists in the
-  schema, because such a flag is invariably found switched on in production.
-  Optional pinning to an expected CA or certificate fingerprint per route.
+- Outbound: wherever TLS is negotiated, certificate verification is
+  **mandatory**. There is no configuration option to disable it — no
+  `insecure_skip_verify` exists in the schema, because such a flag is
+  invariably found switched on in production. Optional pinning to an expected
+  CA or certificate fingerprint per route.
 - Outbound minimum TLS 1.2. If a smarthost offers only STARTTLS and then fails
   the handshake, the message is deferred, never sent in the clear.
+- A route may be declared cleartext outright with `tls = "none"`, for legacy
+  internal MTAs on a segment the operator controls. This is a distinct setting,
+  never a fallback: no failed handshake and no missing STARTTLS advertisement
+  can reach it. Since such a session protects nothing, the loader accepts only
+  `auth = "none"` on it, and the delivery path refuses to send credentials over
+  an unencrypted connection even if a Route reached it some other way.
 - Inbound: per-listener minimum version. TLS 1.0 remains possible on the
   internal port 25 listener for legacy devices, but only there, only from
   allowlisted networks, and it is reported at startup as a deliberate

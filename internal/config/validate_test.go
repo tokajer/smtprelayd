@@ -135,3 +135,37 @@ func TestOutboundTLSCannotBeWeakened(t *testing.T) {
 		t.Fatal("an outbound TLS minimum below 1.2 was accepted")
 	}
 }
+
+func TestCleartextRouteIsAccepted(t *testing.T) {
+	body := strings.Replace(baseConfig, `auth = "none"`, "auth = \"none\"\ntls = \"none\"", 1)
+	cfg, err := Load(write(t, body))
+	if err != nil {
+		t.Fatalf("tls none was rejected: %v", err)
+	}
+	if cfg.Routes[0].TLS != "none" {
+		t.Fatalf("tls none was rewritten to %q", cfg.Routes[0].TLS)
+	}
+	if cfg.Routes[0].MinTLS != "" {
+		t.Fatalf("min_tls defaulted to %q on a route with no handshake", cfg.Routes[0].MinTLS)
+	}
+}
+
+func TestCleartextRouteRefusesAuth(t *testing.T) {
+	for _, auth := range []string{"plain", "login", "xoauth2"} {
+		body := strings.Replace(baseConfig, `auth = "none"`,
+			fmt.Sprintf("auth = %q\ntls = \"none\"", auth), 1)
+		if _, err := Load(write(t, body)); err == nil {
+			t.Fatalf("auth %s was accepted on a cleartext route", auth)
+		}
+	}
+}
+
+func TestCleartextRouteRefusesHandshakeSettings(t *testing.T) {
+	for _, key := range []string{`min_tls = "1.2"`, `ca_pin = "ab"`} {
+		body := strings.Replace(baseConfig, `auth = "none"`,
+			"auth = \"none\"\ntls = \"none\"\n"+key, 1)
+		if _, err := Load(write(t, body)); err == nil {
+			t.Fatalf("%s was silently ignored on a cleartext route", key)
+		}
+	}
+}

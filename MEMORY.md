@@ -235,7 +235,11 @@ The load-bearing principles:
   There is no default-trusted network and no localhost exemption.
 - **No dangerous option exists.** Outbound certificate verification cannot be
   disabled, because such a switch always ends up enabled in production. The
-  schema simply has no field for it.
+  schema simply has no field for it. Dropping TLS on a route entirely is
+  possible (`tls = "none"`, for legacy internal MTAs), but it is not the same
+  switch: it declares an unprotected transport instead of pretending to verify
+  one, it is never reached by fallback from a failed handshake, and it forces
+  `auth = "none"` so no credential is ever exposed by it.
 - **Secrets never touch disk in plaintext.** Environment references or a
   restricted file only. API tokens are stored as SHA-256 digests; the plaintext
   is printed once by `smtprelayd token new` and never persisted. This supersedes

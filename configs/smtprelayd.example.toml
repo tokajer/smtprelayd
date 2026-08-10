@@ -135,6 +135,21 @@ sources = ["10.10.5.128/25"]
   username = "relay@example.at"
   password = "${SMTPRELAYD_PARTNER_PASSWORD}"
 
+# Legacy internal MTA that offers no TLS at all. tls = "none" sends the whole
+# session, headers and body included, in the clear and is only defensible when
+# the path to the smarthost is protected at the network layer. Because nothing
+# on that connection is confidential, the loader refuses auth other than
+# "none", and min_tls and ca_pin must be omitted rather than set and ignored.
+# A route set to starttls that cannot negotiate it still defers instead of
+# downgrading; cleartext is never reached by fallback, only by this setting.
+[[route]]
+name    = "legacy-internal"
+host    = "10.40.0.5"
+port    = 25
+tls     = "none"
+auth    = "none"
+domains = ["intranet.example"]
+
 # ---------------------------------------------------------------------------
 # Queue
 # ---------------------------------------------------------------------------

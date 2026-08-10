@@ -13,7 +13,8 @@ import (
 )
 
 func TestEnqueueClaimRemove(t *testing.T) {
-	s, err := Open(t.TempDir())
+	dir := t.TempDir()
+	s, err := Open(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -44,6 +45,13 @@ func TestEnqueueClaimRemove(t *testing.T) {
 	}
 	if s.Len() != 0 {
 		t.Fatalf("queue length %d after removal", s.Len())
+	}
+	// The index dropping the entry is not enough: a body left on disk would
+	// occupy the spool quota until the next restart cleaned it up.
+	for _, ext := range []string{".json", ".eml"} {
+		if _, err := os.Stat(filepath.Join(dir, "spool", "queue", id.String()+ext)); !os.IsNotExist(err) {
+			t.Fatalf("%s survived Remove: %v", ext, err)
+		}
 	}
 }
 

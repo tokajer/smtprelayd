@@ -225,14 +225,35 @@ func (c *Config) Validate() error {
 		}
 		switch r.TLS {
 		case "starttls", "implicit":
+		case "none":
+			// Cleartext delivery exists for smarthosts on a segment the
+			// operator controls end to end. It is never a fallback: a route
+			// asking for TLS that cannot negotiate it defers, it does not
+			// downgrade. Settings that only describe a handshake are an
+			// error here rather than silently ignored, because a route
+			// carrying min_tls reads as if it were still encrypted.
+			if r.MinTLS != "" {
+				add("%s: min_tls is meaningless with tls none, remove it", where)
+			}
+			if r.CAPin != "" {
+				add("%s: ca_pin is meaningless with tls none, remove it", where)
+			}
 		case "":
 			c.Routes[i].TLS = "starttls"
 		default:
-			// Outbound cleartext is not offered. A smarthost that cannot do
-			// TLS is a deployment problem, not a configuration option.
-			add("%s: tls must be starttls or implicit", where)
+			add("%s: tls must be none, starttls or implicit", where)
 		}
-		if r.MinTLS == "" {
+		if c.Routes[i].TLS == "none" {
+			// Credentials are never put on an unprotected wire. A bearer
+			// token read off it grants mailbox access far beyond this relay,
+			// and PLAIN hands over the password outright; net/smtp refuses
+			// PlainAuth on an unencrypted connection anyway, so accepting it
+			// here would only turn a startup error into a delivery failure.
+			if r.Auth != "" && r.Auth != "none" {
+				add("%s: auth %s requires tls starttls or implicit; "+
+					"tls none supports auth none only", where, r.Auth)
+			}
+		} else if r.MinTLS == "" {
 			c.Routes[i].MinTLS = "1.2"
 		} else if v, err := ParseTLSVersion(r.MinTLS); err != nil {
 			add("%s: min_tls: %v", where, err)
