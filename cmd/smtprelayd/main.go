@@ -24,6 +24,7 @@ import (
 	"github.com/tokajer/smtprelayd/internal/logging"
 	"github.com/tokajer/smtprelayd/internal/selftest"
 	"github.com/tokajer/smtprelayd/internal/spool"
+	"github.com/tokajer/smtprelayd/internal/store"
 )
 
 // version is injected at build time via -ldflags.
@@ -164,10 +165,17 @@ func serve(ctx context.Context, configPath string, console bool) error {
 		return err
 	}
 	sp.SetQuota(cfg.Limits.SpoolMaxGB, cfg.Limits.SpoolWarnPercent)
+
+	st, err := store.Open(cfg.Service.DataDir, log, cfg.History.RetentionDays, cfg.History.RetainSubjects)
+	if err != nil {
+		return err
+	}
+	defer st.Close()
+
 	log.Info("starting", "version", version, "config", cfg.Path,
 		"data_dir", cfg.Service.DataDir, "queued", sp.Len())
 
-	set, err := listener.New(cfg, sp, log)
+	set, err := listener.New(cfg, sp, log, st)
 	if err != nil {
 		return err
 	}
@@ -175,7 +183,7 @@ func serve(ctx context.Context, configPath string, console bool) error {
 	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	dm, err := delivery.New(cfg, sp, log)
+	dm, err := delivery.New(cfg, sp, log, st)
 	if err != nil {
 		return err
 	}

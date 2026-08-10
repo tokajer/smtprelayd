@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/textproto"
 	"sync"
 	"time"
 
@@ -16,6 +17,7 @@ import (
 	"github.com/tokajer/smtprelayd/internal/config"
 	"github.com/tokajer/smtprelayd/internal/delivery/smarthost"
 	"github.com/tokajer/smtprelayd/internal/spool"
+	"github.com/tokajer/smtprelayd/internal/store"
 )
 
 // pollInterval bounds how long a freshly queued message waits before a worker
@@ -32,6 +34,7 @@ const secretExpiryWarning = 30 * 24 * time.Hour
 type Manager struct {
 	cfg   *config.Config
 	spool *spool.Spool
+	store *store.Store
 	log   *slog.Logger
 
 	// routes holds the per-route concurrency budget, limits the per-route
@@ -45,9 +48,9 @@ type Manager struct {
 
 // New builds the delivery manager. Each route gets its own concurrency budget
 // so that one slow smarthost cannot starve the others.
-func New(cfg *config.Config, sp *spool.Spool, log *slog.Logger) (*Manager, error) {
+func New(cfg *config.Config, sp *spool.Spool, log *slog.Logger, st *store.Store) (*Manager, error) {
 	m := &Manager{
-		cfg: cfg, spool: sp, log: log.With("component", "delivery"),
+		cfg: cfg, spool: sp, store: st, log: log.With("component", "delivery"),
 		routes: map[string]chan struct{}{},
 		limits: map[string]int{},
 		tokens: map[string]smarthost.TokenSource{},
@@ -187,16 +190,21 @@ func (m *Manager) attempt(ctx context.Context, meta *spool.Meta) {
 	case err == nil:
 		log.Info("delivered", "attempts", meta.Attempts, "duration_ms", elapsed.Milliseconds(),
 			"recipients", len(meta.Envelope.To))
+		_ = m.store.RecordAttempt(meta.ID.String(), meta.Attempts, 0, "", "delivered", nil)
 		if err := m.spool.Remove(meta.ID); err != nil {
 			log.Error("cannot remove delivered message", "error", err)
 		}
 
 	case isPermanent(err):
 		log.Warn("permanent delivery failure", "attempts", meta.Attempts, "error", err.Error())
+		code, resp := extractSMTPError(err)
+		_ = m.store.RecordAttempt(meta.ID.String(), meta.Attempts, code, resp, "permanent", nil)
 		m.fail(meta, err.Error())
 
 	case time.Now().After(meta.Expires):
 		log.Warn("message expired in queue", "attempts", meta.Attempts, "error", err.Error())
+		code, resp := extractSMTPError(err)
+		_ = m.store.RecordAttempt(meta.ID.String(), meta.Attempts, code, resp, "expired", nil)
 		m.fail(meta, "expired in queue: "+err.Error())
 
 	default:
@@ -208,6 +216,8 @@ func (m *Manager) attempt(ctx context.Context, meta *spool.Meta) {
 		}
 		log.Info("delivery deferred", "attempts", meta.Attempts,
 			"retry_in_s", int(delay.Seconds()), "error", err.Error())
+		code, resp := extractSMTPError(err)
+		_ = m.store.RecordAttempt(meta.ID.String(), meta.Attempts, code, resp, "temporary", &meta.NextAttempt)
 		if err := m.spool.Release(meta); err != nil {
 			log.Error("cannot update queued message", "error", err)
 		}
@@ -252,4 +262,14 @@ func (m *Manager) fail(meta *spool.Meta, reason string) {
 func isPermanent(err error) bool {
 	var pe *smarthost.PermError
 	return errors.As(err, &pe)
+}
+
+// extractSMTPError tries to extract the SMTP response code and text from an error.
+// Returns (0, "") if no SMTP error is found.
+func extractSMTPError(err error) (int, string) {
+	var te *textproto.Error
+	if errors.As(err, &te) {
+		return te.Code, te.Msg
+	}
+	return 0, err.Error()
 }

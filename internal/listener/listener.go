@@ -18,6 +18,7 @@ import (
 	"github.com/tokajer/smtprelayd/internal/rewrite"
 	"github.com/tokajer/smtprelayd/internal/router"
 	"github.com/tokajer/smtprelayd/internal/spool"
+	"github.com/tokajer/smtprelayd/internal/store"
 )
 
 // Server is one configured inbound listener.
@@ -26,6 +27,7 @@ type Server struct {
 	lc    config.Listener
 	log   *slog.Logger
 	spool *spool.Spool
+	store *store.Store
 
 	tlsConf *tls.Config
 	match   *Matcher
@@ -47,7 +49,7 @@ type Set struct {
 // New builds all listeners from the configuration. The TLS material and the
 // client matcher are shared, so a certificate problem fails before any socket
 // is bound.
-func New(cfg *config.Config, sp *spool.Spool, log *slog.Logger) (*Set, error) {
+func New(cfg *config.Config, sp *spool.Spool, log *slog.Logger, st *store.Store) (*Set, error) {
 	match, err := NewMatcher(cfg.Clients)
 	if err != nil {
 		return nil, err
@@ -82,7 +84,7 @@ func New(cfg *config.Config, sp *spool.Spool, log *slog.Logger) (*Set, error) {
 	set := &Set{}
 	for _, lc := range cfg.Listeners {
 		s := &Server{
-			cfg: cfg, lc: lc, spool: sp,
+			cfg: cfg, lc: lc, spool: sp, store: st,
 			log:   log.With("listener", lc.Name),
 			match: match, router: rt, rules: rules,
 			rate: rate, conns: conns, sem: sem,

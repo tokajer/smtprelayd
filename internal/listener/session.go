@@ -7,6 +7,7 @@ import (
 	"bufio"
 	"context"
 	"crypto/tls"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -411,6 +412,21 @@ func (s *session) doData() bool {
 		}
 		committed = append(committed, id)
 		ids = append(ids, id.String())
+
+		// Record message in history store. Subject is stored only if retain_subjects is enabled.
+		recipientsJSON, _ := json.Marshal(g.Recipients)
+		subject := ""
+		if s.srv.cfg.History.RetainSubjects {
+			// Subject extraction from headers is deferred; for now store empty string.
+			// Phase 5 can implement header parsing if needed.
+		}
+		_ = s.srv.store.RecordMessage(
+			id.String(), s.client.Name, g.Route,
+			res.EnvelopeFrom, res.OriginalFrom, string(recipientsJSON),
+			subject, s.srv.lc.Name, s.remote.String(),
+			env.Received, env.Received.Add(lifetime), s.isTLS,
+		)
+
 		s.log.Info("message accepted",
 			"queue_id", id.String(), "from", res.EnvelopeFrom,
 			"original_from", res.OriginalFrom, "rewritten", res.Rewritten,

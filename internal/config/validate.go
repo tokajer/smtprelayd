@@ -397,6 +397,25 @@ func (c *Config) Validate() error {
 		}
 	}
 
+	if c.History.RetentionDays <= 0 {
+		add("history.retention_days must be positive")
+	}
+
+	if len(c.Bounce.Notify) > 0 {
+		if c.Bounce.DigestMinutes <= 0 {
+			add("bounce.digest_minutes must be positive when notifications are enabled")
+		}
+		if c.Bounce.MaxPerHour <= 0 {
+			add("bounce.max_per_hour must be positive when notifications are enabled")
+		}
+		if c.Bounce.NotifyRoute == "" {
+			add("bounce.notify_route is required when notifications are enabled")
+		}
+		if !routeNames[c.Bounce.NotifyRoute] {
+			add("bounce.notify_route %q references an unknown route", c.Bounce.NotifyRoute)
+		}
+	}
+
 	if c.Limits.MaxHops <= 0 || c.Limits.MaxConnections <= 0 {
 		add("limits.max_hops and limits.max_connections must be positive")
 	}

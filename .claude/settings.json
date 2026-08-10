@@ -10,7 +10,12 @@
       "Bash(gofmt -w ./internal ./cmd)",
       "Bash(gofmt -w /home/tokajer/Dokumente/GitHub/smtprelayd/internal/logging/logging.go)",
       "Bash(git add *)",
-      "Bash(git commit -m ' *)"
+      "Bash(git commit -m ' *)",
+      "Bash(awk '/^## 7\\\\. Dashboard and API/,/^## 8\\\\./' /home/tokajer/Dokumente/GitHub/smtprelayd/docs/SECURITY.md)",
+      "Bash(awk '/^## 8\\\\. Dashboard and API injection/,/^## 9\\\\./' /home/tokajer/Dokumente/GitHub/smtprelayd/docs/EXPLOIT-SURFACE.md)",
+      "Bash(gofmt -l internal/store/ internal/delivery/delivery.go cmd/smtprelayd/main.go internal/config/validate.go)",
+      "Bash(gofmt -w internal/store/query.go)",
+      "Bash(gofmt -l ./internal/listener/... ./cmd/smtprelayd/main.go)"
     ]
   }
 }

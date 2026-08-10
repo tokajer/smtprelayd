@@ -8,9 +8,13 @@ Keep it short — this file is pasted into every new chat.
 **Phase**: 3 — client policy, sender rewriting and recipient routing
 implemented; first compile done, clean. Packaging and the Windows service
 wrapper (normally phase 5) were pulled forward and validated. MSI installs and
-uninstalls; `install`/`uninstall`/`start`/`stop` work on Windows.
-**Last session**: 2026-08-10 (fourth session) — Windows validation of
-`install`/`uninstall`/`start`/`stop` and MSI complete.
+uninstalls; `install`/`uninstall`/`start`/`stop` work on Windows. Log rotation
+and Windows ACL verification at startup are complete.
+**Last session**: 2026-08-10 (fifth session) — All seven known security gaps
+from 2026-08-08 security review closed (disk quota, config-dir check, secret
+ownership, syncDir errors, header limits, SIZE parameter, proxy environment).
+Log rotation via lumberjack implemented. Windows ACL verification at startup
+implemented and tested.
 **Previous session**: 2026-08-08 (third session) — full security review of the
 tree, then four fixes. No backdoor or hidden behaviour was found: the only two
 outbound destinations are the fixed token authority and the configured
@@ -52,14 +56,13 @@ platforms, gates on vet/gofmt/test/govulncheck, produces an SBOM
 publishes via `gh release create` with `actions/attest-build-provenance` —
 no third-party release action, per the existing decision below. Added
 `.gitignore` (`/bin/`, `/dist/`, WiX build output) — none existed before.
-**Next action, phase 5**: Windows ACL verification at startup — the deferred
-phase 1 item now fits naturally alongside the validated MSI since both touch
-`golang.org/x/sys/windows`. Can run in parallel with phase 3/4 end-to-end.
 **Next action, phase 3/4**: end to end against the real tenant: `smtprelayd
-check`, a message through the m365 route, a message with recipients in two
-routes to confirm the split, and one deliberate wrong secret to confirm the
-queue defers. Needs tenant, mailbox and sending-domain values (see Open
-questions).
+check` ✅ works; now need: a message through the m365 route, a message with
+recipients in two routes to confirm the split, and one deliberate wrong secret
+to confirm the queue defers. Needs tenant, mailbox and sending-domain values
+(see Open questions).
+**Next action, phase 5**: Linux install/configure/start/stop cycle test on
+Debian/RPM; upgrade cycle test on both platforms.
 
 ## Phases
 
@@ -138,16 +141,23 @@ questions).
       phase 2 remain separate and both apply; no decision needed, recorded so
       it is not rediscovered
 
-### Phase 4 — Observability ⬜
+### Phase 4 — Observability ⬜ (planned, see `docs/PHASE4-PLAN.md`)
 
-Unchanged.
+Planned in five sub-phases (4a–4e), with implementation order determined by
+dependencies. Detailed plan in `docs/PHASE4-PLAN.md` (2026-08-10).
+- 4a: `internal/store` (SQLite message and attempt history)
+- 4b: `internal/metrics` (Prometheus `/metrics` endpoint)
+- 4c: `internal/web` (dashboard, read-only)
+- 4d: `internal/api` (JSON API, admin actions, audit log)
+- 4e: `internal/bounce` (notification batching and volume capping)
 
 ### Phase 5 — Productionisation ⬜
 
 Unchanged, plus:
 
-- [ ] Log rotation (`[log] max_size_mb` and friends are parsed but the logger
-      only appends; rotation needs a dependency decision)
+- [x] Log rotation: lumberjack v2 handles rotation when logs exceed
+      max_size_mb, with max_backups retention and max_age_days enforcement;
+      if MaxSizeMB is 0, rotation is disabled and logs append
 - [x] Windows SCM integration: `install`/`uninstall`/`start`/`stop`, virtual
       account `NT SERVICE\smtprelayd`, automatic-start-type with restart on
       failure, registered via `kardianos/service` (Windows-only import, see
@@ -166,9 +176,10 @@ Unchanged, plus:
 - [x] `.github/workflows/release.yml`: builds, tests, SBOM, all three package
       formats, SHA-256 checksums, build provenance attestation, `gh release
       create` — no third-party release action
-- [ ] Windows ACL verification at startup (`golang.org/x/sys/windows`,
-      deferred from phase 1) — natural next step alongside the MSI's own
-      ACL setup, not yet done
+- [x] Windows ACL verification at startup: CheckDataDirACL verifies that the
+      data directory has the explicit DACL set by the MSI (Administrators +
+      NT SERVICE\smtprelayd, protected from inheritance); whitelisted exception
+      for unsafe.Pointer usage in trust_windows.go for LocalFree API call
 - [x] Real end-to-end test of install → configure → start → stop on Windows
 - [ ] Upgrade cycle test and Linux install → configure → start → stop cycle
 - [x] CI workflow that runs on every push/PR (`.github/workflows/ci.yml`):
@@ -186,36 +197,24 @@ Unchanged, plus:
       trailing comment, `govulncheck` and `cyclonedx-gomod` pinned to versions
       instead of `@latest` (`nfpm` already was)
 
-## Known gaps found in the 2026-08-08 security review, not yet fixed
+## Known gaps from the 2026-08-08 security review
 
-Ordered by how much they matter, all judged lower priority than the four that
-were fixed. None is a confidentiality or relay-authorisation defect.
+All seven security gaps (1-7 below) have been fixed as of 2026-08-10 session.
+The selftest exception (8) remains deliberate and is not fixed.
 
-- `limits.spool_max_gb` and `limits.spool_warn_percent` are parsed, defaulted
-  and never read: there is no disk quota in the spool at all. A documented
-  limit that does nothing is worse than an absent one. Needs a decision on
-  whether enforcement is a reject at MAIL FROM or a watermark warning.
-- `config.CheckConfigFile` checks the configuration file but not the directory
-  holding it, while the data and binary directories are both checked. A
-  group-writable `/etc/smtprelayd` lets the file be replaced by unlink and
-  create, which the file's own mode check cannot see.
-- `checkSecretFile` verifies mode and symlink status but not ownership, unlike
-  `checkTrusted`.
-- `spool.syncDir` returns nil on every path, so a failed directory fsync is
-  silently ignored on Linux too. The durability sequence in `MEMORY.md` §4 is
-  therefore unverified rather than wrong.
-- `limits.max_headers` and `limits.max_header_bytes` are not validated as
-  positive, unlike every other limit; a value of 0 rejects every message.
-- `MAIL FROM ... SIZE=` is parsed into `session.declared` and never read; the
-  real ceiling is enforced by `spool.Stage`.
-- The token client uses `http.ProxyFromEnvironment`, which sits oddly beside
-  the "authority is a constant so the secret cannot be sent elsewhere"
-  decision. TLS keeps the body confidential, so this is metadata only, but the
-  systemd unit does not clear the proxy variables either.
-- The selftest still uses `InsecureSkipVerify` plus an exact certificate pin
-  and so trips gosec G123. That is the deliberate exception already recorded in
-  the decision log; it dials fresh with no session cache, so resumption cannot
-  occur.
+1. ✅ `limits.spool_max_gb` enforcement — now rejects messages that would
+   exceed quota; SetQuota() called at startup.
+2. ✅ `config.CheckConfigFile` now validates directory holding the file,
+   preventing unlink-and-create replacement in group-writable /etc/smtprelayd.
+3. ✅ `checkSecretFile` now verifies ownership like `checkTrusted`.
+4. ✅ `spool.syncDir` now propagates fsync errors on Linux; ErrInvalid
+   (Windows) still ignored as documented.
+5. ✅ `limits.max_headers` and `limits.max_header_bytes` now validated as > 0.
+6. ✅ `MAIL FROM SIZE` is now validated early in DATA phase if present.
+7. ✅ Token client proxy environment removed; no metadata leakage through proxies.
+8. The selftest still uses `InsecureSkipVerify` plus certificate pin and trips
+   gosec G123. This is the deliberate exception recorded in the decision log;
+   it dials fresh with no session cache so resumption cannot occur. Not fixed.
 
 ## Open questions
 
