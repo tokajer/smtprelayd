@@ -54,6 +54,7 @@ type TokenSource struct {
 
 	mu         sync.Mutex
 	token      string
+	issued     time.Time
 	expires    time.Time
 	lastErr    error
 	retryAfter time.Time
@@ -143,7 +144,20 @@ func (s *TokenSource) Token(ctx context.Context) (string, error) {
 		return "", err
 	}
 	s.token, s.expires, s.lastErr = token, expires, nil
+	s.issued = now
 	return token, nil
+}
+
+// TokenAge reports how long the currently cached token has been held, and
+// whether one is cached at all. It is read by the metrics endpoint only;
+// the token value itself never leaves this package.
+func (s *TokenSource) TokenAge() (time.Duration, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.token == "" {
+		return 0, false
+	}
+	return time.Since(s.issued), true
 }
 
 func (s *TokenSource) fetch(ctx context.Context) (string, time.Time, error) {

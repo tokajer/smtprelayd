@@ -34,6 +34,16 @@ type PermError struct{ Err error }
 func (e *PermError) Error() string { return e.Err.Error() }
 func (e *PermError) Unwrap() error { return e.Err }
 
+// AuthError marks a failure that is a property of the relay's own
+// credentials — a rejected secret, an expired token, a rejected XOAUTH2
+// challenge — rather than of the message. It is retried exactly like a
+// TempError; the distinct type only lets a caller count it separately for
+// the authentication-failure metric.
+type AuthError struct{ Err error }
+
+func (e *AuthError) Error() string { return e.Err.Error() }
+func (e *AuthError) Unwrap() error { return e.Err }
+
 func temp(format string, a ...any) error { return &TempError{Err: fmt.Errorf(format, a...)} }
 func perm(format string, a ...any) error { return &PermError{Err: fmt.Errorf(format, a...)} }
 
@@ -140,9 +150,9 @@ func Deliver(ctx context.Context, route config.Route, msg Message, timeout time.
 			// permanent would empty the whole queue into spool/failed the
 			// moment a client secret is rotated or a mailbox is disabled.
 			if x, ok := a.(*xoauth2Auth); ok && x.challenge != "" {
-				return temp("route %s: XOAUTH2 rejected (%s): %w", route.Name, x.challenge, err)
+				return &AuthError{Err: fmt.Errorf("route %s: XOAUTH2 rejected (%s): %w", route.Name, x.challenge, err)}
 			}
-			return temp("route %s: authentication failed: %w", route.Name, err)
+			return &AuthError{Err: fmt.Errorf("route %s: authentication failed: %w", route.Name, err)}
 		}
 	}
 
@@ -189,7 +199,7 @@ func authFor(ctx context.Context, route config.Route, tokens TokenSource) (smtp.
 		if err != nil {
 			// A missing token is an outage or a rotated secret, both of which
 			// a later attempt can still succeed on.
-			return nil, temp("route %s: %w", route.Name, err)
+			return nil, &AuthError{Err: fmt.Errorf("route %s: %w", route.Name, err)}
 		}
 		return &xoauth2Auth{user: route.OAuth2.Mailbox, token: token, host: route.Host}, nil
 	default:

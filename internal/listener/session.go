@@ -413,12 +413,13 @@ func (s *session) doData() bool {
 		committed = append(committed, id)
 		ids = append(ids, id.String())
 
-		// Record message in history store. Subject is stored only if retain_subjects is enabled.
+		// Record message in history store. Subject is stored only if
+		// retain_subjects is enabled; store.RecordMessage redacts it again
+		// regardless, this just avoids parsing the header block for nothing.
 		recipientsJSON, _ := json.Marshal(g.Recipients)
 		subject := ""
 		if s.srv.cfg.History.RetainSubjects {
-			// Subject extraction from headers is deferred; for now store empty string.
-			// Phase 5 can implement header parsing if needed.
+			subject = sanitizeSubject(rewrite.HeaderValue(res.Headers, "Subject"))
 		}
 		_ = s.srv.store.RecordMessage(
 			id.String(), s.client.Name, g.Route,
@@ -436,6 +437,29 @@ func (s *session) doData() bool {
 	s.reply(250, "2.0.0 OK queued as "+strings.Join(ids, " "))
 	s.resetTransaction()
 	return true
+}
+
+// maxStoredSubject bounds the subject text kept in the history store. It is
+// display metadata, not a protocol value, so this is generous headroom
+// rather than a protocol limit.
+const maxStoredSubject = 500
+
+// sanitizeSubject strips control characters from a header value before it
+// enters the history store. This is metadata for display, not a header that
+// gets written back onto the wire, so stripping is the right response to a
+// stray control character rather than rejecting the whole message the way
+// the rewrite package does for From.
+func sanitizeSubject(s string) string {
+	s = strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f {
+			return -1
+		}
+		return r
+	}, s)
+	if len(s) > maxStoredSubject {
+		s = s[:maxStoredSubject]
+	}
+	return s
 }
 
 func (s *session) replyDataError(err error) {

@@ -175,6 +175,27 @@ func TestNewRefusesAnUnsafeTenant(t *testing.T) {
 	}
 }
 
+func TestTokenAgeReflectsCachedToken(t *testing.T) {
+	ts := newTestSource(t, func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(w, tokenResponse("abc.def", 3600))
+	})
+
+	if _, ok := ts.TokenAge(); ok {
+		t.Fatal("TokenAge reported a token before one was ever fetched")
+	}
+
+	if _, err := ts.Token(context.Background()); err != nil {
+		t.Fatalf("Token: %v", err)
+	}
+	age, ok := ts.TokenAge()
+	if !ok {
+		t.Fatal("TokenAge reported no token right after a successful fetch")
+	}
+	if age < 0 || age > time.Second {
+		t.Fatalf("age = %v, want close to 0", age)
+	}
+}
+
 func TestContextCancellationIsHonoured(t *testing.T) {
 	ts := newTestSource(t, func(w http.ResponseWriter, _ *http.Request) {
 		time.Sleep(200 * time.Millisecond)

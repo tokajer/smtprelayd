@@ -33,6 +33,17 @@ type Envelope struct {
 	// OriginalFrom is the envelope sender the client declared, present only
 	// when rewriting replaced it. A bounce record needs both values.
 	OriginalFrom string `json:"original_from,omitempty"`
+
+	// Notification marks a message the bounce notifier composed itself
+	// rather than one accepted from a client. It never goes through the
+	// listener, so it is never subject to sender rewriting by construction;
+	// this flag exists only so the delivery manager can recognise one on a
+	// later attempt (including after a restart, since it is persisted here)
+	// and refuse to let its own failure enqueue another notification, which
+	// is how a notification loop would start. Absent on every message a
+	// listener ever wrote, so decoding an older meta file defaults it to
+	// false.
+	Notification bool `json:"notification,omitempty"`
 }
 
 // Meta is the persisted state of a queued message.
@@ -457,6 +468,142 @@ func (s *Spool) Len() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return len(s.index)
+}
+
+// RouteDepth is the queue depth of one route, split by whether a message is
+// claimable now or waiting for its next attempt.
+type RouteDepth struct {
+	Queued       int
+	Deferred     int
+	OldestQueued time.Time // zero if Queued == 0; oldest Received among claimable messages
+}
+
+// QueueDepth reports queue depth per route, read by the metrics endpoint and
+// the API's queue view on every request. A message counts as Deferred when
+// its next attempt lies in the future — a retry backoff or a rate limit
+// hold — and as Queued otherwise, including one currently leased to a
+// worker: it is neither waiting nor sitting idle, but it has not left the
+// queue either.
+func (s *Spool) QueueDepth(now time.Time) map[string]RouteDepth {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := map[string]RouteDepth{}
+	for id, m := range s.index {
+		d := out[m.Envelope.Route]
+		if !s.leased[id] && m.NextAttempt.After(now) {
+			d.Deferred++
+		} else {
+			d.Queued++
+			if d.OldestQueued.IsZero() || m.Envelope.Received.Before(d.OldestQueued) {
+				d.OldestQueued = m.Envelope.Received
+			}
+		}
+		out[m.Envelope.Route] = d
+	}
+	return out
+}
+
+// ErrBusy is returned by Requeue and Discard for a message currently leased
+// to a delivery worker. Acting on it anyway would race the worker's own
+// Release or Remove call, which could resurrect a message Discard just
+// deleted; the caller is expected to retry shortly.
+var ErrBusy = errors.New("spool: message is currently being delivered")
+
+// Requeue moves a message back into the live queue for immediate retry,
+// resetting its attempt counter so its retry backoff starts over. It works
+// whether the message is currently active (queued or deferred) or was moved
+// aside to spool/failed after a permanent failure or expiry.
+func (s *Spool) Requeue(id ID) error {
+	if !id.valid() {
+		return ErrInvalidID
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.leased[id] {
+		return ErrBusy
+	}
+
+	if m, ok := s.index[id]; ok {
+		reset := *m
+		reset.Attempts, reset.NextAttempt, reset.LastError = 0, time.Now(), ""
+		if err := s.writeMeta(&reset); err != nil {
+			return err
+		}
+		s.index[id] = &reset
+		return nil
+	}
+
+	failedMeta := filepath.Join(s.failed, id.String()+".json")
+	b, err := os.ReadFile(failedMeta)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return ErrNotFound
+		}
+		return err
+	}
+	var m Meta
+	if err := json.Unmarshal(b, &m); err != nil {
+		return err
+	}
+	if m.ID != id {
+		return fmt.Errorf("spool: metadata for %s claims id %s", id, m.ID)
+	}
+	m.Attempts, m.NextAttempt, m.LastError = 0, time.Now(), ""
+
+	if err := os.Rename(filepath.Join(s.failed, id.String()+".eml"), s.dataPath(id)); err != nil {
+		return err
+	}
+	if err := s.writeMeta(&m); err != nil {
+		_ = removeRetry(s.dataPath(id))
+		return err
+	}
+	if err := os.Remove(failedMeta); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	if err := syncDir(s.queue); err != nil {
+		return err
+	}
+	if err := syncDir(s.failed); err != nil {
+		return err
+	}
+	s.index[id] = &m
+	return nil
+}
+
+// Discard permanently removes a message's spool files, wherever it
+// currently sits (queued, deferred or failed), without touching its history
+// in the store: the admin "delete" action retains history by design, and
+// only the store's own retention job ever purges a history row.
+func (s *Spool) Discard(id ID) error {
+	if !id.valid() {
+		return ErrInvalidID
+	}
+	s.mu.Lock()
+	if s.leased[id] {
+		s.mu.Unlock()
+		return ErrBusy
+	}
+	delete(s.index, id)
+	s.mu.Unlock()
+
+	removed := false
+	for _, dir := range []string{s.queue, s.failed} {
+		for _, ext := range []string{".json", ".eml"} {
+			if err := os.Remove(filepath.Join(dir, id.String()+ext)); err == nil {
+				removed = true
+			} else if !os.IsNotExist(err) {
+				return err
+			}
+		}
+	}
+	if !removed {
+		return ErrNotFound
+	}
+	if err := syncDir(s.queue); err != nil {
+		return err
+	}
+	return syncDir(s.failed)
 }
 
 // spoolSize returns the total size in bytes of all queued messages.

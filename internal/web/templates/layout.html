@@ -1,0 +1,28 @@
+{{define "layout"}}
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>smtprelayd dashboard</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header>
+	<span class="logo">smtprelayd</span>
+	<span class="version">{{.Version}}</span>
+	<nav>
+		<a href="/queue">Queue</a>
+		<a href="/search">Search</a>
+		<a href="/bounces">Bounces</a>
+		<a href="/routes">Routes</a>
+		<a href="/config">Config</a>
+	</nav>
+</header>
+<div class="layout">
+	<aside>{{template "sidebar" .}}</aside>
+	<main>{{template "content" .}}</main>
+</div>
+</body>
+</html>
+{{end}}

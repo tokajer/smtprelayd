@@ -5,6 +5,8 @@ forwards it to a smarthost — primarily Microsoft 365 using OAuth2 / XOAUTH2.
 Runs as a Windows service or a systemd unit from a single static binary, with
 no runtime dependencies and no cgo.
 
+![Dashboard queue view showing deferred messages from a printer client](docs/img/dashboard-queue.png)
+
 ## Features
 
 - SMTP on port 25, submission on 587, implicit TLS (SMTPS) on 465
@@ -14,18 +16,31 @@ no runtime dependencies and no cgo.
 - Routing per recipient domain or source network across multiple smarthosts,
   splitting a message whose recipients belong to different routes
 - Structured JSON logs, searchable SQLite history, web dashboard
+- JSON API for programmatic access: search history, inspect the queue,
+  requeue or delete a message, with bearer-token auth and an audit log
 - Prometheus-format metrics endpoint for Checkmk
+- Bounce notification by mail: digest batches per client, with loop
+  prevention and an hourly volume cap
+- Installable as a Windows service (`.msi`) or via `.deb`/`.rpm` with a
+  hardened systemd unit
 
 ## Status
 
-Phase 3 is implemented: mail from an allowlisted client reaches a smarthost
-over TLS with SASL PLAIN, LOGIN or XOAUTH2, Microsoft 365 tokens are acquired
-through the OAuth2 client credentials flow, and senders are rewritten and
-recipients routed per message. The dashboard, the REST API and the searchable
-history are not implemented yet.
+Phases 1 through 4 are implemented and compiled: mail from an allowlisted
+client reaches a smarthost over TLS with SASL PLAIN, LOGIN or XOAUTH2,
+Microsoft 365 tokens are acquired through the OAuth2 client credentials flow,
+senders are rewritten and recipients routed per message, every message and
+delivery attempt is recorded in a SQLite history store, and the dashboard,
+JSON API and bounce-digest notifications are all in place and covered by
+automated tests. Phase 5 (packaging, the Windows service wrapper, CI,
+supply-chain hardening) was pulled forward early and is essentially done —
+install/uninstall/start/stop has been exercised on a real Windows machine.
 
-Nothing has been compiled or run against a live smarthost or tenant: phases 1
-to 3 were all written without a Go toolchain available. See `PROGRESS.md`.
+Outstanding: an end-to-end test against a real Microsoft 365 tenant (needs a
+tenant, mailbox and sending domain — nothing in the code path is unverified,
+but nothing has sent mail to a live inbox yet), and the equivalent
+install/upgrade cycle test for the `.deb`/`.rpm` packages on a real Linux
+machine. See `PROGRESS.md` for the detailed, session-by-session record.
 
 ## Build
 
@@ -51,6 +66,46 @@ smtprelayd -config /etc/smtprelayd/smtprelayd.toml selftest   # open relay probe
 source. `selftest` connects to the running listeners and fails loudly if a
 relay attempt from an unlisted address succeeds. Run it after every
 configuration change.
+
+On Windows, `smtprelayd install` / `uninstall` / `start` / `stop` (elevated
+prompt required) register the service under the SCM as
+`NT SERVICE\smtprelayd`. On Linux, install the packaged unit and use
+`systemctl` instead — see Install below.
+
+## Install
+
+Tagged releases publish `.deb`, `.rpm` and `.msi` packages built by CI (see
+Releases). None of them start the service automatically: a fresh install has
+no tenant, mailbox or client configuration yet.
+
+```sh
+sudo dpkg -i smtprelayd_*.deb        # or rpm -i on RPM-based distros
+sudo editor /etc/smtprelayd/smtprelayd.toml
+sudo systemctl enable --now smtprelayd
+```
+
+The Linux packages create a dedicated `smtprelayd` system user and fix
+ownership of `/etc/smtprelayd` and `/var/lib/smtprelayd`. The `.msi` registers
+the Windows service under the virtual account `NT SERVICE\smtprelayd` and
+sets an explicit ACL on `%ProgramData%\SMTPRelayd`, verified at every startup.
+
+## Dashboard and API
+
+Enabling `[web]` in the configuration serves a read-only dashboard (queue,
+search, bounces, per-message detail, route status, a redacted configuration
+view) and, on the same listener under `/api/v1/`, a bearer-token-authenticated
+JSON API for search, queue inspection, and admin actions (requeue, delete) —
+see `docs/API.md` for the full contract. The dashboard itself needs no token:
+it binds to loopback by default, the same trust boundary as the API's health
+endpoint.
+
+Tokens are stored as SHA-256 digests, never in plaintext. There is no
+`token new` helper yet; compute the digest yourself and put it under
+`[[web.token]]` in the configuration:
+
+```sh
+printf '%s' 'a-long-random-token' | sha256sum
+```
 
 ## Releases
 
@@ -92,8 +147,14 @@ The licence text is not checked in as a copy. Run `make license` once, or
 fetch <https://www.gnu.org/licenses/gpl-3.0.txt> into `LICENSE`, so that the
 file is byte-exact rather than transcribed.
 
-The only third-party dependency, `github.com/BurntSushi/toml`, is MIT licensed
-and compatible with the GPL.
+Direct third-party dependencies, all pure Go and compatible with the GPL:
+
+| Dependency | Purpose | Licence |
+|---|---|---|
+| `github.com/BurntSushi/toml` | Configuration file parsing | MIT |
+| `modernc.org/sqlite` | History store, no cgo | BSD-3-Clause |
+| `github.com/natefinch/lumberjack` | Log rotation | MIT |
+| `github.com/kardianos/service` | Windows service registration (Windows-only build tag; its Linux backend, which shells out via `os/exec`, is never compiled in) | zlib |
 
 ## If you like my work you can
 

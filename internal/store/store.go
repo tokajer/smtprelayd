@@ -40,7 +40,7 @@ func Open(dataDir string, log *slog.Logger, retentionDays int, retainSubjects bo
 	}
 
 	dbPath := filepath.Join(spoolDir, "history.db")
-	connStr := "file:" + dbPath + "?cache=shared&mode=rwc&_journal_mode=WAL"
+	connStr := "file:" + dbPath + "?cache=shared&mode=rwc&_journal_mode=WAL&_pragma=foreign_keys(1)"
 	db, err := sql.Open("sqlite", connStr)
 	if err != nil {
 		return nil, fmt.Errorf("store: open database: %w", err)
@@ -216,6 +216,45 @@ func (s *Store) RecordAudit(tokenName, sourceAddr, action, queueID, details stri
 		return fmt.Errorf("store: record audit: %w", err)
 	}
 	return nil
+}
+
+// FindAuditByQueueID returns audit entries for one queue ID, most recent
+// first. Not otherwise exposed via the API in this phase ("available for
+// future audit dashboard" per docs/PHASE4-PLAN.md); used directly by tests
+// to confirm an admin action was actually recorded.
+func (s *Store) FindAuditByQueueID(queueID string) ([]AuditEntry, error) {
+	rows, err := s.db.Query(`
+		SELECT at_time, token_name, source_addr, action, details
+		FROM audit WHERE queue_id = ? ORDER BY at_time DESC, id DESC
+	`, queueID)
+	if err != nil {
+		return nil, fmt.Errorf("store: find audit: %w", err)
+	}
+	defer rows.Close()
+
+	var out []AuditEntry
+	for rows.Next() {
+		var e AuditEntry
+		var atStr string
+		if err := rows.Scan(&atStr, &e.TokenName, &e.SourceAddr, &e.Action, &e.Details); err != nil {
+			return nil, fmt.Errorf("store: scan audit: %w", err)
+		}
+		e.AtTime, _ = time.Parse(time.RFC3339, atStr)
+		out = append(out, e)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: audit query error: %w", err)
+	}
+	return out, nil
+}
+
+// AuditEntry is one recorded admin action.
+type AuditEntry struct {
+	AtTime     time.Time
+	TokenName  string
+	SourceAddr string
+	Action     string
+	Details    string
 }
 
 // retentionCleanup deletes messages and cascaded attempts/audit older than retention TTL.

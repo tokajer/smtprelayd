@@ -34,7 +34,7 @@ behaviour and diagnosability are.
 
 | Area | Choice | Rationale |
 |---|---|---|
-| Language | Go 1.22+ | Single static binary, trivial cross-compilation, no runtime dependency on Windows |
+| Language | Go 1.23.0+ | Single static binary, trivial cross-compilation, no runtime dependency on Windows; raised from 1.22 on 2026-08-08, required by `kardianos/service` v1.3.0 |
 | SMTP server | `github.com/emersion/go-smtp` | Mature, hooks for auth and per-connection state |
 | SMTP client | `github.com/emersion/go-smtp` client | Same message model on both sides, supports SASL |
 | SASL | `github.com/emersion/go-sasl` | PLAIN, LOGIN, XOAUTH2 |
@@ -62,6 +62,8 @@ internal/authms365    Entra ID token acquisition and caching
 internal/store        SQLite message and attempt history
 internal/web          dashboard, server-side rendered
 internal/metrics      Prometheus text exposition
+internal/api          JSON API, admin actions, audit log
+internal/bounce       bounce digest notification, loop prevention, volume cap
 ```
 
 ## 4. Queue design

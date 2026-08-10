@@ -5,12 +5,241 @@ Keep it short — this file is pasted into every new chat.
 
 ## Current state
 
-**Phase**: 3 — client policy, sender rewriting and recipient routing
-implemented; first compile done, clean. Packaging and the Windows service
-wrapper (normally phase 5) were pulled forward and validated. MSI installs and
-uninstalls; `install`/`uninstall`/`start`/`stop` work on Windows. Log rotation
-and Windows ACL verification at startup are complete.
-**Last session**: 2026-08-10 (fifth session) — All seven known security gaps
+**Phase**: 4e — `internal/bounce` (digest notification) implemented and
+manually verified end to end this session, **completing phase 4 in full**.
+4a–4d remain complete from previous sessions. Phase 3 (client policy, sender
+rewriting, recipient routing) remains complete and compiles clean. Packaging
+and the Windows service wrapper (normally phase 5) were pulled forward and
+validated. MSI installs and uninstalls; `install`/`uninstall`/`start`/`stop`
+work on Windows. Log rotation and Windows ACL verification at startup are
+complete.
+**Last session**: 2026-08-11 (eleventh session) — Implemented phase 4e per
+`docs/PHASE4-PLAN.md` and `MEMORY.md` §8. `internal/bounce.Notifier` batches
+permanently-failed and expired messages (recorded via a new `RecordFail`
+call from `delivery.Manager.fail()` — the single choke point every "moved to
+spool/failed" path already went through, so no call site needed to change
+individually) into a digest mail per client every `[bounce].digest_minutes`,
+sent through the configured `notify_route`. Composed from the store's own
+`FindMessageByID` at dispatch time, not from data threaded through
+`RecordFail`, so the digest is never more than one lookup away from the
+authoritative record and automatically respects `retain_subjects`
+redaction the same way the dashboard and API do. The three loop-prevention
+properties: an empty envelope sender (`net/smtp`'s `Mail("")` already
+renders `MAIL FROM:<>`, so no special-casing was needed there), never
+passing through the listener at all — which is what actually keeps a
+notification out of sender rewriting, since rewriting is architecturally a
+listener-only concern — and a new `spool.Envelope.Notification` bool
+(persisted, so it survives a restart) that `delivery.Manager` checks before
+ever calling `RecordFail` again, which is exactly how a notification loop
+would start. A notification's own delivery outcome is kept out of the
+relay's own delivered/bounced/deferred/auth-failure counters (would
+otherwise conflate postmaster mail with client traffic) and instead
+increments a new unlabelled `smtprelayd_notification_failures_total`.
+The volume cap (`[bounce].max_per_hour`) suppresses sending once reached but
+carries the suppressed client's failures into the next hour's digest rather
+than dropping them, per the plan's "records them for the next hour."
+Extended `[bounce]`/`[client.bounce]` validation: a client may only override
+`.notify` (matching what the notifier actually reads), so a client setting
+`.sender`, `.notify_route`, `.digest_minutes` or `.max_per_hour` — which
+would silently do nothing — is now a startup error instead of the "looks
+configured but does nothing" trap `CLAUDE.md`'s strict-decoding philosophy
+otherwise closes; `.sender` is now required (not previously validated)
+since an RFC 5322 message without a From header is a red flag to most mail
+systems. Manually verified end to end against a running instance with a
+fake SMTP server that permanently rejects every recipient: the original
+message bounced, a digest was queued on schedule (`digest_minutes = 1`),
+the digest itself bounced against the same fake server, and — checked
+across multiple further digest cycles — no second notification was ever
+generated; exactly one digest and the original message ended up in
+`spool/failed`, both with their history retained. `GOOS=windows`/
+`GOOS=linux` build clean, `gofmt`/`go vet` clean, `go test ./...` green (no
+`-race` locally, this machine's `CGO_ENABLED=0`; unaffected on the CI
+runner).
+**Previous session**: 2026-08-10 (tenth session) — Implemented phase 4d per
+`docs/PHASE4-PLAN.md` and `docs/API.md`. `internal/api` serves the bearer-
+token-authenticated JSON API: `GET /health` (no auth), `GET /bounces`,
+`GET /messages`, `GET /messages/{id}`, `GET /queue` (read scope), and
+`POST /messages/{id}/requeue` / `DELETE /messages/{id}` (admin scope).
+Bearer tokens are compared constant-time against `Web.Tokens[].SHA256`
+(every candidate compared, not just until the first match, so timing cannot
+reveal how many were tried); failed attempts are logged with the source
+address, counted in a new unlabelled `smtprelayd_api_auth_failures_total`
+metric (deliberately unlabelled — a source-address label would let an
+attacker grow the exposition without bound), and rate-limited per source
+address with exponential backoff (5 failures/minute before a 30s-to-10min
+backoff, pruned opportunistically so cycling source addresses cannot grow
+the tracker without bound). Pagination is cursor-based
+(base64 JSON `{offset,limit}`) via a new `internal/api/cursor.go`.
+Realised partway through that the dashboard's requeue/delete forms
+*cannot* authenticate to a bearer-token-protected endpoint: the server
+process never holds a token's plaintext, only its SHA-256 digest, by
+design. Resolved by giving the dashboard its own POST
+`/messages/{id}/requeue` and `/messages/{id}/delete` handlers directly in
+`internal/web`, protected by a new per-process HMAC CSRF token
+(`internal/web/csrf.go`) instead of a bearer token — matching
+`docs/PHASE4-PLAN.md`'s own text ("REST API calls... do not use CSRF") more
+faithfully than its file-list suggestion of putting CSRF logic under
+`internal/api`. Both entry points call the same underlying `spool.Requeue`/
+`spool.Discard` (new methods — 4a/4b never gave the spool a way to act on a
+message once `Fail` had moved it to `spool/failed`, which requeue/delete
+both need for a bounced message) and `store.RecordAudit`, with
+`token_name` set to the bearer token's configured name for the API path and
+the fixed string `"dashboard"` for the web path. Both `Requeue` and
+`Discard` refuse a message currently leased to a delivery worker
+(`spool.ErrBusy`, mapped to 409) rather than racing the worker's own
+`Release`/`Remove` call, which could otherwise resurrect a message `Discard`
+just deleted. `internal/web` and `internal/api` are now mounted on the
+single `[web].address` listener the plan calls for, `/api/v1/` stripped
+before dispatch. Added `store.FindBounceSummaries` to match `docs/API.md`'s
+flattened bounce JSON shape (final class, attempt count, first/last attempt
+timestamp) — different from the dashboard's full-attempts-list shape. While
+building it, **found and fixed a real bug** in three existing "latest
+attempt" queries (`FindMessages`, `CountQueue`, and the new
+`FindBounceSummaries`): the tiebreak was `MAX(at_time)`, but `at_time` has
+only second precision, so two attempts landing in the same wall-clock second
+both matched and fanned the join out into duplicate rows for one message.
+Fixed by tiebreaking on the attempts table's autoincrement `id` instead,
+which is unique by construction. Also found and fixed a latent bug in three
+test helpers (`store`, `web`, and the new `api` package) that construct a
+`*slog.Logger` via `slog.NewTextHandler(nil, nil)`: the nil writer panics
+the instant a log call actually fires, which none of the existing tests had
+done — this session's tests do, since auth failures and query errors both
+log. Manually verified end to end against a running instance: `/api/v1/health`
+with no token, a 401 on a missing/wrong token, a 403 on read-scope trying an
+admin action, requeue and delete both succeeding with an admin token and
+recording an audit row, delete leaving the history row intact while removing
+it from `/api/v1/queue`'s counts, the rate limiter returning 429 with
+`Retry-After` after 5 failures from one source and recovering after the
+backoff, a different source unaffected by another's failures, and the
+dashboard's own CSRF-protected requeue form succeeding with no bearer token
+at all while a missing or garbage CSRF token gets 403. `GOOS=windows`/
+`GOOS=linux` build clean, `gofmt`/`go vet` clean, `go test ./...` green (no
+`-race` locally, this machine's `CGO_ENABLED=0`; unaffected on the CI
+runner).
+**Previous session**: 2026-08-10 (ninth session) — Implemented phase 4c per
+`docs/PHASE4-PLAN.md`: `internal/web` is a server-rendered, JavaScript-free
+dashboard (`html/template` with strict auto-escaping, `embed.FS` for
+templates and CSS) with six pages — live queue (`/queue`, sortable by
+sent/status/client/route, showing only messages still in the spool), search
+(`/search`, filters on sender/recipient/subject/status/client/route/time
+range), bounces (`/bounces`, same filter set plus failure class), per-message
+detail (`/messages/{id}`, full envelope and every delivery attempt),
+route status (`/routes`, reuses `metrics.Registry.Status()` so the dashboard
+and `/metrics` can never disagree about a route's state), and a read-only
+config view (`/config`, listener/client/route/bounce sections, secrets always
+rendered as a literal `"[redacted]"` string, never by relying solely on
+`Secret.String()`'s own redaction). Security headers
+(CSP/X-Content-Type-Options/X-Frame-Options/Referrer-Policy) are applied to
+every response via middleware. The `{id}` path parameter is validated through
+`spool.ParseID` before it ever reaches a query, per the rule that a queue ID
+is a validated type, never a raw string. `internal/store` gained the pieces
+this needed that 4a hadn't: `MessageFilter.Sender`/`.Subject` and
+`BounceFilter.Sender`/`.Subject` (substring filters the plan's search/bounce
+views require but the schema didn't yet expose), `MessageFilter.Sort`/
+`.Order` with a column allowlist (including a `status` sort backed by a `CASE`
+expression over the derived attempt class, since "sortable by status" has no
+real column to sort on), and a `Status: "active"` shorthand for "queued or
+deferred" so the live queue view doesn't need two queries merged in Go. Also
+discovered and fixed that `MessageFilter.Status` existed in the 4a struct but
+was never actually applied in `FindMessages`'s WHERE clause — status
+filtering silently did nothing before this session. Added `metrics.Serve`'s
+sibling `web.Serve`, which additionally serves HTTPS with `cfg.TLS`'s
+certificate when `[web].address` is non-loopback, since `internal/config`
+already refuses to start such a configuration without one — a validation
+that would otherwise have had no effect on what the listener actually spoke.
+Verified manually against a live instance: dashboard loads with all four
+security headers present, a message sent through the real SMTP listener with
+subject `<img src=x onerror=alert(1)>` renders HTML-escaped everywhere
+(queue, search, per-message), search-by-subject-substring finds it, the
+route status page reflects the same queued/deferred counts `/metrics` would
+report, the config view never shows a resolved OAuth2 client secret (also
+covered by a unit test using a real environment-variable-resolved secret,
+not just a literal string), an invalid queue ID returns 400, and `POST
+/queue` returns 405. `GOOS=windows`/`GOOS=linux` build clean, `gofmt`/`go
+vet` clean, `go test ./...` green (no `-race` locally, this machine's
+`CGO_ENABLED=0`; unaffected on the CI runner).
+**Previous session**: 2026-08-10 (eighth session) — Implemented phase 4b per
+`docs/PHASE4-PLAN.md`: `internal/metrics.Registry` (hand-written Prometheus
+text exposition, no `prometheus/client_golang` dependency per the existing
+decision) exposes `smtprelayd_queue_size{route,state}` (read live from a new
+`spool.QueueDepth`, which classifies each spooled message as queued or
+deferred by comparing `NextAttempt` to now — a leased, in-flight message
+counts as queued rather than vanishing from the gauge mid-attempt),
+`smtprelayd_delivered_total`, `smtprelayd_bounced_total` (covers both
+permanent failures and expiry, matching `store`'s bounced classification),
+`smtprelayd_deferred_total`, `smtprelayd_auth_failures_total`,
+`smtprelayd_oauth_token_age_seconds` (needed a new `authms365.TokenSource.
+TokenAge`, which required adding an `issued` timestamp the type did not
+previously track), `smtprelayd_last_delivery_time`, and
+`smtprelayd_delivery_rate_per_minute` (delivered_total / uptime, the
+approximation the plan calls for rather than a true rolling window). Counters
+are seeded at zero for every configured route at startup so a route with no
+events yet is still present in the exposition. To make `auth_failures_total`
+possible at all, `internal/delivery/smarthost` gained a new `AuthError` type
+— credential-related temporary failures (a rejected secret, an expired
+token, a rejected XOAUTH2 challenge) previously used the same `TempError` as
+every other retryable failure, which is correct for retry behaviour but made
+them indistinguishable from a dead smarthost for the metric the plan asks
+for; `AuthError` retries identically, it only adds a type `errors.As` can
+match on. `delivery.Manager` now owns the registry (built in `New` from the
+same route list and token sources it already assembles) and exposes it via
+`Manager.Metrics()`; `cmd/smtprelayd/main.go` starts `metrics.Serve` as a
+goroutine when `[metrics].enabled`, sharing the same shutdown context as
+everything else. Added `metrics.path` must-start-with-`/` validation
+(`address` was already validated). Verified manually against a live instance,
+not just unit tests: sent a message through the SMTP listener, watched
+`queue_size{state="queued"}` go to 1, watched the delivery worker fail against
+a deliberately dead port, and watched it move to `state="deferred"` with
+`deferred_total` incrementing and `auth_failures_total` correctly staying at 0
+(a connection refusal is not a credentials failure); confirmed `POST
+/metrics` returns 405 and an unconfigured path returns 404. `GOOS=windows`/
+`GOOS=linux` build clean, `gofmt`/`go vet` clean, `go test ./...` green (no
+`-race` locally, this machine's `CGO_ENABLED=0`; unaffected on the CI
+runner).
+**Previous session**: 2026-08-10 (seventh session) — Verified phase 4a end to end
+against `docs/PHASE4-PLAN.md`'s definition of done; most of it (schema, `Open`/
+`RecordMessage`/`RecordAttempt`/`RecordAudit`, `FindMessages`/`FindBounces`/
+`FindMessageByID`/`CountQueue`, `[history]` validation, wiring into
+`internal/listener/session.go` and `internal/delivery/delivery.go`,
+`modernc.org/sqlite` in `go.mod`) was already in place from an earlier,
+unlogged session. Found and fixed two real gaps while verifying: (1) the
+schema declared `ON DELETE CASCADE` on `attempts`/`audit` but SQLite never
+enforces foreign keys unless a connection turns it on, and nothing did —
+`Store.Open`'s DSN now carries `_pragma=foreign_keys(1)`, which
+`modernc.org/sqlite` applies per connection, so retention cleanup on
+`messages` now actually cascades instead of leaving orphaned `attempts`/
+`audit` rows forever; this also turns `RecordAttempt` for an unknown queue ID
+into a rejected write instead of a silent orphan. (2) `subject` was wired
+through the schema and `RecordMessage`'s redaction but the listener never
+extracted it — it always stored the empty string regardless of
+`retain_subjects`. Added `rewrite.HeaderValue` (reuses the package's own
+header-block parser, best-effort: a block that fails to parse yields "" rather
+than an error) and a `sanitizeSubject` helper in `internal/listener`
+(strips control characters, caps at 500 runes — display metadata, not a
+header written back onto the wire, so stripping instead of rejecting the
+message is the right call here, unlike the From-rewriting path). Added
+regression tests for both fixes plus a SQL-injection-shaped recipient filter
+test per the phase 4a test plan (already parameterized, confirmed safe).
+`GOOS=windows`/`GOOS=linux` build clean, `gofmt`/`go vet` clean, `go test
+./...` green (no `-race` locally, this machine's `CGO_ENABLED=0`; unaffected
+on the CI runner). Manual end-to-end test against a live tenant (send →
+history row → attempt row) still outstanding, same blocker as phase 3.
+**Previous session**: 2026-08-10 (sixth session) — CI's windows/amd64 cross-build
+was broken: `golang.org/x/sys/windows` had moved `GetNamedSecurityInfo` to a
+string-based, two-return signature and replaced `SECURITY_DESCRIPTOR.DACL`'s
+4-value return and the nonexistent `ControlBits`/`AccessEntryCount` helpers
+with `Control()` and the exported `ACL.AceCount` field since
+`CheckDataDirACL` (`internal/config/trust_windows.go`) was written. Fixed to
+the current API; also dropped an unused `fmt` import in
+`cmd/smtprelayd/verify_windows.go` that surfaced once the config package
+compiled again. Confirmed `GOOS=windows` and `GOOS=linux` both build clean,
+`gofmt`/`go vet` clean, `go test ./...` green (no `-race` locally — this
+machine's `CGO_ENABLED=0`, `-race` needs cgo; unaffected on the CI runner).
+Also corrected two stale entries found while cross-checking `MEMORY.md`/
+`PROGRESS.md` against the code: `internal/api` and `internal/bounce` were
+missing from `MEMORY.md` §3, and its Go version pin still said 1.22 after the
+1.23.0 bump on 2026-08-08.
+**Previous session**: 2026-08-10 (fifth session) — All seven known security gaps
 from 2026-08-08 security review closed (disk quota, config-dir check, secret
 ownership, syncDir errors, header limits, SIZE parameter, proxy environment).
 Log rotation via lumberjack implemented. Windows ACL verification at startup
@@ -114,7 +343,7 @@ Debian/RPM; upgrade cycle test on both platforms.
 - [ ] Sovereign cloud authorities (`login.microsoftonline.us`, China) — needs a
       schema decision, deliberately not configurable today
 
-### Phase 3 — Client policy and rewriting ✅ (uncompiled)
+### Phase 3 — Client policy and rewriting ✅ (compiles clean, untested against a live tenant)
 
 - [x] `internal/rewrite`: modes `off`, `if_unauthorized`, `force`, compiled per
       client at startup so a bad policy fails the service, not a message
@@ -141,15 +370,43 @@ Debian/RPM; upgrade cycle test on both platforms.
       phase 2 remain separate and both apply; no decision needed, recorded so
       it is not rediscovered
 
-### Phase 4 — Observability ⬜ (planned, see `docs/PHASE4-PLAN.md`)
+### Phase 4 — Observability ✅ (all of 4a–4e done, see `docs/PHASE4-PLAN.md`)
 
 Planned in five sub-phases (4a–4e), with implementation order determined by
 dependencies. Detailed plan in `docs/PHASE4-PLAN.md` (2026-08-10).
-- 4a: `internal/store` (SQLite message and attempt history)
-- 4b: `internal/metrics` (Prometheus `/metrics` endpoint)
-- 4c: `internal/web` (dashboard, read-only)
-- 4d: `internal/api` (JSON API, admin actions, audit log)
-- 4e: `internal/bounce` (notification batching and volume capping)
+- [x] 4a: `internal/store` (SQLite message and attempt history) — schema,
+      `RecordMessage`/`RecordAttempt`/`RecordAudit`, retention cleanup with
+      working FK cascade, `FindMessages`/`FindBounces`/`FindMessageByID`/
+      `CountQueue`, `[history]` validation, wired into the listener and
+      delivery manager, subject extraction. Manual end-to-end test against a
+      live tenant still outstanding.
+- [x] 4b: `internal/metrics` (Prometheus `/metrics` endpoint) — queue size,
+      delivered/bounced/deferred/auth-failure counters, OAuth token age, last
+      delivery time, approximate delivery rate; all seeded at zero per route;
+      manually verified against a running instance (accept → queue_size,
+      fail → deferred, 405/404 on bad requests).
+- [x] 4c: `internal/web` (dashboard, read-only) — queue/search/bounces/
+      per-message/routes/config pages, security headers, subject redaction
+      display, secrets never rendered; manually verified against a running
+      instance including an XSS-shaped subject and a real resolved OAuth2
+      secret.
+- [x] 4d: `internal/api` (JSON API, admin actions, audit log) — bearer-token
+      auth (read/admin scope) with constant-time comparison, per-source
+      rate limiting with backoff, cursor-based pagination, `spool.Requeue`/
+      `.Discard` shared by both the API and the dashboard's own
+      CSRF-protected requeue/delete forms (the dashboard cannot use bearer
+      tokens: the process never holds their plaintext). Manually verified
+      end to end, including the rate limiter and the dashboard action
+      forms with no bearer token at all.
+- [x] 4e: `internal/bounce` (notification batching and volume capping) —
+      digest per client every `digest_minutes`, hourly volume cap that
+      carries suppressed failures into the next hour rather than dropping
+      them, three independent loop-prevention properties (null envelope
+      sender, never through the listener, a persisted `Notification` flag
+      the delivery manager checks). Manually verified end to end against a
+      fake SMTP server that permanently rejects everything, including that
+      the digest's own bounce never produced a second notification across
+      several digest cycles.
 
 ### Phase 5 — Productionisation ⬜
 
@@ -230,8 +487,6 @@ The selftest exception (8) remains deliberate and is not fixed.
   migration path. Scoped as a one-shot converter with an explicit report of
   what could not be translated, never a runtime parser. Not yet planned into a
   phase.
-- Log rotation: accept `lumberjack` as a second dependency, or rotate
-  externally with `logrotate` and the Windows equivalent?
 
 ## Decision log
 
@@ -287,3 +542,25 @@ The selftest exception (8) remains deliberate and is not fixed.
 | 2026-08-08 | `ca_pin` is checked on `VerifyConnection` against `VerifiedChains`, not on `VerifyPeerCertificate` against the raw certificates | `VerifyPeerCertificate` receives what the server sent rather than the chain that was built, so appending the pinned certificate as an unused element satisfied the pin; it is also skipped entirely on a resumed session. Both defeat exactly the attacker `ca_pin` exists for |
 | 2026-08-08 | Workflow inputs reach the shell through `env:`, never through `${{ }}` in a script body | A git ref name may legally contain `$( )` and a `workflow_dispatch` input is unconstrained, so the validating pattern ran strictly after the value had already been substituted into the script |
 | 2026-08-08 | The import ban is enforced in two halves: an AST test over first-party source and a `go list -deps` script over the full graph | `unsafe` is unavoidable transitively through the standard library, so it is only meaningful as a first-party rule; a transitive `os/exec` is only visible in the graph, and only per GOOS. Neither half alone covers the ban `CLAUDE.md` states |
+| 2026-08-10 | `Store.Open` sets `_pragma=foreign_keys(1)` on the SQLite DSN | SQLite does not enforce `ON DELETE CASCADE` unless a connection turns foreign keys on; without it the schema's declared cascade was a no-op and retention cleanup left `attempts`/`audit` rows orphaned forever instead of deleting them with their message |
+| 2026-08-10 | Subject extraction reuses `rewrite`'s own header-block parser (`rewrite.HeaderValue`) rather than a second parser in `internal/listener` | The block parser is already the hardened, tested implementation for exactly this format; a second one would be a second place to get folding or quoting wrong for no benefit |
+| 2026-08-10 | A subject that fails to parse or contains control characters is sanitised (stripped, truncated), not rejected | Unlike the From header, the stored subject is display metadata that never goes back onto the wire, so failing the whole message over a stray control character in an unrelated header would be a worse outcome than a slightly mangled history record |
+| 2026-08-10 | Queue depth, token age and last-delivery-time gauges are read live at scrape time (from `spool.QueueDepth` and `authms365.TokenSource.TokenAge`) rather than maintained as incrementally-updated state | A gauge derived from the spool's own source of truth cannot drift from it; an incrementally maintained counter could, and nothing here is hot enough to make that reads-vs-writes tradeoff pay for itself |
+| 2026-08-10 | A credential-related retryable failure gets its own `smarthost.AuthError` type instead of reusing `TempError` | The retry behaviour must stay identical to any other temporary failure, but `smtprelayd_auth_failures_total` cannot tell a rejected secret from a dead smarthost without a distinct type to match on |
+| 2026-08-10 | Metrics counters are seeded at zero for every configured route at startup | A counter that only appears in the exposition after its first event is indistinguishable, to a scraper, from a route that does not exist yet |
+| 2026-08-10 | The metrics endpoint has no authentication and no TLS | Matches the existing decision for Checkmk polling recorded in `MEMORY.md` section 7; the listener is expected to bind to loopback like the dashboard, the same boundary `docs/SECURITY.md` already relies on |
+| 2026-08-10 | The read-only config view writes `"[redacted]"` as a literal string for every secret field, never relying on `Secret.String()`'s own redaction | Two independent reasons a secret cannot leak survive a mistake in either one; the view also never calls `.Value()` at all, so there is no code path that even holds the plaintext in scope |
+| 2026-08-10 | `metrics.Registry.Status()` is the single source both `/metrics` and the dashboard's route status page read from | The two must never disagree about whether a route has delivered, is deferred, or has a cached token; a second, independently-computed snapshot is how that drifts |
+| 2026-08-10 | `web.Serve` serves HTTPS with `cfg.TLS`'s certificate when `[web].address` is non-loopback, mirroring the existing listener's own certificate loading | `internal/config` already refuses to start a non-loopback `[web]` address without a certificate configured; a validation that guards a setting the server then ignores is worse than not validating it at all |
+| 2026-08-10 | `MessageFilter.Sort`'s `status` column sorts on a `CASE` expression over the derived attempt class, not a stored column | Status is derived, not stored, so "sortable by status" only has a real column to point at if one is synthesised; the mapping (queued, then deferred, then delivered, then bounced) is fixed by the allowlist, never influenced by request input |
+| 2026-08-10 | The "latest attempt" join in `FindMessages`, `CountQueue` and `FindBounceSummaries` tiebreaks on the attempts table's autoincrement `id`, not `MAX(at_time)` | `at_time` has only second precision; two attempts landing in the same wall-clock second both matched `MAX(at_time)` and fanned the join out into duplicate rows for one message. `id` is unique by construction, so it cannot tie |
+| 2026-08-10 | The dashboard's requeue and delete actions are separate handlers in `internal/web`, protected by a per-process HMAC CSRF token, not a second consumer of the bearer-token-protected `/api/v1/*` endpoints | The running process holds only a token's SHA-256 digest, never its plaintext, so the dashboard cannot construct an `Authorization: Bearer` header for itself even in principle. Both entry points still call the same `spool.Requeue`/`spool.Discard`/`store.RecordAudit` |
+| 2026-08-10 | `spool.Requeue` and `spool.Discard` return `ErrBusy` for a leased message rather than acting on it | The delivery worker holding the lease will call `Release`, `Remove` or `Fail` on it when the attempt finishes; racing that could resurrect a message `Discard` just deleted, or overwrite a `Requeue`'s reset attempt counter |
+| 2026-08-10 | `smtprelayd_api_auth_failures_total` has no source-address label | Route names are a small, fixed, config-time set; a source address chosen by whoever is failing to authenticate is not, and labelling it would let an attacker grow the exposition without bound. The source address is still logged, per docs/API.md, on the line itself rather than as a metric label |
+| 2026-08-10 | The API's per-source rate limiter tracks failures in memory with opportunistic eviction, not a fixed-size cache or an external store | The load profile (an internal API surface, loopback by default) does not justify a dependency; eviction on write bounds memory against the one attack this exists to slow down (many failed attempts from a small number of sources) without bounding it against an unrelated one (many distinct sources), which is a cost accepted rather than solved here |
+| 2026-08-11 | A client may override only `bounce.notify`; setting `bounce.sender`, `.notify_route`, `.digest_minutes` or `.max_per_hour` on a client is a startup error | The notifier never reads those fields per client — the digest window, volume cap and notify route are shared — so accepting them there would silently do nothing, exactly the "looks configured but does nothing" trap strict decoding otherwise closes |
+| 2026-08-11 | `bounce.sender` is required whenever notifications are enabled, which no prior validation checked | A digest with no From header is a red flag to most receiving mail systems; better to fail at startup than to find out from a spam-filtered notification nobody saw |
+| 2026-08-11 | The bounce digest is composed from `store.FindMessageByID` at dispatch time, not from fields threaded through `RecordFail` | `RecordFail` only ever needs to remember a client name and a queue ID; composing from the store's own authoritative record at send time means the digest can never drift from history, and automatically inherits the same `retain_subjects` redaction the dashboard and API already apply |
+| 2026-08-11 | The volume cap carries a suppressed client's failures into the next hour's digest instead of dropping them | "Records them for the next hour" in the plan means the underlying event survives being capped; only the act of sending is suppressed, not the fact that a failure happened |
+| 2026-08-11 | A notification message's own delivery outcome updates a dedicated `smtprelayd_notification_failures_total` counter, never the triggering route's own delivered/bounced/deferred/auth-failure counters | Those describe the relay's client-facing traffic; folding postmaster mail into them would make a notify-route outage indistinguishable from a real production delivery problem on that route |
+| 2026-08-11 | Loop prevention is a persisted `spool.Envelope.Notification` bool, not an in-memory set of queue IDs the notifier created | An in-memory set is lost on restart while the notification message can still be sitting in the queue; a persisted flag survives exactly the case (crash or restart mid-retry) where losing the distinction would let a notification's own failure start a real loop |

@@ -12,19 +12,23 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"syscall"
 	"time"
 
+	"github.com/tokajer/smtprelayd/internal/api"
 	"github.com/tokajer/smtprelayd/internal/config"
 	"github.com/tokajer/smtprelayd/internal/delivery"
 	"github.com/tokajer/smtprelayd/internal/listener"
 	"github.com/tokajer/smtprelayd/internal/logging"
+	"github.com/tokajer/smtprelayd/internal/metrics"
 	"github.com/tokajer/smtprelayd/internal/selftest"
 	"github.com/tokajer/smtprelayd/internal/spool"
 	"github.com/tokajer/smtprelayd/internal/store"
+	"github.com/tokajer/smtprelayd/internal/web"
 )
 
 // version is injected at build time via -ldflags.
@@ -192,6 +196,37 @@ func serve(ctx context.Context, configPath string, console bool) error {
 		dm.Run(ctx)
 		close(done)
 	}()
+	go dm.Notifier().Run(ctx)
+
+	if cfg.Metrics.Enabled {
+		go func() {
+			if err := metrics.Serve(ctx, cfg.Metrics.Address, cfg.Metrics.Path, dm.Metrics(), log); err != nil {
+				log.Error("metrics listener stopped", "error", err)
+			}
+		}()
+	}
+
+	if cfg.Web.Enabled {
+		ws, err := web.New(cfg, st, sp, dm.Metrics(), version, log)
+		if err != nil {
+			return err
+		}
+		as := api.New(cfg, st, sp, dm.Metrics(), version, log)
+
+		// The dashboard and the JSON API share one listener, per
+		// docs/PHASE4-PLAN.md: the api handler is mounted under /api/v1/
+		// with that prefix stripped, so its own routes are registered
+		// without it, and everything else falls through to the dashboard.
+		mux := http.NewServeMux()
+		mux.Handle("/api/v1/", http.StripPrefix("/api/v1", as.Handler()))
+		mux.Handle("/", ws.Handler())
+
+		go func() {
+			if err := web.Serve(ctx, cfg, mux, log); err != nil {
+				log.Error("web listener stopped", "error", err)
+			}
+		}()
+	}
 
 	if err := set.Serve(ctx); err != nil {
 		stop()

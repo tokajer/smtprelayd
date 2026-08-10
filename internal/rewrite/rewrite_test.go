@@ -248,3 +248,21 @@ func TestDisplayNameIsQuotedWhenItMustBe(t *testing.T) {
 		t.Errorf("display name needing quotes was emitted bare:\n%s", res.Headers)
 	}
 }
+
+func TestHeaderValueExtractsAndUnfolds(t *testing.T) {
+	if got := HeaderValue(plainHeaders, "Subject"); got != "Scan" {
+		t.Errorf("got %q, want %q", got, "Scan")
+	}
+	if got := HeaderValue(plainHeaders, "X-Missing"); got != "" {
+		t.Errorf("got %q for a missing header, want empty", got)
+	}
+}
+
+func TestHeaderValueOnUnparsableBlockYieldsEmpty(t *testing.T) {
+	// A continuation line with a blank line before it and trailing data is
+	// the one input parseBlock rejects; HeaderValue must not panic or
+	// propagate that as an error since it is best-effort metadata.
+	if got := HeaderValue("Subject: x\r\n\r\ntrailing", "Subject"); got != "" {
+		t.Errorf("got %q for an unparsable block, want empty", got)
+	}
+}

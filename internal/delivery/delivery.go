@@ -14,8 +14,10 @@ import (
 	"time"
 
 	"github.com/tokajer/smtprelayd/internal/authms365"
+	"github.com/tokajer/smtprelayd/internal/bounce"
 	"github.com/tokajer/smtprelayd/internal/config"
 	"github.com/tokajer/smtprelayd/internal/delivery/smarthost"
+	"github.com/tokajer/smtprelayd/internal/metrics"
 	"github.com/tokajer/smtprelayd/internal/spool"
 	"github.com/tokajer/smtprelayd/internal/store"
 )
@@ -32,10 +34,12 @@ const secretExpiryWarning = 30 * 24 * time.Hour
 
 // Manager drains the spool into the configured routes.
 type Manager struct {
-	cfg   *config.Config
-	spool *spool.Spool
-	store *store.Store
-	log   *slog.Logger
+	cfg      *config.Config
+	spool    *spool.Spool
+	store    *store.Store
+	log      *slog.Logger
+	metrics  *metrics.Registry
+	notifier *bounce.Notifier
 
 	// routes holds the per-route concurrency budget, limits the per-route
 	// messages per minute, tokens the OAuth2 source for xoauth2 routes.
@@ -56,7 +60,10 @@ func New(cfg *config.Config, sp *spool.Spool, log *slog.Logger, st *store.Store)
 		tokens: map[string]smarthost.TokenSource{},
 		rate:   newRouteLimiter(),
 	}
+	routeNames := make([]string, 0, len(cfg.Routes))
+	authTokens := map[string]*authms365.TokenSource{}
 	for _, r := range cfg.Routes {
+		routeNames = append(routeNames, r.Name)
 		m.routes[r.Name] = make(chan struct{}, r.MaxConcurrent)
 		m.limits[r.Name] = r.RateLimitPerMin
 		if r.Auth != "xoauth2" {
@@ -72,9 +79,26 @@ func New(cfg *config.Config, sp *spool.Spool, log *slog.Logger, st *store.Store)
 			return nil, fmt.Errorf("route %s: %w", r.Name, err)
 		}
 		m.tokens[r.Name] = ts
+		authTokens[r.Name] = ts
 		m.warnSecretExpiry(r)
 	}
+	m.metrics = metrics.New(sp, routeNames, authTokens)
+	m.notifier = bounce.New(cfg, sp, st, log)
 	return m, nil
+}
+
+// Metrics returns the registry the /metrics endpoint reads. It is non-nil
+// once New has returned successfully.
+func (m *Manager) Metrics() *metrics.Registry {
+	return m.metrics
+}
+
+// Notifier returns the bounce-digest notifier, for the caller to run as a
+// background goroutine. It is non-nil once New has returned successfully,
+// even if notifications are not configured: Notifier.Run then simply
+// returns immediately.
+func (m *Manager) Notifier() *bounce.Notifier {
+	return m.notifier
 }
 
 // warnSecretExpiry surfaces an expiring client secret at startup. Until the
@@ -185,11 +209,21 @@ func (m *Manager) attempt(ctx context.Context, meta *spool.Meta) {
 	elapsed := time.Since(start)
 	closeBody()
 
+	// A notification message is postmaster mail the bounce notifier composed
+	// itself, not client traffic: its outcome is kept out of the relay's own
+	// delivered/bounced/deferred counters (which would otherwise mix the
+	// two) and out of RecordFail (which is how a notification loop would
+	// start) further down in fail().
+	isNotification := meta.Envelope.Notification
+
 	meta.Attempts++
 	switch {
 	case err == nil:
 		log.Info("delivered", "attempts", meta.Attempts, "duration_ms", elapsed.Milliseconds(),
 			"recipients", len(meta.Envelope.To))
+		if !isNotification {
+			m.metrics.Delivered(meta.Envelope.Route)
+		}
 		_ = m.store.RecordAttempt(meta.ID.String(), meta.Attempts, 0, "", "delivered", nil)
 		if err := m.spool.Remove(meta.ID); err != nil {
 			log.Error("cannot remove delivered message", "error", err)
@@ -197,12 +231,22 @@ func (m *Manager) attempt(ctx context.Context, meta *spool.Meta) {
 
 	case isPermanent(err):
 		log.Warn("permanent delivery failure", "attempts", meta.Attempts, "error", err.Error())
+		if isNotification {
+			m.metrics.NotificationFailure()
+		} else {
+			m.metrics.Bounced(meta.Envelope.Route)
+		}
 		code, resp := extractSMTPError(err)
 		_ = m.store.RecordAttempt(meta.ID.String(), meta.Attempts, code, resp, "permanent", nil)
 		m.fail(meta, err.Error())
 
 	case time.Now().After(meta.Expires):
 		log.Warn("message expired in queue", "attempts", meta.Attempts, "error", err.Error())
+		if isNotification {
+			m.metrics.NotificationFailure()
+		} else {
+			m.metrics.Bounced(meta.Envelope.Route)
+		}
 		code, resp := extractSMTPError(err)
 		_ = m.store.RecordAttempt(meta.ID.String(), meta.Attempts, code, resp, "expired", nil)
 		m.fail(meta, "expired in queue: "+err.Error())
@@ -216,6 +260,14 @@ func (m *Manager) attempt(ctx context.Context, meta *spool.Meta) {
 		}
 		log.Info("delivery deferred", "attempts", meta.Attempts,
 			"retry_in_s", int(delay.Seconds()), "error", err.Error())
+		if isNotification {
+			m.metrics.NotificationFailure()
+		} else {
+			m.metrics.Deferred(meta.Envelope.Route)
+			if isAuthFailure(err) {
+				m.metrics.AuthFailure(meta.Envelope.Route)
+			}
+		}
 		code, resp := extractSMTPError(err)
 		_ = m.store.RecordAttempt(meta.ID.String(), meta.Attempts, code, resp, "temporary", &meta.NextAttempt)
 		if err := m.spool.Release(meta); err != nil {
@@ -256,12 +308,23 @@ func (m *Manager) fail(meta *spool.Meta, reason string) {
 	// rather than deleted, so that nothing is lost without a trace.
 	if err := m.spool.Fail(meta, reason); err != nil {
 		m.log.Error("cannot move failed message aside", "queue_id", meta.ID.String(), "error", err)
+		return
+	}
+	// A notification message failing is never recorded as a bounce to
+	// notify about: that is exactly how a notification loop would start.
+	if !meta.Envelope.Notification && m.notifier != nil {
+		m.notifier.RecordFail(meta.Envelope.Client, meta.ID.String())
 	}
 }
 
 func isPermanent(err error) bool {
 	var pe *smarthost.PermError
 	return errors.As(err, &pe)
+}
+
+func isAuthFailure(err error) bool {
+	var ae *smarthost.AuthError
+	return errors.As(err, &ae)
 }
 
 // extractSMTPError tries to extract the SMTP response code and text from an error.

@@ -1,0 +1,6 @@
+{{define "pager"}}
+<div class="pager">
+	{{if .PrevHref}}<a href="{{.PrevHref}}">&larr; newer</a>{{end}}
+	{{if .HasMore}}<a href="{{.NextHref}}">older &rarr;</a>{{end}}
+</div>
+{{end}}

@@ -1,0 +1,54 @@
+{{define "content"}}
+{{if not .Message}}
+<h1>Message not found</h1>
+<p class="empty">No message with this queue ID exists in the history store.</p>
+{{else}}
+<h1>Message {{.Message.QueueID}}</h1>
+<dl class="envelope">
+	<dt>Status</dt><dd class="status status-{{.Message.Status}}">{{.Message.Status}}</dd>
+	<dt>Received</dt><dd>{{.Message.ReceivedAt.Format "2006-01-02 15:04:05 MST"}}</dd>
+	<dt>Expires</dt><dd>{{.Message.ExpiresAt.Format "2006-01-02 15:04:05 MST"}}</dd>
+	<dt>Client</dt><dd>{{.Message.Client}}</dd>
+	<dt>Route</dt><dd>{{.Message.Route}}</dd>
+	<dt>Listener</dt><dd>{{.Message.Listener}}</dd>
+	<dt>Remote address</dt><dd>{{.Message.RemoteAddr}}</dd>
+	<dt>TLS</dt><dd>{{if .Message.TLSUsed}}yes{{else}}no{{end}}</dd>
+	<dt>Envelope sender</dt><dd>{{.Message.EnvelopeFrom}}</dd>
+	{{if .Message.OriginalFrom}}<dt>Original sender</dt><dd>{{.Message.OriginalFrom}}</dd>{{end}}
+	<dt>Recipients</dt><dd>{{range .Message.Recipients}}{{.}}<br>{{end}}</dd>
+	<dt>Subject</dt><dd>{{if .Message.Subject}}{{.Message.Subject}}{{else}}<span class="empty">(no subject)</span>{{end}}</dd>
+</dl>
+
+<div class="actions">
+	<form method="post" action="/messages/{{.Message.QueueID}}/requeue">
+		<input type="hidden" name="csrf" value="{{.RequeueToken}}">
+		<button type="submit">Requeue</button>
+	</form>
+	<form method="post" action="/messages/{{.Message.QueueID}}/delete">
+		<input type="hidden" name="csrf" value="{{.DeleteToken}}">
+		<button type="submit" class="danger">Delete from queue (history is kept)</button>
+	</form>
+</div>
+
+<h2>Delivery attempts</h2>
+<div class="table-wrap">
+<table>
+<thead><tr><th>#</th><th>Time</th><th>Class</th><th>SMTP code</th><th>Response</th><th>Next attempt</th></tr></thead>
+<tbody>
+{{range .Message.Attempts}}
+<tr>
+	<td>{{.AttemptNum}}</td>
+	<td>{{.AtTime.Format "2006-01-02 15:04:05"}}</td>
+	<td>{{.Class}}</td>
+	<td>{{if .SMTPCode}}{{.SMTPCode}}{{end}}</td>
+	<td>{{.SMTPResp}}</td>
+	<td>{{if .NextAt}}{{.NextAt.Format "2006-01-02 15:04:05"}}{{end}}</td>
+</tr>
+{{else}}
+<tr><td colspan="6" class="empty">no delivery attempts yet</td></tr>
+{{end}}
+</tbody>
+</table>
+</div>
+{{end}}
+{{end}}

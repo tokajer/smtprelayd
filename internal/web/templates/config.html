@@ -1,0 +1,16 @@
+{{define "content"}}
+<h1>Configuration</h1>
+<p class="empty">Read-only. Secrets are never shown, regardless of section.</p>
+
+<h2>Listeners</h2>
+<pre class="config-section">{{.ListenersText}}</pre>
+
+<h2>Clients</h2>
+<pre class="config-section">{{.ClientsText}}</pre>
+
+<h2>Routes</h2>
+<pre class="config-section">{{.RoutesText}}</pre>
+
+<h2>Bounce notification</h2>
+<pre class="config-section">{{.BounceText}}</pre>
+{{end}}

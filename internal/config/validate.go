@@ -395,13 +395,34 @@ func (c *Config) Validate() error {
 		if _, _, err := net.SplitHostPort(c.Metrics.Address); err != nil {
 			add("metrics.address %q: %v", c.Metrics.Address, err)
 		}
+		if !strings.HasPrefix(c.Metrics.Path, "/") {
+			add("metrics.path %q: must start with /", c.Metrics.Path)
+		}
 	}
 
 	if c.History.RetentionDays <= 0 {
 		add("history.retention_days must be positive")
 	}
 
-	if len(c.Bounce.Notify) > 0 {
+	// Only bounce.notify may be overridden per client, so that a printer's
+	// failures can be routed to whoever administers the printers without
+	// duplicating the digest window, volume cap or notify route per client.
+	// Every other bounce.* field left set on a client is silently unused by
+	// the notifier, which is exactly the "looks configured but does
+	// nothing" trap CLAUDE.md's strict decoding otherwise closes.
+	clientNotifies := false
+	for _, cl := range c.Clients {
+		if len(cl.Bounce.Notify) > 0 {
+			clientNotifies = true
+		}
+		if cl.Bounce.Sender != "" || cl.Bounce.NotifyRoute != "" || cl.Bounce.DigestMinutes != 0 || cl.Bounce.MaxPerHour != 0 {
+			add("client %q: bounce.sender, bounce.notify_route, bounce.digest_minutes and bounce.max_per_hour are global-only; only bounce.notify may be set per client", cl.Name)
+		}
+	}
+	if len(c.Bounce.Notify) > 0 || clientNotifies {
+		if c.Bounce.Sender == "" {
+			add("bounce.sender is required when notifications are enabled")
+		}
 		if c.Bounce.DigestMinutes <= 0 {
 			add("bounce.digest_minutes must be positive when notifications are enabled")
 		}
@@ -410,8 +431,7 @@ func (c *Config) Validate() error {
 		}
 		if c.Bounce.NotifyRoute == "" {
 			add("bounce.notify_route is required when notifications are enabled")
-		}
-		if !routeNames[c.Bounce.NotifyRoute] {
+		} else if !routeNames[c.Bounce.NotifyRoute] {
 			add("bounce.notify_route %q references an unknown route", c.Bounce.NotifyRoute)
 		}
 	}

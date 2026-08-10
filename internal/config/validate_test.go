@@ -59,6 +59,89 @@ func TestOpenRelayIsRefused(t *testing.T) {
 	}
 }
 
+func TestMetricsPathMustStartWithSlash(t *testing.T) {
+	body := baseConfig + `
+[metrics]
+address = "127.0.0.1:9025"
+path = "metrics"
+enabled = true
+`
+	_, err := Load(write(t, body))
+	if err == nil || !strings.Contains(err.Error(), "metrics.path") {
+		t.Fatalf("a metrics path without a leading slash was accepted: %v", err)
+	}
+}
+
+func TestMetricsDisabledSkipsValidation(t *testing.T) {
+	body := baseConfig + `
+[metrics]
+address = "not a valid address"
+path = "also not valid"
+enabled = false
+`
+	if _, err := Load(write(t, body)); err != nil {
+		t.Fatalf("disabled metrics section was still validated: %v", err)
+	}
+}
+
+func TestBounceRequiresSharedSettingsWhenEnabled(t *testing.T) {
+	for name, extra := range map[string]string{
+		"no sender":     "[bounce]\nnotify = [\"ops@example.at\"]\nnotify_route = \"m365\"\ndigest_minutes = 15\nmax_per_hour = 12\n",
+		"no digest":     "[bounce]\nnotify = [\"ops@example.at\"]\nsender = \"bounce@example.at\"\nnotify_route = \"m365\"\ndigest_minutes = 0\nmax_per_hour = 12\n",
+		"no cap":        "[bounce]\nnotify = [\"ops@example.at\"]\nsender = \"bounce@example.at\"\nnotify_route = \"m365\"\ndigest_minutes = 15\nmax_per_hour = 0\n",
+		"no route":      "[bounce]\nnotify = [\"ops@example.at\"]\nsender = \"bounce@example.at\"\ndigest_minutes = 15\nmax_per_hour = 12\n",
+		"unknown route": "[bounce]\nnotify = [\"ops@example.at\"]\nsender = \"bounce@example.at\"\nnotify_route = \"nope\"\ndigest_minutes = 15\nmax_per_hour = 12\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := Load(write(t, baseConfig+extra)); err == nil {
+				t.Fatalf("%s: incomplete bounce config was accepted", name)
+			}
+		})
+	}
+}
+
+func TestBounceFullyConfiguredIsAccepted(t *testing.T) {
+	body := baseConfig + `
+[bounce]
+notify = ["ops@example.at"]
+sender = "bounce@example.at"
+notify_route = "m365"
+digest_minutes = 15
+max_per_hour = 12
+`
+	if _, err := Load(write(t, body)); err != nil {
+		t.Fatalf("fully configured bounce section was rejected: %v", err)
+	}
+}
+
+func TestClientBounceOverrideOnlyAllowsNotify(t *testing.T) {
+	body := strings.Replace(baseConfig, "route = \"m365\"\n", "route = \"m365\"\n\n[client.bounce]\nnotify = [\"printer-ops@example.at\"]\n", 1) + `
+[bounce]
+sender = "bounce@example.at"
+notify_route = "m365"
+digest_minutes = 15
+max_per_hour = 12
+`
+	if _, err := Load(write(t, body)); err != nil {
+		t.Fatalf("a client overriding only bounce.notify was rejected: %v", err)
+	}
+}
+
+func TestClientBounceRejectsGlobalOnlyFields(t *testing.T) {
+	body := strings.Replace(baseConfig, "route = \"m365\"\n", "route = \"m365\"\n\n[client.bounce]\ndigest_minutes = 5\n", 1) + `
+[bounce]
+notify = ["ops@example.at"]
+sender = "bounce@example.at"
+notify_route = "m365"
+digest_minutes = 15
+max_per_hour = 12
+`
+	_, err := Load(write(t, body))
+	if err == nil || !strings.Contains(err.Error(), "global-only") {
+		t.Fatalf("a client setting bounce.digest_minutes was accepted: %v", err)
+	}
+}
+
 func TestOverlappingCIDRIsRefused(t *testing.T) {
 	body := baseConfig + `
 [[client]]

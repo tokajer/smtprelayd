@@ -68,6 +68,18 @@ func parseBlock(s string) (*block, error) {
 	return b, nil
 }
 
+// HeaderValue returns the unfolded value of the first occurrence of name in a
+// raw header block. Unlike Apply, this is best-effort metadata extraction for
+// the history store, not the rewriting path: a block that fails to parse or
+// a header that is absent both yield "" rather than an error.
+func HeaderValue(headers, name string) string {
+	blk, err := parseBlock(headers)
+	if err != nil {
+		return ""
+	}
+	return blk.value(strings.ToLower(name))
+}
+
 func (b *block) count(name string) int {
 	n := 0
 	for _, f := range b.fields {
