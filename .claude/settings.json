@@ -15,7 +15,12 @@
       "Bash(awk '/^## 8\\\\. Dashboard and API injection/,/^## 9\\\\./' /home/tokajer/Dokumente/GitHub/smtprelayd/docs/EXPLOIT-SURFACE.md)",
       "Bash(gofmt -l internal/store/ internal/delivery/delivery.go cmd/smtprelayd/main.go internal/config/validate.go)",
       "Bash(gofmt -w internal/store/query.go)",
-      "Bash(gofmt -l ./internal/listener/... ./cmd/smtprelayd/main.go)"
+      "Bash(gofmt -l ./internal/listener/... ./cmd/smtprelayd/main.go)",
+      "Bash(go doc *)",
+      "Bash(go list *)",
+      "Read(//home/tokajer/go/pkg/mod/golang.org/x/sys@v0.47.0/windows/**)",
+      "Bash(gofmt -l .)",
+      "Bash(make test *)"
     ]
   }
 }

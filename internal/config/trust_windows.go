@@ -8,7 +8,6 @@ package config
 import (
 	"fmt"
 	"os"
-	"unsafe"
 
 	"golang.org/x/sys/windows"
 )
@@ -71,48 +70,36 @@ func CheckDataDirACL(path string) error {
 		return fmt.Errorf("%s is not a directory", path)
 	}
 
-	pathPtr, err := windows.UTF16PtrFromString(path)
-	if err != nil {
-		return err
-	}
-
-	var sd *windows.SECURITY_DESCRIPTOR
-	err = windows.GetNamedSecurityInfo(pathPtr, windows.SE_FILE_OBJECT,
-		windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
-		nil, nil, &sd, nil)
+	sd, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT,
+		windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION)
 	if err != nil {
 		return fmt.Errorf("%s: could not read ACL: %w", path, err)
 	}
-	defer windows.LocalFree((windows.Handle)(unsafe.Pointer(sd)))
 
 	if !sd.IsValid() {
 		return fmt.Errorf("%s: security descriptor is invalid", path)
 	}
 
-	present, defaulted, acl, err := sd.DACL()
+	acl, defaulted, err := sd.DACL()
 	if err != nil {
-		return err
-	}
-	if !present {
-		return fmt.Errorf("%s: no DACL present (should be protected with explicit ACEs)", path)
+		return fmt.Errorf("%s: no DACL present (should be protected with explicit ACEs): %w", path, err)
 	}
 	if defaulted {
 		return fmt.Errorf("%s: DACL is defaulted instead of explicit", path)
 	}
+	if acl == nil {
+		return fmt.Errorf("%s: DACL is empty (fully permissive)", path)
+	}
 
-	protected, err := sd.ControlBits()
+	control, _, err := sd.Control()
 	if err != nil {
 		return err
 	}
-	if protected&windows.SE_DACL_PROTECTED == 0 {
+	if control&windows.SE_DACL_PROTECTED == 0 {
 		return fmt.Errorf("%s: DACL is not protected against inheritance", path)
 	}
 
-	count, err := acl.AccessEntryCount()
-	if err != nil {
-		return err
-	}
-	if count == 0 {
+	if acl.AceCount == 0 {
 		return fmt.Errorf("%s: ACL is empty", path)
 	}
 
