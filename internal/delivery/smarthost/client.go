@@ -62,27 +62,34 @@ type Message struct {
 	Helo string
 }
 
-// Deliver sends a message through a configured route. Certificate
-// verification is unconditional: there is no code path here that can skip it.
+// Deliver sends a message through a configured route. Whenever a handshake
+// happens at all, certificate verification is part of it: there is no code
+// path here that negotiates TLS and then skips the check. A route may opt out
+// of TLS entirely with tls = "none", which the loader restricts to routes
+// that do not authenticate with XOAUTH2.
 // tokens may be nil for routes that do not use XOAUTH2.
 func Deliver(ctx context.Context, route config.Route, msg Message, timeout time.Duration, tokens TokenSource) error {
-	minTLS, err := config.ParseTLSVersion(route.MinTLS)
-	if err != nil {
-		return perm("route %s: %w", route.Name, err)
-	}
-	tlsConf := &tls.Config{
-		ServerName: route.Host,
-		MinVersion: minTLS,
-	}
-	if route.CAPin != "" {
-		pin := strings.ToLower(strings.ReplaceAll(route.CAPin, ":", ""))
-		tlsConf.VerifyConnection = pinVerifier(pin)
+	var tlsConf *tls.Config
+	if route.TLS != "none" {
+		minTLS, err := config.ParseTLSVersion(route.MinTLS)
+		if err != nil {
+			return perm("route %s: %w", route.Name, err)
+		}
+		tlsConf = &tls.Config{
+			ServerName: route.Host,
+			MinVersion: minTLS,
+		}
+		if route.CAPin != "" {
+			pin := strings.ToLower(strings.ReplaceAll(route.CAPin, ":", ""))
+			tlsConf.VerifyConnection = pinVerifier(pin)
+		}
 	}
 
 	addr := net.JoinHostPort(route.Host, strconv.Itoa(route.Port))
 	dialer := &net.Dialer{Timeout: timeout}
 
 	var conn net.Conn
+	var err error
 	if route.TLS == "implicit" {
 		conn, err = (&tls.Dialer{NetDialer: dialer, Config: tlsConf}).DialContext(ctx, "tcp", addr)
 	} else {
@@ -121,6 +128,12 @@ func Deliver(ctx context.Context, route config.Route, msg Message, timeout time.
 		return err
 	}
 	if a != nil {
+		// The loader already rejects this combination; repeating it here
+		// keeps a hand-edited or future in-memory Route from putting
+		// credentials on an unprotected connection.
+		if route.TLS == "none" {
+			return perm("route %s: refusing to authenticate over a cleartext connection", route.Name)
+		}
 		if err := c.Auth(a); err != nil {
 			// An authentication failure is a property of the relay's
 			// credentials, never of the message. Classifying the 535 as
