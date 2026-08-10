@@ -156,7 +156,21 @@ func (m *Manager) attempt(ctx context.Context, meta *spool.Meta) {
 		m.fail(meta, "message body unreadable")
 		return
 	}
-	defer f.Close()
+	// The handle is closed explicitly once the body has been sent, before
+	// Remove() unlinks it: Windows refuses to delete a file the process
+	// itself still holds open, which left delivered bodies behind. The defer
+	// only covers the paths that return before that point.
+	closed := false
+	closeBody := func() {
+		if closed {
+			return
+		}
+		closed = true
+		if cerr := f.Close(); cerr != nil {
+			log.Warn("closing queued message", "error", cerr)
+		}
+	}
+	defer closeBody()
 
 	start := time.Now()
 	err = smarthost.Deliver(ctx, route, smarthost.Message{
@@ -166,6 +180,7 @@ func (m *Manager) attempt(ctx context.Context, meta *spool.Meta) {
 		Helo: m.cfg.Service.Hostname,
 	}, time.Duration(m.cfg.Limits.WriteTimeoutSec)*time.Second, m.tokens[route.Name])
 	elapsed := time.Since(start)
+	closeBody()
 
 	meta.Attempts++
 	switch {
