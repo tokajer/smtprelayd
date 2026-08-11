@@ -1,0 +1,40 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(go test *)",
+      "Bash(go vet *)",
+      "Bash(gofmt -l ./internal ./cmd)",
+      "Bash(gofmt -w /home/tokajer/Dokumente/GitHub/smtprelayd/internal/spool/spool.go)",
+      "Bash(go get *)",
+      "Bash(go build *)",
+      "Bash(gofmt -w ./internal ./cmd)",
+      "Bash(gofmt -w /home/tokajer/Dokumente/GitHub/smtprelayd/internal/logging/logging.go)",
+      "Bash(git add *)",
+      "Bash(git commit -m ' *)",
+      "Bash(awk '/^## 7\\\\. Dashboard and API/,/^## 8\\\\./' /home/tokajer/Dokumente/GitHub/smtprelayd/docs/SECURITY.md)",
+      "Bash(awk '/^## 8\\\\. Dashboard and API injection/,/^## 9\\\\./' /home/tokajer/Dokumente/GitHub/smtprelayd/docs/EXPLOIT-SURFACE.md)",
+      "Bash(gofmt -l internal/store/ internal/delivery/delivery.go cmd/smtprelayd/main.go internal/config/validate.go)",
+      "Bash(gofmt -w internal/store/query.go)",
+      "Bash(gofmt -l ./internal/listener/... ./cmd/smtprelayd/main.go)",
+      "Bash(go doc *)",
+      "Bash(go list *)",
+      "Read(//home/tokajer/go/pkg/mod/golang.org/x/sys@v0.47.0/windows/**)",
+      "Bash(gofmt -l .)",
+      "Bash(make test *)",
+      "Bash(python3 -)",
+      "Bash(curl -s http://127.0.0.1:9026/metrics)",
+      "Bash(gofmt -l internal/store/)",
+      "Bash(gofmt -l internal/metrics/)",
+      "Bash(echo \"exit=$?\")",
+      "Bash(curl -s http://127.0.0.1:8027/queue)",
+      "Bash(curl -s http://127.0.0.1:8027/messages/N622DXSWFU27NOU7)",
+      "Bash(curl -s http://127.0.0.1:8027/routes)",
+      "Bash(curl -s http://127.0.0.1:8027/config)",
+      "Bash(sed -n '/Routes<\\\\/h2>/,/Bounce/p')",
+      "Bash(curl -s \"http://127.0.0.1:8027/search?subject=onerror\")",
+      "Bash(curl -s \"http://127.0.0.1:8027/search?subject=nomatch12345\")",
+      "Bash(curl -s -o /dev/null -w \"GET /messages/lowercase123 -> %{http_code}\\\\n\" http://127.0.0.1:8027/messages/lowercaseinvalid)",
+      "Bash(curl -s -o /dev/null -w \"POST /queue -> %{http_code}\\\\n\" -X POST http://127.0.0.1:8027/queue)"
+    ]
+  }
+}

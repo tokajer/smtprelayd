@@ -1,0 +1,144 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later */
+/* Copyright (C) 2026 Tokajer */
+
+:root {
+	--bg: #f5f6f8;
+	--panel: #ffffff;
+	--border: #d7dbe0;
+	--text: #1c2126;
+	--muted: #5b6570;
+	--accent: #2f5fa8;
+	--danger: #a83232;
+	--warn: #a87d1f;
+	--ok: #2f7d4f;
+}
+
+* { box-sizing: border-box; }
+
+body {
+	margin: 0;
+	font-family: -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+	font-size: 14px;
+	background: var(--bg);
+	color: var(--text);
+}
+
+header {
+	display: flex;
+	align-items: baseline;
+	gap: 1rem;
+	padding: 0.75rem 1.25rem;
+	background: var(--panel);
+	border-bottom: 1px solid var(--border);
+}
+
+header .logo { font-weight: 700; font-size: 1.1rem; }
+header .version { color: var(--muted); font-size: 0.85rem; }
+
+header nav { margin-left: auto; display: flex; gap: 1rem; }
+header nav a { color: var(--accent); text-decoration: none; }
+header nav a:hover { text-decoration: underline; }
+
+.layout {
+	display: grid;
+	grid-template-columns: 220px 1fr;
+	gap: 1rem;
+	padding: 1rem;
+	max-width: 1400px;
+	margin: 0 auto;
+}
+
+@media (max-width: 800px) {
+	.layout { grid-template-columns: 1fr; }
+}
+
+aside, main {
+	background: var(--panel);
+	border: 1px solid var(--border);
+	border-radius: 6px;
+	padding: 1rem;
+	min-width: 0;
+}
+
+aside h2, main h1, main h2 { margin-top: 0; font-size: 1rem; }
+
+table {
+	width: 100%;
+	border-collapse: collapse;
+	font-size: 0.9rem;
+}
+
+th, td {
+	text-align: left;
+	padding: 0.4rem 0.5rem;
+	border-bottom: 1px solid var(--border);
+	overflow-wrap: anywhere;
+}
+
+th a { color: inherit; text-decoration: none; }
+th a:hover { text-decoration: underline; }
+
+.table-wrap { overflow-x: auto; }
+
+.status { font-weight: 600; }
+.status-queued { color: var(--muted); }
+.status-deferred { color: var(--warn); }
+.status-delivered { color: var(--ok); }
+.status-bounced { color: var(--danger); }
+
+.route-list { list-style: none; margin: 0; padding: 0; font-size: 0.85rem; }
+.route-list li { padding: 0.3rem 0; border-bottom: 1px solid var(--border); }
+
+form.filters {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 0.5rem 1rem;
+	margin-bottom: 1rem;
+	align-items: end;
+}
+
+form.filters label {
+	display: flex;
+	flex-direction: column;
+	font-size: 0.8rem;
+	color: var(--muted);
+	gap: 0.2rem;
+}
+
+input, select {
+	font: inherit;
+	padding: 0.3rem 0.4rem;
+	border: 1px solid var(--border);
+	border-radius: 4px;
+}
+
+button {
+	font: inherit;
+	padding: 0.35rem 0.9rem;
+	border: 1px solid var(--accent);
+	border-radius: 4px;
+	background: var(--accent);
+	color: #fff;
+	cursor: pointer;
+}
+
+.pager { display: flex; gap: 1rem; margin-top: 1rem; }
+.pager a { color: var(--accent); }
+
+.actions { display: flex; gap: 0.75rem; margin: 1rem 0; }
+.actions button.danger { background: var(--danger); border-color: var(--danger); }
+
+dl.envelope { display: grid; grid-template-columns: 10rem 1fr; gap: 0.3rem 1rem; }
+dl.envelope dt { color: var(--muted); }
+dl.envelope dd { margin: 0; overflow-wrap: anywhere; }
+
+.empty { color: var(--muted); font-style: italic; }
+
+pre.config-section {
+	background: var(--bg);
+	border: 1px solid var(--border);
+	border-radius: 4px;
+	padding: 0.75rem;
+	overflow-x: auto;
+	font-size: 0.85rem;
+}

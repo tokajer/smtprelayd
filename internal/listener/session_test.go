@@ -4,6 +4,7 @@
 package listener
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -43,5 +44,15 @@ func TestTimeoutFallsBackOnNonPositiveValues(t *testing.T) {
 		if d := s.timeout(sec); d != 60*time.Second {
 			t.Errorf("timeout(%d) = %v, want the 60s fallback", sec, d)
 		}
+	}
+}
+
+func TestSanitizeSubjectStripsControlCharsAndTruncates(t *testing.T) {
+	if got := sanitizeSubject("Invoice\x00\x07 due"); got != "Invoice due" {
+		t.Errorf("got %q, want control characters stripped", got)
+	}
+	long := strings.Repeat("a", maxStoredSubject+50)
+	if got := sanitizeSubject(long); len(got) != maxStoredSubject {
+		t.Errorf("got length %d, want %d", len(got), maxStoredSubject)
 	}
 }

@@ -1,0 +1,58 @@
+{{define "content"}}
+<h1>Bounces</h1>
+<form class="filters" method="get" action="/bounces">
+	<label>Sender
+		<input type="text" name="sender" value="{{.Filter.Sender}}">
+	</label>
+	<label>Recipient
+		<input type="text" name="recipient" value="{{.Filter.Recipient}}">
+	</label>
+	<label>Subject
+		<input type="text" name="subject" value="{{.Filter.Subject}}">
+	</label>
+	<label>Client
+		<input type="text" name="client" value="{{.Filter.Client}}">
+	</label>
+	<label>Route
+		<input type="text" name="route" value="{{.Filter.Route}}">
+	</label>
+	<label>Class
+		<select name="class">
+			<option value="" {{if eq .Filter.Class ""}}selected{{end}}>any</option>
+			<option value="permanent" {{if eq .Filter.Class "permanent"}}selected{{end}}>permanent</option>
+			<option value="expired" {{if eq .Filter.Class "expired"}}selected{{end}}>expired</option>
+		</select>
+	</label>
+	<label>Since (RFC 3339)
+		<input type="text" name="since" placeholder="2026-01-01T00:00:00Z" value="{{.Filter.Since}}">
+	</label>
+	<label>Until (RFC 3339)
+		<input type="text" name="until" placeholder="2026-01-01T00:00:00Z" value="{{.Filter.Until}}">
+	</label>
+	<button type="submit">Search</button>
+</form>
+{{if .FilterError}}<p class="status status-bounced">{{.FilterError}}</p>{{end}}
+<div class="table-wrap">
+<table>
+<thead><tr>
+	<th>Sent</th><th>Client</th><th>Route</th><th>From</th><th>Recipients</th><th>Subject</th><th>Last response</th>
+</tr></thead>
+<tbody>
+{{range .Messages}}
+<tr>
+	<td>{{.ReceivedAt.Format "2006-01-02 15:04:05"}}</td>
+	<td>{{.Client}}</td>
+	<td>{{.Route}}</td>
+	<td>{{.EnvelopeFrom}}</td>
+	<td>{{range .Recipients}}{{.}}<br>{{end}}</td>
+	<td><a href="/messages/{{.QueueID}}">{{if .Subject}}{{.Subject}}{{else}}<span class="empty">(no subject)</span>{{end}}</a></td>
+	<td>{{.LastErr}}</td>
+</tr>
+{{else}}
+<tr><td colspan="7" class="empty">no bounces match this search</td></tr>
+{{end}}
+</tbody>
+</table>
+</div>
+{{template "pager" .}}
+{{end}}

@@ -1,0 +1,27 @@
+{{define "content"}}
+<h1>Routes</h1>
+<div class="table-wrap">
+<table>
+<thead><tr>
+	<th>Route</th><th>Queued</th><th>Deferred</th><th>Delivered</th><th>Bounced</th>
+	<th>Auth failures</th><th>Last delivery</th><th>OAuth2 token age</th>
+</tr></thead>
+<tbody>
+{{range .Routes}}
+<tr>
+	<td>{{.Route}}</td>
+	<td>{{.Queued}}</td>
+	<td>{{.Deferred}}</td>
+	<td>{{.Delivered}}</td>
+	<td>{{.Bounced}}</td>
+	<td>{{.AuthFailures}}</td>
+	<td>{{if not .LastDelivery.IsZero}}{{.LastDelivery.Format "2006-01-02 15:04:05"}}{{else}}<span class="empty">never</span>{{end}}</td>
+	<td>{{if .HasToken}}{{.TokenAge}}{{else}}<span class="empty">n/a</span>{{end}}</td>
+</tr>
+{{else}}
+<tr><td colspan="8" class="empty">no routes configured</td></tr>
+{{end}}
+</tbody>
+</table>
+</div>
+{{end}}

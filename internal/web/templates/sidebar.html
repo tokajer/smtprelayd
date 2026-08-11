@@ -1,0 +1,26 @@
+{{define "sidebar"}}
+<h2>Routes</h2>
+<ul class="route-list">
+	{{range .Routes}}
+	<li>
+		<strong>{{.Route}}</strong><br>
+		queued {{.Queued}} &middot; deferred {{.Deferred}}
+		{{if not .LastDelivery.IsZero}}
+		<br>last delivery {{.LastDelivery.Format "2006-01-02 15:04"}}
+		{{else}}
+		<br><span class="empty">no delivery yet</span>
+		{{end}}
+	</li>
+	{{else}}
+	<li class="empty">no routes configured</li>
+	{{end}}
+</ul>
+<h2>Recent bounces</h2>
+<ul class="route-list">
+	{{range .RecentBounces}}
+	<li><a href="/messages/{{.QueueID}}">{{.QueueID}}</a><br>{{.Route}} &middot; {{.ReceivedAt.Format "01-02 15:04"}}</li>
+	{{else}}
+	<li class="empty">none</li>
+	{{end}}
+</ul>
+{{end}}

@@ -7,6 +7,7 @@ import (
 	"bufio"
 	"context"
 	"crypto/tls"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -340,6 +341,11 @@ func (s *session) doData() bool {
 	s.reply(354, "end data with <CR><LF>.<CR><LF>")
 	_ = s.conn.SetReadDeadline(s.readDeadline(s.srv.cfg.Limits.DataTimeoutSec))
 
+	if s.declared > 0 && s.declared > s.maxMessageBytes() {
+		s.reply(552, "5.3.4 message exceeds size limit")
+		return false
+	}
+
 	dr := &dotReader{br: s.br}
 	hr := bufio.NewReader(dr)
 	headers, hops, err := scanHeaders(hr, s.srv.cfg.Limits)
@@ -406,6 +412,22 @@ func (s *session) doData() bool {
 		}
 		committed = append(committed, id)
 		ids = append(ids, id.String())
+
+		// Record message in history store. Subject is stored only if
+		// retain_subjects is enabled; store.RecordMessage redacts it again
+		// regardless, this just avoids parsing the header block for nothing.
+		recipientsJSON, _ := json.Marshal(g.Recipients)
+		subject := ""
+		if s.srv.cfg.History.RetainSubjects {
+			subject = sanitizeSubject(rewrite.HeaderValue(res.Headers, "Subject"))
+		}
+		_ = s.srv.store.RecordMessage(
+			id.String(), s.client.Name, g.Route,
+			res.EnvelopeFrom, res.OriginalFrom, string(recipientsJSON),
+			subject, s.srv.lc.Name, s.remote.String(),
+			env.Received, env.Received.Add(lifetime), s.isTLS,
+		)
+
 		s.log.Info("message accepted",
 			"queue_id", id.String(), "from", res.EnvelopeFrom,
 			"original_from", res.OriginalFrom, "rewritten", res.Rewritten,
@@ -415,6 +437,29 @@ func (s *session) doData() bool {
 	s.reply(250, "2.0.0 OK queued as "+strings.Join(ids, " "))
 	s.resetTransaction()
 	return true
+}
+
+// maxStoredSubject bounds the subject text kept in the history store. It is
+// display metadata, not a protocol value, so this is generous headroom
+// rather than a protocol limit.
+const maxStoredSubject = 500
+
+// sanitizeSubject strips control characters from a header value before it
+// enters the history store. This is metadata for display, not a header that
+// gets written back onto the wire, so stripping is the right response to a
+// stray control character rather than rejecting the whole message the way
+// the rewrite package does for From.
+func sanitizeSubject(s string) string {
+	s = strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f {
+			return -1
+		}
+		return r
+	}, s)
+	if len(s) > maxStoredSubject {
+		s = s[:maxStoredSubject]
+	}
+	return s
 }
 
 func (s *session) replyDataError(err error) {

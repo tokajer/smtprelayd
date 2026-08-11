@@ -8,6 +8,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"syscall"
 )
 
@@ -16,7 +17,13 @@ import (
 // a local account to control of a privileged process, so this is a failure
 // and never a warning.
 func CheckConfigFile(path string) error {
-	return checkTrusted(path, false)
+	if err := checkTrusted(path, false); err != nil {
+		return err
+	}
+	// Also check the directory holding the file, since a writable directory
+	// allows an attacker to replace the file via unlink and create.
+	dir := filepath.Dir(path)
+	return checkTrusted(dir, true)
 }
 
 // CheckDir applies the same trust requirement to a directory, used for the
@@ -35,6 +42,14 @@ func checkSecretFile(path string) error {
 	}
 	if fi.Mode().Perm()&0o077 != 0 {
 		return fmt.Errorf("secret file %s is readable by group or others (mode %04o)", path, fi.Mode().Perm())
+	}
+	st, ok := fi.Sys().(*syscall.Stat_t)
+	if !ok {
+		return fmt.Errorf("%s: cannot determine ownership", path)
+	}
+	uid := os.Getuid()
+	if int(st.Uid) != 0 && int(st.Uid) != uid {
+		return fmt.Errorf("secret file %s is owned by uid %d, expected root or uid %d", path, st.Uid, uid)
 	}
 	return nil
 }

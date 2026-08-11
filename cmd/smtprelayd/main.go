@@ -12,18 +12,23 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"syscall"
 	"time"
 
+	"github.com/tokajer/smtprelayd/internal/api"
 	"github.com/tokajer/smtprelayd/internal/config"
 	"github.com/tokajer/smtprelayd/internal/delivery"
 	"github.com/tokajer/smtprelayd/internal/listener"
 	"github.com/tokajer/smtprelayd/internal/logging"
+	"github.com/tokajer/smtprelayd/internal/metrics"
 	"github.com/tokajer/smtprelayd/internal/selftest"
 	"github.com/tokajer/smtprelayd/internal/spool"
+	"github.com/tokajer/smtprelayd/internal/store"
+	"github.com/tokajer/smtprelayd/internal/web"
 )
 
 // version is injected at build time via -ldflags.
@@ -35,7 +40,7 @@ usage: smtprelayd [-config <file>] <command>
 
 commands:
   run        start the relay in the foreground (default)
-  check      load and validate the configuration, then exit
+  check      validate the configuration and its bind addresses, then exit
   selftest   attempt to relay through the running instance and fail if it works
   version    print the version and exit
 
@@ -102,6 +107,9 @@ func run(cmd, configPath string, console bool) error {
 		if err != nil {
 			return err
 		}
+		if err := checkBind(cfg, os.Stdout); err != nil {
+			return err
+		}
 		fmt.Printf("configuration OK: %d listener(s), %d client(s), %d route(s)\n",
 			len(cfg.Listeners), len(cfg.Clients), len(cfg.Routes))
 		return nil
@@ -146,7 +154,14 @@ func serve(ctx context.Context, configPath string, console bool) error {
 	if cfg.Log.File != "" {
 		logFile = filepath.Join(cfg.Service.DataDir, cfg.Log.File)
 	}
-	log, closer, err := logging.New(logging.Options{Level: level, File: logFile, Console: console})
+	log, closer, err := logging.New(logging.Options{
+		Level:      level,
+		File:       logFile,
+		Console:    console,
+		MaxSizeMB:  cfg.Log.MaxSizeMB,
+		MaxBackups: cfg.Log.MaxBackups,
+		MaxAgeDays: cfg.Log.MaxAgeDays,
+	})
 	if err != nil {
 		return err
 	}
@@ -156,10 +171,18 @@ func serve(ctx context.Context, configPath string, console bool) error {
 	if err != nil {
 		return err
 	}
+	sp.SetQuota(cfg.Limits.SpoolMaxGB, cfg.Limits.SpoolWarnPercent)
+
+	st, err := store.Open(cfg.Service.DataDir, log, cfg.History.RetentionDays, cfg.History.RetainSubjects)
+	if err != nil {
+		return err
+	}
+	defer st.Close()
+
 	log.Info("starting", "version", version, "config", cfg.Path,
 		"data_dir", cfg.Service.DataDir, "queued", sp.Len())
 
-	set, err := listener.New(cfg, sp, log)
+	set, err := listener.New(cfg, sp, log, st)
 	if err != nil {
 		return err
 	}
@@ -167,7 +190,7 @@ func serve(ctx context.Context, configPath string, console bool) error {
 	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	dm, err := delivery.New(cfg, sp, log)
+	dm, err := delivery.New(cfg, sp, log, st)
 	if err != nil {
 		return err
 	}
@@ -176,6 +199,37 @@ func serve(ctx context.Context, configPath string, console bool) error {
 		dm.Run(ctx)
 		close(done)
 	}()
+	go dm.Notifier().Run(ctx)
+
+	if cfg.Metrics.Enabled {
+		go func() {
+			if err := metrics.Serve(ctx, cfg.Metrics.Address, cfg.Metrics.Path, dm.Metrics(), log); err != nil {
+				log.Error("metrics listener stopped", "error", err)
+			}
+		}()
+	}
+
+	if cfg.Web.Enabled {
+		ws, err := web.New(cfg, st, sp, dm.Metrics(), version, log)
+		if err != nil {
+			return err
+		}
+		as := api.New(cfg, st, sp, dm.Metrics(), version, log)
+
+		// The dashboard and the JSON API share one listener, per
+		// docs/PHASE4-PLAN.md: the api handler is mounted under /api/v1/
+		// with that prefix stripped, so its own routes are registered
+		// without it, and everything else falls through to the dashboard.
+		mux := http.NewServeMux()
+		mux.Handle("/api/v1/", http.StripPrefix("/api/v1", as.Handler()))
+		mux.Handle("/", ws.Handler())
+
+		go func() {
+			if err := web.Serve(ctx, cfg, mux, log); err != nil {
+				log.Error("web listener stopped", "error", err)
+			}
+		}()
+	}
 
 	if err := set.Serve(ctx); err != nil {
 		stop()
@@ -197,6 +251,9 @@ func checkEnvironment(cfg *config.Config) error {
 	}
 	if err := config.CheckDir(cfg.Service.DataDir); err != nil {
 		return fmt.Errorf("data directory: %w", err)
+	}
+	if err := verifyDataDirSecurity(cfg.Service.DataDir); err != nil {
+		return fmt.Errorf("data directory ACL: %w", err)
 	}
 	exe, err := os.Executable()
 	if err != nil {
