@@ -4,9 +4,6 @@
 package api
 
 import (
-	"crypto/sha256"
-	"crypto/subtle"
-	"encoding/hex"
 	"net"
 	"net/http"
 	"strings"
@@ -23,35 +20,21 @@ type tokenInfo struct {
 	Scope string
 }
 
-// checkToken validates a bearer token against every configured digest in
-// constant time and returns the matching token's name and scope. Every
-// candidate is compared, not just until the first match, so the time taken
-// does not reveal how many tokens were tried before one (if any) succeeded.
-func checkToken(tokens []config.Token, presented string) (tokenInfo, bool) {
-	if presented == "" {
+// checkToken validates a bearer token against the configured digests. The
+// constant-time comparison itself lives in config.MatchToken, which the
+// metrics endpoint authenticates against too.
+func checkToken(cfg *config.Config, presented string) (tokenInfo, bool) {
+	t, ok := cfg.MatchToken(presented)
+	if !ok {
 		return tokenInfo{}, false
 	}
-	sum := sha256.Sum256([]byte(presented))
-	digest := []byte(strings.ToLower(hex.EncodeToString(sum[:])))
-
-	var found tokenInfo
-	ok := false
-	for _, t := range tokens {
-		want := []byte(strings.ToLower(t.SHA256))
-		if len(want) != len(digest) {
-			continue
-		}
-		if subtle.ConstantTimeCompare(digest, want) == 1 {
-			found, ok = tokenInfo{Name: t.Name, Scope: t.Scope}, true
-		}
-	}
-	return found, ok
+	return tokenInfo{Name: t.Name, Scope: t.Scope}, true
 }
 
 // scopeSatisfies reports whether a token's scope permits an action that
 // requires need. admin satisfies everything; read only satisfies itself.
 func scopeSatisfies(have, need string) bool {
-	return have == "admin" || have == need
+	return config.ScopeSatisfies(have, need)
 }
 
 func bearerToken(r *http.Request) string {

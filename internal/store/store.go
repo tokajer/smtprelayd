@@ -14,6 +14,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/tokajer/smtprelayd/internal/fsmode"
+
 	_ "modernc.org/sqlite"
 )
 
@@ -40,6 +42,11 @@ func Open(dataDir string, log *slog.Logger, retentionDays int, retainSubjects bo
 	}
 
 	dbPath := filepath.Join(spoolDir, "history.db")
+	// Note, 2026-08-11: `_journal_mode=WAL` does nothing. modernc's driver
+	// only reads `_pragma=`, so the database has always run in the default
+	// rollback-journal mode despite this parameter. Left as it is pending a
+	// decision — switching to WAL changes on-disk behaviour and is not a
+	// change to make as a side effect of a permissions fix.
 	connStr := "file:" + dbPath + "?cache=shared&mode=rwc&_journal_mode=WAL&_pragma=foreign_keys(1)"
 	db, err := sql.Open("sqlite", connStr)
 	if err != nil {
@@ -63,6 +70,26 @@ func Open(dataDir string, log *slog.Logger, retentionDays int, retainSubjects bo
 			retainSubjects: retainSubjects,
 		},
 		lastCleanup: time.Now(),
+	}
+
+	// The driver creates the database 0644. It holds every sender, recipient
+	// and — with retain_subjects on, the default — every subject, so it is
+	// restricted here to match the spool's own 0600. SQLite derives the mode
+	// of a journal, WAL or shared-memory sidecar from the main database
+	// file, so restricting it before the first write is what keeps those
+	// closed too; the explicit pass covers a sidecar an earlier version
+	// already left behind at 0644. Only -journal exists today (see the
+	// journal-mode note on connStr above), but the mode of a file this
+	// database can grow is not a good thing to discover later.
+	if err := fsmode.RestrictFile(dbPath); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("store: restrict database file: %w", err)
+	}
+	for _, suffix := range []string{"-journal", "-wal", "-shm"} {
+		if err := fsmode.RestrictFile(dbPath + suffix); err != nil {
+			_ = db.Close()
+			return nil, fmt.Errorf("store: restrict %s file: %w", suffix, err)
+		}
 	}
 
 	if err := s.createSchema(); err != nil {

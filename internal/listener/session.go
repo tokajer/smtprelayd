@@ -45,6 +45,7 @@ const (
 var (
 	errLineTooLong = errors.New("line exceeds 1000 octets")
 	errNulByte     = errors.New("NUL byte in input")
+	errBareCR      = errors.New("bare CR in input")
 	errTooManyHdrs = errors.New("too many headers")
 	errHdrTooLarge = errors.New("header block too large")
 )
@@ -140,9 +141,9 @@ func (s *session) loop(ctx context.Context) {
 			return
 		}
 		_ = s.conn.SetReadDeadline(s.readDeadline(s.srv.cfg.Limits.ReadTimeoutSec))
-		line, err := readLineLimited(s.br, maxLineOctet)
+		line, err := readStructuredLine(s.br, maxLineOctet)
 		if err != nil {
-			if errors.Is(err, errLineTooLong) || errors.Is(err, errNulByte) {
+			if errors.Is(err, errLineTooLong) || errors.Is(err, errNulByte) || errors.Is(err, errBareCR) {
 				s.reply(500, "5.5.2 "+err.Error())
 			}
 			return
@@ -505,6 +506,8 @@ func (s *session) replyDataError(err error) {
 		s.reply(500, "5.5.2 line exceeds 1000 octets")
 	case errors.Is(err, errNulByte):
 		s.reply(500, "5.5.2 NUL byte in message")
+	case errors.Is(err, errBareCR):
+		s.reply(500, "5.5.2 bare CR in message headers")
 	case errors.Is(err, errTooManyHdrs), errors.Is(err, errHdrTooLarge):
 		s.reply(552, "5.3.4 "+err.Error())
 	case errors.Is(err, io.EOF), errors.Is(err, io.ErrUnexpectedEOF):
@@ -516,8 +519,11 @@ func (s *session) replyDataError(err error) {
 }
 
 // receivedHeader records the hop. Every value interpolated here has already
-// been rejected if it contained a control character, so the header cannot be
-// split by client input.
+// been rejected if it contained CR, LF or NUL — the three that can end a line
+// — so the header cannot be split by client input. That is narrower than "no
+// control characters": a HELO name may still contain, say, a BEL, which is
+// ugly in a header but cannot split one. The comment claimed the broader
+// property until 2026-08-11.
 func (s *session) receivedHeader(id spool.ID) string {
 	proto := "SMTP"
 	if s.isTLS {
@@ -620,6 +626,29 @@ func readLineLimited(br *bufio.Reader, max int) (string, error) {
 	return s, nil
 }
 
+// readStructuredLine reads a line that will be interpreted rather than
+// carried: an SMTP command, or a header line that is re-emitted into the
+// spooled message. A CR inside such a line is rejected, because the next
+// parser in the chain decides on its own whether that CR ends a line, and
+// that disagreement is what header injection is made of. Rejected rather
+// than stripped, per the rule that CR, LF and NUL fail a message instead of
+// being sanitised.
+//
+// The body deliberately does not go through here. A lone CR in a message
+// body is not a header and cannot split one; a legacy device that emits one
+// would lose the whole message for a byte that only ever reaches the
+// smarthost as content.
+func readStructuredLine(br *bufio.Reader, max int) (string, error) {
+	s, err := readLineLimited(br, max)
+	if err != nil {
+		return "", err
+	}
+	if strings.IndexByte(s, '\r') >= 0 {
+		return "", errBareCR
+	}
+	return s, nil
+}
+
 // dotReader yields the message body with transparency dots removed and the
 // 1000 octet line limit enforced.
 type dotReader struct {
@@ -661,7 +690,7 @@ func scanHeaders(br *bufio.Reader, lim config.Limits) (headers string, received 
 	dropping := false
 
 	for {
-		line, err := readLineLimited(br, maxLineOctet)
+		line, err := readStructuredLine(br, maxLineOctet)
 		if err != nil {
 			if errors.Is(err, io.EOF) {
 				// A message consisting of headers only and no blank line.

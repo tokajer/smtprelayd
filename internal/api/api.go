@@ -81,7 +81,7 @@ func (s *Server) auth(need string, next http.HandlerFunc) http.HandlerFunc {
 			return
 		}
 
-		info, ok := checkToken(s.cfg.Web.Tokens, bearerToken(r))
+		info, ok := checkToken(s.cfg, bearerToken(r))
 		if !ok {
 			s.fails.recordFailure(source, now)
 			if s.metrics != nil {

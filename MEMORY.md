@@ -73,6 +73,8 @@ internal/web          dashboard, server-side rendered
 internal/metrics      Prometheus text exposition
 internal/api          JSON API, admin actions, audit log
 internal/bounce       bounce digest notification, loop prevention, volume cap
+internal/fsmode       restrict files created by dependencies to 0600
+internal/buildpolicy  first-party import ban, enforced as a test
 ```
 
 ## 4. Queue design
@@ -170,6 +172,15 @@ Three layers, deliberately separate:
 3. **Metrics** — `/metrics` in Prometheus text format for Checkmk: queue depth
    per state and route, deferred count, bounce count, authentication failures,
    OAuth token age, delivery rate, last successful delivery timestamp.
+
+   Decided 2026-08-11, superseding "no authentication and no TLS": that held
+   only because the listener was *expected* to bind to loopback, which nothing
+   enforced. On loopback it is unchanged — open and unencrypted, what a local
+   agent wants. Beyond loopback it now requires a read-scope bearer token and
+   a certificate, and the loader refuses the address unless both exist.
+   The dashboard got the opposite treatment for the opposite reason: it has no
+   credential it could present, so a non-loopback `[web].address` is refused
+   outright. See `docs/SECURITY.md` section 7.
 
 Dashboard features: live queue view, message search by sender, recipient,
 subject, status and time range, per-attempt delivery history, route status,

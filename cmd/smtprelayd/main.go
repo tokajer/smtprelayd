@@ -209,7 +209,7 @@ func serve(ctx context.Context, configPath string, console bool) error {
 
 	if cfg.Metrics.Enabled {
 		go func() {
-			if err := metrics.Serve(ctx, cfg.Metrics.Address, cfg.Metrics.Path, dm.Metrics(), log); err != nil {
+			if err := metrics.Serve(ctx, cfg, dm.Metrics(), log); err != nil {
 				log.Error("metrics listener stopped", "error", err)
 			}
 		}()

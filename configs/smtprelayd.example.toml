@@ -182,7 +182,11 @@ max_per_hour    = 12                       # cap, excess is recorded but not mai
 # Dashboard and metrics
 # ---------------------------------------------------------------------------
 
-# Binding beyond loopback requires TLS to be configured, else startup fails.
+# The dashboard has no login: the CSRF token on its action forms stops another
+# site from driving them, but anyone who can reach the page can do everything
+# on it. Loopback is therefore the authentication, and a non-loopback address
+# is a startup error. For remote access use an SSH tunnel or a reverse proxy
+# that authenticates.
 [web]
 address = "127.0.0.1:8025"
 enabled = true
@@ -200,6 +204,10 @@ name        = "ops"
 scope       = "admin"
 sha256      = "0000000000000000000000000000000000000000000000000000000000000000"
 
+# On loopback this is open and unencrypted, which is what a local monitoring
+# agent wants. Beyond loopback it requires a read-scope token from [[web.token]]
+# above and a [tls] certificate -- a bearer token in the clear on a LAN is a
+# credential handed to whoever is listening -- and startup fails without both.
 [metrics]
 address = "127.0.0.1:9025"
 path    = "/metrics"

@@ -4,6 +4,8 @@
 package config
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -250,5 +252,93 @@ func TestCleartextRouteRefusesHandshakeSettings(t *testing.T) {
 		if _, err := Load(write(t, body)); err == nil {
 			t.Fatalf("%s was silently ignored on a cleartext route", key)
 		}
+	}
+}
+
+// The dashboard has no authentication of its own, so a public bind is
+// refused outright rather than served with a certificate and no credential.
+func TestWebAddressBeyondLoopbackIsRefused(t *testing.T) {
+	body := baseConfig + `
+[web]
+enabled = true
+address = "0.0.0.0:8443"
+`
+	if e := loadErr(t, body); !strings.Contains(e, "no authentication") {
+		t.Fatalf("unexpected error: %s", e)
+	}
+
+	ok := baseConfig + `
+[web]
+enabled = true
+address = "127.0.0.1:8025"
+`
+	if _, err := Load(write(t, ok)); err != nil {
+		t.Fatalf("a loopback dashboard was rejected: %v", err)
+	}
+}
+
+// The metrics endpoint may bind publicly, because a monitoring system can
+// present a token — but only with a token that exists and only over TLS.
+func TestMetricsBeyondLoopbackNeedsTokenAndTLS(t *testing.T) {
+	noToken := baseConfig + `
+[metrics]
+enabled = true
+address = "0.0.0.0:9025"
+path = "/metrics"
+`
+	e := loadErr(t, noToken)
+	if !strings.Contains(e, "read scope") {
+		t.Fatalf("a public metrics listener with no token was not refused for that reason: %s", e)
+	}
+	if !strings.Contains(e, "TLS certificate") {
+		t.Fatalf("a public metrics listener with no certificate was not refused for that reason: %s", e)
+	}
+
+	// An admin-scope token satisfies read, so it must not be reported as
+	// missing; only the certificate should still be.
+	adminToken := noToken + `
+[[web.token]]
+name = "ops"
+scope = "admin"
+sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+`
+	e = loadErr(t, adminToken)
+	if strings.Contains(e, "read scope") {
+		t.Fatalf("an admin token was not accepted as read-capable: %s", e)
+	}
+
+	// Loopback stays open and needs neither, per the Checkmk decision.
+	loopback := baseConfig + `
+[metrics]
+enabled = true
+address = "127.0.0.1:9025"
+path = "/metrics"
+`
+	if _, err := Load(write(t, loopback)); err != nil {
+		t.Fatalf("a loopback metrics listener was rejected: %v", err)
+	}
+}
+
+func TestMatchTokenIsScopeAware(t *testing.T) {
+	sum := sha256.Sum256([]byte("s3cr3t"))
+	c := Defaults()
+	c.Web.Tokens = []Token{{Name: "checkmk", Scope: "read", SHA256: hex.EncodeToString(sum[:])}}
+
+	got, ok := c.MatchToken("s3cr3t")
+	if !ok || got.Name != "checkmk" {
+		t.Fatalf("a valid token did not match: %+v %v", got, ok)
+	}
+	if _, ok := c.MatchToken("wrong"); ok {
+		t.Fatal("a wrong token matched")
+	}
+	if _, ok := c.MatchToken(""); ok {
+		t.Fatal("an empty token matched")
+	}
+	if !c.HasReadableToken() {
+		t.Fatal("a read token was not recognised as read-capable")
+	}
+	c.Web.Tokens[0].Scope = "admin"
+	if !c.HasReadableToken() {
+		t.Fatal("an admin token must satisfy read")
 	}
 }

@@ -32,7 +32,22 @@ func CheckDir(path string) error {
 	return checkTrusted(path, true)
 }
 
+// checkSecretFile applies the config file's trust requirement to a file
+// named by a "file:" secret reference, plus a mode check the configuration
+// file does not need: a secret must not be readable by group or others.
+//
+// Like CheckConfigFile it also checks the directory holding the file, because
+// ownership of the file alone does not prevent the unlink-and-create
+// replacement that a writable parent allows — which is the same attack
+// CheckConfigFile was fixed for on 2026-08-10, and the reason this function
+// having been left behind was a finding. Both stop at the immediate parent:
+// an attacker who controls a higher ancestor can rename the whole subtree,
+// and that is not defended against here.
 func checkSecretFile(path string) error {
+	if err := checkTrusted(filepath.Dir(path), true); err != nil {
+		return fmt.Errorf("directory of secret file %s: %w", path, err)
+	}
+
 	fi, err := os.Lstat(path)
 	if err != nil {
 		return err

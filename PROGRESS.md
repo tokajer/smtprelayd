@@ -622,14 +622,25 @@ The selftest exception (8) remains deliberate and is not fixed.
 
 ## Known gaps from the 2026-08-11 security review
 
-A full-tree review on 2026-08-11 produced six findings. It changed no code, and
-they were not recorded here at the time — this section was added on the same
+A full-tree review on 2026-08-11 produced six findings, **all six now fixed**
+(1 and 2 on 2026-08-11 after a policy decision, 3-6 the same day). The review
+itself changed no code, and the findings were not recorded here at the time — this section was added on the same
 date, one finding later. The baseline was clean: gofmt, `go vet`, `go test
 ./...`, both cross-builds, `govulncheck` and `scripts/check-banned-imports.sh`
 all passed. Re-verify each against the tree before acting; the descriptions
 below date from that review.
 
-1. **High — the dashboard has no authentication and may be bound publicly.**
+1. ✅ **High — the dashboard had no authentication and could be bound
+   publicly.** Closed by refusing a non-loopback `[web].address` at startup,
+   the option chosen over adding a login now: loopback is what
+   `internal/web/csrf.go` already assumed, and the refusal costs no new
+   authentication code that would itself need reviewing. The error names the
+   way out (SSH tunnel or an authenticating reverse proxy) rather than only
+   the invariant. A token login for the dashboard — verifying a pasted token
+   against the stored digests, which is possible where a stored password is
+   not — remains open as its own phase. The original finding text follows.
+
+   **High — the dashboard has no authentication and may be bound publicly.**
    `Validate()` requires only a TLS certificate for a non-loopback
    `[web].address`, not tokens and not loopback. Verified live: `0.0.0.0:8443`
    with zero tokens served `/queue` and `/config` over the LAN address, and
@@ -639,9 +650,24 @@ below date from that review.
    assumes loopback is the trust boundary and nothing enforces that. Not
    insecure by default (`web.enabled` is false, the default address is
    loopback). **Not fixed.**
-2. **Medium — the metrics endpoint** has no loopback enforcement, no TLS and
-   no authentication. The decision log says the listener "is expected to bind
-   to loopback"; that is an expectation, not an enforcement. **Not fixed.**
+2. ✅ **Medium — the metrics endpoint** had no loopback enforcement, no TLS
+   and no authentication; the decision log said the listener "is expected to
+   bind to loopback", which is an expectation, not an enforcement. Fixed the
+   opposite way round from the dashboard, because the situation is the
+   opposite: a monitoring system *can* present a credential, so a public bind
+   is allowed but authenticated. Beyond loopback the endpoint now requires a
+   read-scope bearer token and a TLS certificate — a token in the clear on a
+   LAN is a credential handed to whoever is listening — and `Validate()`
+   refuses the address unless both exist. On loopback nothing changed. The
+   check lives in the handler as well as in validation, since a validation
+   with no enforcing handler behind it is the same expectation this finding
+   was about. Deliberately no rate limiting on failures here, unlike the API:
+   the endpoint exists to be polled continuously, and locking a monitoring
+   system out after five bad requests turns a credential mistake into an
+   alerting outage. Failures are logged with the source address.
+   Verified live against a public bind: 401 without a token, 401 with a wrong
+   one, 200 with a valid read token, and plaintext HTTP rejected by the TLS
+   listener.
 3. ✅ **Medium — `log.file` path traversal.** `main.go` joined `Log.File` to
    `DataDir` with no validation anywhere, which is exactly the "path built by
    joining an unvalidated string" `CLAUDE.md` bans. Reproduced against the
@@ -652,21 +678,45 @@ below date from that review.
    opens the file. Same input now fails `check` and `run` with
    `log.file "..." must not contain a ".." path element`, and no file appears
    outside the data directory.
-4. **Medium/Low — `history.db` and the log file are created 0644** while every
-   spool file is correctly 0600. The database holds every sender, recipient
-   and subject (`retain_subjects` defaults on). Contained on packaged installs
-   by the 0700 data directory, but `config.CheckDir` rejects only group/other
-   *write*, not *read*, so a 0755 data directory passes startup validation and
-   exposes it to any local user. **Not fixed.**
-5. **Low — `checkSecretFile` does not check the containing directory**, unlike
-   `CheckConfigFile`, which was fixed for exactly this unlink-and-replace
-   attack. Both check only the immediate parent, not the full ancestor chain.
-   **Not fixed.**
-6. **Low — a bare CR survives inside header values** (`readLineLimited` strips
-   only a trailing CR). Hardening, not an exploitable injection, but the
-   comment in `internal/listener/session.go` claiming every interpolated value
-   has already been control-character-checked overstates what is verified.
-   **Not fixed.**
+4. ✅ **Medium/Low — `history.db` and the log file were created 0644** while
+   every spool file is correctly 0600. Both are created by code that does not
+   let the caller choose a mode (the SQLite driver, lumberjack), so the fix is
+   a post-creation restrict: `fsmode.RestrictFile`, a no-op on Windows for the
+   same reason `spool.ensureMode` is. For the log it runs *before* lumberjack
+   opens the file, because lumberjack copies the current file's mode onto
+   every rotation — creating it 0600 is therefore what makes each generation
+   0600. A file left at 0644 by an earlier version is restricted on the next
+   start, verified by chmod'ing both back to 0644 and restarting. The
+   underlying weakness that made this reachable is untouched and still true:
+   `config.CheckDir` rejects only group/other *write*, not *read*, so a 0755
+   data directory still passes startup validation.
+5. ✅ **Low — `checkSecretFile` did not check the containing directory**,
+   unlike `CheckConfigFile`, which was fixed for exactly this
+   unlink-and-replace attack on 2026-08-10. It now does, on both platforms.
+   Unchanged and deliberate: both stop at the immediate parent, not the full
+   ancestor chain — an attacker controlling a higher ancestor can rename the
+   whole subtree, which is not defended against here.
+6. ✅ **Low — a bare CR survived inside header values.** `readLineLimited`
+   strips only the line's own terminator, so a CR inside the line was carried
+   into the spooled header block, where the next parser decides for itself
+   whether it ends a line. Now rejected — but through a new
+   `readStructuredLine` used by the command loop and the header scanner only,
+   *not* by `dotReader`. The first attempt put the check in the shared reader,
+   which would silently have started rejecting message bodies containing a
+   lone CR: legacy devices are exactly this relay's users, and a body CR
+   cannot split a header. Verified live on all three paths: header CR → 500,
+   command CR → 500, body CR → queued with the byte intact. The overstating
+   comment on `receivedHeader` now says CR/LF/NUL rather than "control
+   character", which is what is actually verified.
+
+**Found while fixing 4, not part of the review**: `Store.Open`'s DSN carries
+`_journal_mode=WAL`, but modernc's driver only reads `_pragma=`, so the
+history database has always run in the default rollback-journal mode. Verified
+against a live instance: `PRAGMA journal_mode` returns `delete`. Left as it
+is and noted in the code — switching to WAL changes on-disk and crash
+behaviour and is not a change to make as a side effect of a permissions fix.
+It is the same "looks configured but does nothing" class the strict TOML
+decoding exists to prevent, one layer below where that decoding can see.
 
 Confirmed solid in that review and not worth re-auditing: `ca_pin` on
 `VerifyConnection`/`VerifiedChains`, the `authms365` token endpoint, fully
@@ -835,3 +885,11 @@ it has.
 | 2026-08-11 | Journal columns are added by `Store.migrate` and are nullable with no default | `CREATE TABLE IF NOT EXISTS` silently leaves an existing table alone, so an upgraded installation would otherwise keep the old column set forever. NULL for a pre-migration row says "unknown", which is true; a `DEFAULT 0` would say "a zero-byte message", which is not |
 | 2026-08-11 | `RecordMessage` takes a `MessageRecord` struct instead of a parameter list | With the journal fields it would be eleven consecutive string parameters; two transposed at a call site would still compile and would store a sender as a recipient list |
 | 2026-08-11 | The latest attempt's code, response and count are carried on the message row in list queries | The dashboard's queue, search and bounce views must show why a message is deferred without a per-row follow-up query. This is also how the long-standing empty "Last response" column on the bounce view was found: `FindBounces` never selected an attempt row at all |
+| 2026-08-11 | `log.file` is resolved by `config.LogPath`, the only place it is joined to `service.data_dir` | A path built from a configuration string is what `CLAUDE.md` bans building without validation. Keeping the check in the same function as the join means a later refactor cannot separate them; a `..` element, an absolute path, a Windows volume name or a NUL now fails startup instead of relocating the log |
+| 2026-08-11 | The `log.file` containment check is lexical and says so | It proves the configured value cannot name a location outside the data directory. It does not prove the path is safe to open — a symlink planted inside the data directory still points wherever it points, which is `CheckDir`/`CheckDataDirACL`'s job. A check that promised more than it delivers would be worse than none |
+| 2026-08-11 | Files created by dependencies are restricted after creation (`internal/fsmode`), not left at their default 0644 | The SQLite driver and lumberjack both create 0644 and neither lets the caller choose. For the log this must happen before lumberjack opens it, because lumberjack copies the current file's mode onto every rotation — so creating it 0600 is what makes each generation 0600 |
+| 2026-08-11 | The bare-CR rejection is in `readStructuredLine`, used for commands and headers but not for the body | A CR inside a line that gets interpreted or re-emitted into a header block is a header-splitting risk; the same byte in a message body is content that cannot split anything. The first attempt put the check in the shared reader and would have started rejecting bodies from exactly the legacy devices this relay exists for |
+| 2026-08-11 | A non-loopback `[web].address` is refused outright rather than served with TLS and no credential | The dashboard has no credential it could present: the process holds only SHA-256 digests, so it cannot construct a bearer header for itself, and its CSRF token is fetched from the page and therefore is not authentication. Loopback is the authentication, which `internal/web/csrf.go` already assumed and nothing enforced. A login that verifies a pasted token against the digests is possible and deferred to its own phase |
+| 2026-08-11 | A non-loopback `[metrics].address` is allowed but requires a read-scope token and TLS, superseding "no authentication and no TLS" | The 2026-08-10 decision rested on the listener being expected to bind to loopback, which nothing enforced. Unlike the dashboard, a monitoring system can send a header, so the answer is a credential rather than a refusal; the certificate is required with it because a bearer token crossing a LAN in the clear is a credential given away. Loopback behaviour is unchanged |
+| 2026-08-11 | The metrics endpoint does not rate limit failed authentication, unlike the API | It exists to be polled continuously by one or two known systems. Backing off after five failures would convert a mistyped token into an alerting outage, which is a worse failure than the guessing this would slow down against an endpoint that exposes counters rather than message content |
+| 2026-08-11 | The constant-time token comparison lives once, in `config.MatchToken` | The API and the metrics endpoint authenticate against the same digests. Two implementations of one constant-time comparison is how one of them eventually stops being constant-time |

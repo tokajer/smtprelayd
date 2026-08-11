@@ -13,6 +13,8 @@ import (
 	"strings"
 
 	"github.com/natefinch/lumberjack"
+
+	"github.com/tokajer/smtprelayd/internal/fsmode"
 )
 
 // Redacted replaces the value of any attribute whose key looks like a
@@ -45,6 +47,15 @@ func New(o Options) (*slog.Logger, io.Closer, error) {
 		if err := os.MkdirAll(filepath.Dir(o.File), 0o700); err != nil {
 			return nil, nil, err
 		}
+		// lumberjack creates a new log file 0644 and copies the mode of the
+		// existing file when it rotates, so creating it here with 0600 is
+		// what makes every generation 0600 — including one left behind at
+		// 0644 by an earlier version, which is why an existing file is
+		// restricted too rather than only a new one.
+		if err := createRestricted(o.File); err != nil {
+			return nil, nil, err
+		}
+
 		var ljack io.WriteCloser
 		if o.MaxSizeMB > 0 {
 			ljack = &lumberjack.Logger{
@@ -86,6 +97,20 @@ func redact(_ []string, a slog.Attr) slog.Attr {
 type nopCloser struct{}
 
 func (nopCloser) Close() error { return nil }
+
+// createRestricted makes sure the log file exists and is 0600 before anything
+// else opens it. The log carries every queue ID, sender and recipient the
+// relay handled, so it is not a file other local accounts may read.
+func createRestricted(path string) error {
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+	if err != nil {
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	return fsmode.RestrictFile(path)
+}
 
 // FromContext returns the logger stored in ctx, or the default logger.
 func FromContext(ctx context.Context) *slog.Logger {

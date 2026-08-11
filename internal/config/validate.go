@@ -388,8 +388,23 @@ func (c *Config) Validate() error {
 	if c.Web.Enabled {
 		if host, _, err := net.SplitHostPort(c.Web.Address); err != nil {
 			add("web.address %q: %v", c.Web.Address, err)
-		} else if !isLoopbackHost(host) && (c.TLS.CertFile == "" || c.TLS.KeyFile == "") {
-			add("web.address binds beyond loopback but no TLS certificate is configured")
+		} else if !isLoopbackHost(host) {
+			// The dashboard has no authentication of its own. Its
+			// requeue and delete forms are protected by a CSRF token
+			// fetched from the page itself, which stops another site
+			// from driving them but is not a credential: anyone who can
+			// reach the page can do everything on it. Bearer tokens
+			// cannot close this — the process holds only their SHA-256
+			// digests, so the dashboard cannot present one for itself.
+			//
+			// Until a login exists, loopback *is* the authentication,
+			// which is what internal/web/csrf.go already assumes. A
+			// public bind is therefore refused rather than served with a
+			// TLS certificate and no credential, which is what this
+			// check required until 2026-08-11.
+			add("web.address %q binds beyond loopback and the dashboard has no authentication; "+
+				"bind it to 127.0.0.1 and reach it through an SSH tunnel or a reverse proxy that authenticates",
+				c.Web.Address)
 		}
 	}
 	for i, t := range c.Web.Tokens {
@@ -403,8 +418,23 @@ func (c *Config) Validate() error {
 		}
 	}
 	if c.Metrics.Enabled {
-		if _, _, err := net.SplitHostPort(c.Metrics.Address); err != nil {
+		if host, _, err := net.SplitHostPort(c.Metrics.Address); err != nil {
 			add("metrics.address %q: %v", c.Metrics.Address, err)
+		} else if !isLoopbackHost(host) {
+			// Unlike the dashboard, this endpoint has a credential it can
+			// actually use: a monitoring system sets a header. So a public
+			// bind is allowed, but only authenticated — and only over TLS,
+			// because a bearer token sent in the clear on a LAN is a
+			// credential handed to whoever is listening. On loopback the
+			// endpoint stays open, per the original Checkmk decision.
+			if !c.HasReadableToken() {
+				add("metrics.address %q binds beyond loopback but no [[web.token]] with read scope is configured; "+
+					"such a listener could never be polled", c.Metrics.Address)
+			}
+			if c.TLS.CertFile == "" || c.TLS.KeyFile == "" {
+				add("metrics.address %q binds beyond loopback but no TLS certificate is configured; "+
+					"the bearer token would be sent in the clear", c.Metrics.Address)
+			}
 		}
 		if !strings.HasPrefix(c.Metrics.Path, "/") {
 			add("metrics.path %q: must start with /", c.Metrics.Path)
@@ -519,6 +549,12 @@ func printableASCII(s string) bool {
 	}
 	return true
 }
+
+// IsLoopbackHost reports whether host names the local machine only. Exported
+// because the metrics listener has to make the same distinction at serve time
+// that this package makes at validation time, and two spellings of "is this
+// loopback" is one more than the number that can be right.
+func IsLoopbackHost(host string) bool { return isLoopbackHost(host) }
 
 func isLoopbackHost(host string) bool {
 	if host == "" {

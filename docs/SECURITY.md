@@ -74,16 +74,25 @@ attacker-influenced values and writes them into a message.
 
 - Any address or display name containing CR, LF, NUL or a bare control
   character is rejected outright. It is never sanitised and re-used.
-- Rewritten headers are produced by structural encoding through
-  `go-message`, never by concatenating strings.
+- A bare CR inside a command or a header line is rejected too, because the
+  line is either interpreted or written back into the spooled header block,
+  and whether that CR ends a line is then the next parser's decision. The
+  message body is deliberately exempt: a lone CR there cannot split a header,
+  and rejecting it would cost a legacy device the whole message.
+- Rewritten headers are produced by replacing whole fields in a parsed header
+  block (`internal/rewrite`), never by concatenating strings. The block parser
+  is first-party; `go-message`, which this section named until 2026-08-11, has
+  never been a dependency.
 - `X-Original-From` carries a properly encoded value, or is omitted. It is
   never a raw copy of untrusted input.
 - Envelope addresses are validated against RFC 5321 length limits: 64 octets
   local part, 255 domain, 254 total.
 - Line length is enforced at 1000 octets including CRLF. Over-long lines are
   rejected during the data phase, not repaired.
-- Limits on header count, total header size and MIME nesting depth prevent
-  parser resource exhaustion.
+- Limits on header count and total header size prevent parser resource
+  exhaustion. A MIME nesting depth bound is named here as future work, not as
+  a control that exists: no MIME parsing exists at all, so there is no nesting
+  to bound and nothing that could recurse on it.
 - The relay adds its own `Received` header and strips any client-supplied
   header that would misrepresent its origin.
 
@@ -124,6 +133,13 @@ attacker-influenced values and writes them into a message.
   administrators.
 - Spool files 0600, directories 0700. Permissions are verified at startup and
   a mismatch is a startup failure.
+- The history database and the log file are 0600 as well. Both are created by
+  code that does not let the caller choose a mode — the SQLite driver and
+  lumberjack, which default to 0644 — so `fsmode.RestrictFile` restricts them
+  after creation, including a file an earlier version left world-readable.
+  For the log this happens before lumberjack opens it, because lumberjack
+  copies the mode of the current file onto each rotation. Both files hold
+  every sender, recipient and, unless `retain_subjects` is off, every subject.
 - Every file the service writes lives under the data directory, and the
   configuration cannot move one outside it. `log.file` is the only setting
   that becomes a path by being joined to another; `config.LogPath` is the
@@ -143,10 +159,29 @@ attacker-influenced values and writes them into a message.
 
 ## 7. Dashboard and API
 
-- Bound to loopback by default. Binding elsewhere requires TLS to be
-  configured; the loader refuses a non-loopback bind without it.
-- Bearer tokens compared in constant time against stored hashes. Scopes `read`
-  and `admin`; every destructive action requires `admin`.
+- **The dashboard must bind to loopback.** It has no authentication of its
+  own: the CSRF token on its requeue and delete forms is fetched from the page
+  itself, so it stops another site from driving those actions but is not a
+  credential. Bearer tokens cannot close this either — the process holds only
+  their SHA-256 digests, so the dashboard cannot present one for itself.
+  Loopback therefore *is* the authentication, and the loader refuses a
+  non-loopback `[web].address` outright rather than serving it with a
+  certificate and no credential. Remote access goes through an SSH tunnel or
+  an authenticating reverse proxy. A login that verifies a pasted token
+  against the stored digests is possible and is recorded as future work.
+- **The metrics endpoint may bind beyond loopback, but only authenticated and
+  only over TLS.** Unlike the dashboard, a monitoring system can present a
+  credential, so this is a token check rather than a refusal: a read-scope
+  bearer token, plus a certificate, because a token sent in the clear across a
+  LAN is a credential handed to whoever is listening. The loader refuses such
+  an address unless both exist. On loopback the endpoint stays open and
+  unencrypted, which is what a local Checkmk agent wants. Failed attempts are
+  logged with the source address but not rate limited: this endpoint exists to
+  be polled continuously, and locking a monitoring system out after five bad
+  requests would turn a credential mistake into an alerting outage.
+- Bearer tokens compared in constant time against stored hashes, in one place
+  (`config.MatchToken`) shared by the API and the metrics endpoint. Scopes
+  `read` and `admin`; every destructive action requires `admin`.
 - Failed authentication is rate limited per source address with exponential
   backoff, logged, and exposed as a metric.
 - Every `admin` action writes an immutable audit record: token name, source

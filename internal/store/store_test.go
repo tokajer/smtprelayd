@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 )
@@ -614,5 +615,40 @@ func TestMigrationAddsJournalColumns(t *testing.T) {
 	}
 	if fresh.SizeBytes != 1024 || fresh.HeaderCount != 8 || fresh.Helo != "device.local" {
 		t.Errorf("journal columns not written after migration: %+v", fresh)
+	}
+}
+
+// The database holds every sender, recipient and subject, so it must not be
+// left at the driver's default 0644 — and neither must the WAL sidecar,
+// which holds the same rows before a checkpoint.
+func TestDatabaseFilesAreNotWorldReadable(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("mode bits do not govern access on Windows; the data directory DACL does")
+	}
+	dir := t.TempDir()
+	s, err := Open(dir, slog.New(slog.NewTextHandler(io.Discard, nil)), 90, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	// Force a write so the -wal sidecar exists.
+	now := time.Now()
+	if err := s.RecordMessage(testRecord("MODE-TEST", now, now.Add(time.Hour))); err != nil {
+		t.Fatal(err)
+	}
+
+	base := filepath.Join(dir, "spool", "history.db")
+	for _, path := range []string{base, base + "-wal", base + "-shm"} {
+		fi, err := os.Stat(path)
+		if os.IsNotExist(err) {
+			continue // sidecars are not guaranteed to exist at this moment
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		if fi.Mode().Perm()&0o077 != 0 {
+			t.Errorf("%s is mode %04o, want no group or other access", filepath.Base(path), fi.Mode().Perm())
+		}
 	}
 }

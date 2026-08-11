@@ -4,12 +4,17 @@
 package metrics
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/tokajer/smtprelayd/internal/config"
 	"github.com/tokajer/smtprelayd/internal/spool"
 )
 
@@ -167,5 +172,60 @@ func TestServeHTTPServesText(t *testing.T) {
 	}
 	if !strings.Contains(rec.Body.String(), "smtprelayd_delivered_total") {
 		t.Errorf("expected metric names in body:\n%s", rec.Body.String())
+	}
+}
+
+// A public metrics listener is wrapped in bearer-token authentication. The
+// wrapper is tested directly: config.Validate refuses to build such a
+// listener without a token, but a validation that is not backed by an
+// enforcing handler is the expectation-without-enforcement this fixes.
+func TestRequireTokenGuardsTheExposition(t *testing.T) {
+	sum := sha256.Sum256([]byte("polling-token"))
+	cfg := config.Defaults()
+	cfg.Web.Tokens = []config.Token{
+		{Name: "checkmk", Scope: "read", SHA256: hex.EncodeToString(sum[:])},
+		{Name: "nobody", Scope: "write-only-nonsense", SHA256: strings.Repeat("a", 64)},
+	}
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	reached := false
+	h := requireToken(cfg, http.HandlerFunc(func(http.ResponseWriter, *http.Request) { reached = true }), log)
+
+	cases := []struct {
+		name   string
+		header string
+		want   int
+	}{
+		{"no header", "", http.StatusUnauthorized},
+		{"wrong token", "Bearer nope", http.StatusUnauthorized},
+		{"not a bearer scheme", "Basic cG9sbGluZy10b2tlbg==", http.StatusUnauthorized},
+		{"valid read token", "Bearer polling-token", http.StatusOK},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			reached = false
+			req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+			if tc.header != "" {
+				req.Header.Set("Authorization", tc.header)
+			}
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+
+			if tc.want == http.StatusOK {
+				if !reached {
+					t.Fatalf("a valid token did not reach the exposition (status %d)", rec.Code)
+				}
+				return
+			}
+			if reached {
+				t.Fatal("the exposition was reached without a valid token")
+			}
+			if rec.Code != tc.want {
+				t.Fatalf("got status %d, want %d", rec.Code, tc.want)
+			}
+			if got := rec.Header().Get("WWW-Authenticate"); got == "" {
+				t.Error("a 401 must name the scheme it expects")
+			}
+		})
 	}
 }
