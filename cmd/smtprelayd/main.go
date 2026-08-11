@@ -45,10 +45,11 @@ commands:
   version    print the version and exit
 
 Windows only, requires an elevated prompt:
-  install    register as a Windows service (runs as NT SERVICE\smtprelayd)
-  uninstall  remove the Windows service
-  start      start the registered Windows service
-  stop       stop the registered Windows service
+  install         register as a Windows service (runs as NT SERVICE\smtprelayd)
+  uninstall       remove the Windows service
+  start           start the registered Windows service
+  stop            stop the registered Windows service
+  secure-datadir  write the data directory ACL the service requires to start
 
 On Linux the service is managed with systemctl instead; the packaged unit
 file registers it as smtprelayd.service.
@@ -101,6 +102,9 @@ func run(cmd, configPath string, console bool) error {
 	case "version":
 		fmt.Println("smtprelayd", version)
 		return nil
+
+	case "secure-datadir":
+		return secureDataDir(configPath)
 
 	case "check":
 		cfg, err := config.Load(configPath)

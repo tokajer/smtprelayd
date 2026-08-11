@@ -13,7 +13,17 @@ and the Windows service wrapper (normally phase 5) were pulled forward and
 validated. MSI installs and uninstalls; `install`/`uninstall`/`start`/`stop`
 work on Windows. Log rotation and Windows ACL verification at startup are
 complete.
-**Last session**: 2026-08-11 (thirteenth session) — Field fix, no phase work.
+**Last session**: 2026-08-11 (fourteenth session) — Installer fix, no phase
+work. The MSI never produced a data directory that `CheckDataDirACL` accepts,
+so no fresh Windows install could start; `util:PermissionEx` adds ACEs but
+leaves the DACL inheriting from `%ProgramData%`. Replaced by
+`config.SecureDataDir`, invoked as `smtprelayd secure-datadir` from a deferred
+custom action after the service registration, and named as the remediation in
+`CheckDataDirACL`'s own error message. Not compile-checked and no MSI built —
+no Go toolchain or WiX in the session; `go vet`, `gofmt`, `go test ./...` and
+an install on hardware still need to be run. See Open defects for the full
+write-up.
+**Previous session**: 2026-08-11 (thirteenth session) — Field fix, no phase work.
 A Windows deployment accepted mail but failed every enqueue and every delivered
 message's cleanup with `sync ...\spool\queue: Access is denied`. `syncDir`'s
 comment already said directory fsync "is not supported on Windows and fails
@@ -35,9 +45,8 @@ in the session; `go vet`, `gofmt` and `go test ./...` still need to be run.
 Field-verified on the reporting host the same day: with the patched binary and
 a corrected DACL the relay logs `message accepted` and delivers, where before
 it accepted and relayed the message but then failed both the enqueue and the
-delivered-message cleanup. Separately found and not yet fixed: the Windows
-installer never sets that DACL, so no fresh install starts at all — see Open
-defects.
+delivered-message cleanup. Separately found in that session and fixed in the next: the
+Windows installer never set that DACL, so no fresh install started at all.
 **Previous session**: 2026-08-11 (twelfth session) — Field fix, no phase work. A
 deployed instance passed `check` and then failed every start with
 `listen tcp 10.0.0.10:25: bind: cannot assign requested address`: the example
@@ -528,32 +537,43 @@ The selftest exception (8) remains deliberate and is not fixed.
 
 ### The Windows installer does not set the data directory DACL (2026-08-11)
 
-Found during the first field deployment on Windows. A fresh install refuses to
-start with:
+**Fixed 2026-08-11.** Found during the first field deployment on Windows. A
+fresh install refused to start with:
 
 ```
 smtprelayd: data directory ACL: C:\ProgramData\SMTPRelayd: DACL is not
 protected against inheritance
 ```
 
-`CheckDataDirACL` is correct to refuse. The directory as the installer leaves
-it inherits from `C:\ProgramData`, which carries
-`BUILTIN\Users:(OI)(CI)(RX)` — every interactive user on the host can read the
-spool, and the spool holds message bodies. The check exists precisely to catch
-this; what is missing is the installer side setting an ACL that passes it.
+`CheckDataDirACL` was correct to refuse. The directory as the installer left
+it inherited from `C:\ProgramData`, which carries
+`BUILTIN\Users:(OI)(CI)(RX)` — every interactive user on the host could read
+the spool, and the spool holds message bodies.
 
-The operator cannot fix it by hand either, which is what made the deployment
-expensive. `icacls /inheritance:r` on the directory fails with *Access is
-denied* against the as-installed ACL, so the first workaround anyone reaches
-for is `takeown`. That succeeds, and takes the ACE for the service account
-with it — the service can then no longer create its own log file, which looks
-like a second, unrelated fault. Recovering from that state took several
-rounds. Note also that `icacls ... /grant "Administrators:..."` fails on a
-localised Windows (`No mapping between account names and security IDs was
-done`); the SID form `*S-1-5-32-544` is required.
+Cause: the `util:PermissionEx` elements in `smtprelayd.wxs` add ACEs but do
+not set `PROTECTED_DACL_SECURITY_INFORMATION`, so the two explicit grants were
+appended on top of the inherited ones instead of replacing them. That answers
+the untriaged question — the MSI never produced a passing directory, and no
+Windows install has passed the check since it landed.
 
-The end state that works, verified in the field, is three explicit ACEs and no
-inherited ones:
+Fix: `config.SecureDataDir` (`internal/config/secure_windows.go`) writes the
+DACL with `SetNamedSecurityInfo` and `PROTECTED_DACL_SECURITY_INFORMATION`,
+exposed as `smtprelayd secure-datadir` and invoked by the MSI as a deferred
+custom action sequenced after the service registration, since the ACE for the
+virtual account cannot be resolved before the service exists. It runs on
+repair and upgrade too. The well-known SIDs are constructed rather than looked
+up by name: `icacls ... /grant "Administrators:..."` fails on a localised
+Windows (`No mapping between account names and security IDs was done`), and
+`LookupAccountName` fails there for the same reason.
+
+The owner is reset to `BUILTIN\Administrators` along with the DACL. Without
+that, `icacls /inheritance:r` fails with *Access is denied*, so the first
+workaround anyone reaches for is `takeown` — which succeeds and takes the ACE
+for the service account with it, leaving the service unable to create its own
+log file. That looks like a second, unrelated fault; recovering from it took
+several rounds in the field and is what made the deployment expensive.
+
+The equivalent by hand, if it is ever needed without the binary:
 
 ```powershell
 icacls "C:\ProgramData\SMTPRelayd" /inheritance:r
@@ -566,17 +586,10 @@ icacls "C:\ProgramData\SMTPRelayd" /grant "NT SERVICE\smtprelayd:(OI)(CI)F" /T /
 grant covers the directory itself but not files created in it later, so the
 service still cannot write its log despite appearing to own the directory.
 
-To fix in `packaging/windows/`: emit this DACL at install time, either through
-WiX `PermissionEx` or a deferred custom action, and drop inheritance on the
-data directory. Two things to decide alongside it: whether the uninstaller
-should remove a spool that may still hold undelivered mail, and whether
-`CheckDataDirACL`'s error message should name the remediation instead of only
-the violated invariant — an operator who reads only that line has no path
-forward from it.
-
-Untriaged: whether the MSI ever set this correctly, or whether the check
-landed after the packaging was written and no Windows install has passed it
-since.
+Not verified on hardware yet: the fix is written against the field-verified
+end state above, but no MSI has been built and installed from this revision.
+Phase 5 checklist item `icacls C:\ProgramData\SMTPRelayd` stays open until
+it has.
 
 ## Open questions
 
@@ -670,6 +683,9 @@ since.
 | 2026-08-11 | A notification message's own delivery outcome updates a dedicated `smtprelayd_notification_failures_total` counter, never the triggering route's own delivered/bounced/deferred/auth-failure counters | Those describe the relay's client-facing traffic; folding postmaster mail into them would make a notify-route outage indistinguishable from a real production delivery problem on that route |
 | 2026-08-11 | Loop prevention is a persisted `spool.Envelope.Notification` bool, not an in-memory set of queue IDs the notifier created | An in-memory set is lost on restart while the notification message can still be sitting in the queue; a persisted flag survives exactly the case (crash or restart mid-retry) where losing the distinction would let a notification's own failure start a real loop |
 | 2026-08-11 | The data directory DACL is the installer's responsibility, not the daemon's | `CheckDataDirACL` refuses to start on an inherited DACL, which is right — `C:\ProgramData` grants `Users:(RX)` and the spool holds message bodies. Having the daemon repair the ACL itself would mean a service that widens or narrows its own permissions at startup, and would defeat the check. The MSI must produce a directory that already passes |
+| 2026-08-11 | The MSI writes the DACL by calling `smtprelayd secure-datadir`, not with WiX `util:PermissionEx` | `util:PermissionEx` does not protect the DACL against inheritance, which is the whole point of the check; and the ACL that `CheckDataDirACL` verifies and the ACL the installer writes are one contract, so they belong in one place, exactly as the SCM registration already does |
+| 2026-08-11 | `secure-datadir` is a subcommand, not something `install` does | It has to run on repair and upgrade, not only on first registration, and it is the only remediation an operator has when an ACL was lost — `CheckDataDirACL`'s error message now names it |
+| 2026-08-11 | The uninstaller leaves the data directory in place | The spool can still hold accepted, acknowledged, undelivered mail at uninstall time, plus the history database. Deleting it silently would lose mail the relay took responsibility for |
 | 2026-08-11 | Directory fsync is a build-tag no-op on Windows rather than an error the caller filters | `FlushFileBuffers` requires a handle opened with `GENERIC_WRITE`, which a directory handle cannot have, so the call can only ever fail there. Recognising its error class was the wrong shape of fix — it had already been attempted, against `ErrInvalid` when the real error is EACCES, and every enqueue on Windows failed for it. The durability it buys on Unix is provided by NTFS's own rename journalling |
 | 2026-08-11 | `os.Chmod` on the spool directories is skipped on Windows | Mode bits are not the access-control mechanism there — `os.Chmod` only toggles the read-only attribute — so the call enforced nothing while being able to fail on a directory whose DACL denies WRITE_ATTRIBUTES. The explicit DACL the installer sets and `CheckDataDirACL` verifies is what actually restricts the data directory |
 | 2026-08-11 | `scripts/check-banned-imports.sh` matches importer/banned pairs against a named allowlist instead of asserting the banned package is absent from the graph | `modernc.org/sqlite`, which the no-cgo rule forces, pulls `os/exec` in through `modernc.org/libc` on every GOOS, so the absence assertion could no longer hold. Allowing the package outright would have retired the rule; naming the single importer keeps `kardianos/service` — the regression the script exists for — a failure, and reports who imports what when it fires |

@@ -251,7 +251,15 @@ The load-bearing principles:
   sanitisation. Headers are built structurally, never by concatenation.
 - **Least privilege by default.** Unprivileged service account on both
   platforms, capability-based binding for port 25, hardened systemd unit,
-  explicit Windows ACLs, 0600 spool files verified at startup.
+  explicit Windows ACLs, 0600 spool files verified at startup. On Windows the
+  data directory DACL is an invariant, not a default: full control for SYSTEM,
+  Administrators and `NT SERVICE\smtprelayd`, inheritable, and **protected**
+  against inheritance from `%ProgramData%`, whose `BUILTIN\Users:(OI)(CI)(RX)`
+  would otherwise expose message bodies to every interactive account. The
+  installer writes it (`config.SecureDataDir`), startup verifies it
+  (`config.CheckDataDirACL`) and refuses to run otherwise. The daemon never
+  repairs it itself — a service that widens its own permissions at startup
+  would defeat the check.
 - **Misconfiguration is the realistic attack.** `smtprelayd selftest` actively
   verifies the service is not an open relay and runs in CI.
 - **The service account is the escalation target.** Configuration file,
@@ -279,6 +287,12 @@ The load-bearing principles:
   source building an `.msi` that registers the service by running
   `smtprelayd.exe install` as a deferred custom action rather than WiX's own
   `ServiceInstall`, so the SCM registration always matches what
-  `cmd/smtprelayd/service_windows.go` configures. `.github/workflows/release.yml`
-  builds and publishes all three on a `vX.Y.Z` tag. Neither package starts the
-  service automatically — there is no configuration yet on a fresh install.
+  `cmd/smtprelayd/service_windows.go` configures. The data directory ACL is set
+  the same way, by `smtprelayd.exe secure-datadir` after the service
+  registration, and for the same reason: WiX's `util:PermissionEx` cannot
+  protect a DACL against inheritance, and the code that writes the ACL belongs
+  next to the code that verifies it. `.github/workflows/release.yml` builds and
+  publishes all three on a `vX.Y.Z` tag. Neither package starts the service
+  automatically — there is no configuration yet on a fresh install. The MSI
+  does not remove `%ProgramData%\SMTPRelayd` on uninstall: the spool may still
+  hold accepted, undelivered mail.

@@ -55,9 +55,15 @@ func checkSecretFile(path string) error {
 	return nil
 }
 
-// CheckDataDirACL verifies that the data directory has the expected ACL set by
-// the installer. The MSI sets an explicit DACL allowing only Administrators
-// and the NT SERVICE\smtprelayd virtual account, with no inherited access.
+// aclRemedy names the way out of every ACL violation below. An operator who
+// reads only the failing invariant has no path forward from it, which is what
+// made the first field deployment expensive.
+const aclRemedy = `; run "smtprelayd secure-datadir" from an elevated prompt`
+
+// CheckDataDirACL verifies that the data directory has the expected ACL, as
+// written by SecureDataDir during installation: full control for SYSTEM,
+// Administrators and the NT SERVICE\smtprelayd virtual account, and no
+// inherited access.
 func CheckDataDirACL(path string) error {
 	fi, err := os.Lstat(path)
 	if err != nil {
@@ -82,13 +88,13 @@ func CheckDataDirACL(path string) error {
 
 	acl, defaulted, err := sd.DACL()
 	if err != nil {
-		return fmt.Errorf("%s: no DACL present (should be protected with explicit ACEs): %w", path, err)
+		return fmt.Errorf("%s: no DACL present (should be protected with explicit ACEs)%s: %w", path, aclRemedy, err)
 	}
 	if defaulted {
-		return fmt.Errorf("%s: DACL is defaulted instead of explicit", path)
+		return fmt.Errorf("%s: DACL is defaulted instead of explicit%s", path, aclRemedy)
 	}
 	if acl == nil {
-		return fmt.Errorf("%s: DACL is empty (fully permissive)", path)
+		return fmt.Errorf("%s: DACL is empty (fully permissive)%s", path, aclRemedy)
 	}
 
 	control, _, err := sd.Control()
@@ -96,11 +102,11 @@ func CheckDataDirACL(path string) error {
 		return err
 	}
 	if control&windows.SE_DACL_PROTECTED == 0 {
-		return fmt.Errorf("%s: DACL is not protected against inheritance", path)
+		return fmt.Errorf("%s: DACL is not protected against inheritance%s", path, aclRemedy)
 	}
 
 	if acl.AceCount == 0 {
-		return fmt.Errorf("%s: ACL is empty", path)
+		return fmt.Errorf("%s: ACL is empty%s", path, aclRemedy)
 	}
 
 	return nil
