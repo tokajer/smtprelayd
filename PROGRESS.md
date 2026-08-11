@@ -13,7 +13,27 @@ and the Windows service wrapper (normally phase 5) were pulled forward and
 validated. MSI installs and uninstalls; `install`/`uninstall`/`start`/`stop`
 work on Windows. Log rotation and Windows ACL verification at startup are
 complete.
-**Last session**: 2026-08-11 (twelfth session) — Field fix, no phase work. A
+**Last session**: 2026-08-11 (thirteenth session) — Field fix, no phase work.
+A Windows deployment accepted mail but failed every enqueue and every delivered
+message's cleanup with `sync ...\spool\queue: Access is denied`. `syncDir`'s
+comment already said directory fsync "is not supported on Windows and fails
+with EACCES or similar", but the code only filtered `os.ErrInvalid`, so the
+EACCES it predicted was returned to the caller and aborted the operation.
+`FlushFileBuffers` needs a handle opened with `GENERIC_WRITE`, which cannot be
+obtained for a directory, so the call could never have succeeded there — it is
+now a no-op on Windows via a build-tag split (`dirsync_windows.go` /
+`dirsync_unix.go`) rather than an error class the caller tries to recognise.
+Durability is unaffected: the metadata and body files are individually fsynced
+before the rename, and NTFS journals the rename. On Unix a directory fsync
+failure is still fatal, unchanged. Same split applied to the `os.Chmod(d,
+0o700)` in `Open` — the second symptom of the same deployment, `chmod
+...\spool\tmp: Access is denied`. Mode bits do not govern access on Windows
+(`os.Chmod` only toggles the read-only attribute); the data directory's
+explicit DACL does, which the installer sets and `CheckDataDirACL` already
+verifies at startup. Not compile-checked or tested this session — no Go
+toolchain was available; `go build` for both GOOS, `go vet`, `gofmt` and
+`go test ./...` still need to be run.
+**Previous session**: 2026-08-11 (twelfth session) — Field fix, no phase work. A
 deployed instance passed `check` and then failed every start with
 `listen tcp 10.0.0.10:25: bind: cannot assign requested address`: the example
 config's placeholder address had been kept and is not assignable on that host.
@@ -488,8 +508,10 @@ The selftest exception (8) remains deliberate and is not fixed.
 2. ✅ `config.CheckConfigFile` now validates directory holding the file,
    preventing unlink-and-create replacement in group-writable /etc/smtprelayd.
 3. ✅ `checkSecretFile` now verifies ownership like `checkTrusted`.
-4. ✅ `spool.syncDir` now propagates fsync errors on Linux; ErrInvalid
-   (Windows) still ignored as documented.
+4. ✅ `spool.syncDir` now propagates fsync errors on Linux. The Windows half
+   of this was wrong until 2026-08-11: it filtered `ErrInvalid` but the actual
+   error is EACCES, so every rename-completing sync failed. Windows is now a
+   build-tag no-op, not an error class the caller tries to recognise.
 5. ✅ `limits.max_headers` and `limits.max_header_bytes` now validated as > 0.
 6. ✅ `MAIL FROM SIZE` is now validated early in DATA phase if present.
 7. ✅ Token client proxy environment removed; no metadata leakage through proxies.
@@ -588,4 +610,6 @@ The selftest exception (8) remains deliberate and is not fixed.
 | 2026-08-11 | The volume cap carries a suppressed client's failures into the next hour's digest instead of dropping them | "Records them for the next hour" in the plan means the underlying event survives being capped; only the act of sending is suppressed, not the fact that a failure happened |
 | 2026-08-11 | A notification message's own delivery outcome updates a dedicated `smtprelayd_notification_failures_total` counter, never the triggering route's own delivered/bounced/deferred/auth-failure counters | Those describe the relay's client-facing traffic; folding postmaster mail into them would make a notify-route outage indistinguishable from a real production delivery problem on that route |
 | 2026-08-11 | Loop prevention is a persisted `spool.Envelope.Notification` bool, not an in-memory set of queue IDs the notifier created | An in-memory set is lost on restart while the notification message can still be sitting in the queue; a persisted flag survives exactly the case (crash or restart mid-retry) where losing the distinction would let a notification's own failure start a real loop |
+| 2026-08-11 | Directory fsync is a build-tag no-op on Windows rather than an error the caller filters | `FlushFileBuffers` requires a handle opened with `GENERIC_WRITE`, which a directory handle cannot have, so the call can only ever fail there. Recognising its error class was the wrong shape of fix — it had already been attempted, against `ErrInvalid` when the real error is EACCES, and every enqueue on Windows failed for it. The durability it buys on Unix is provided by NTFS's own rename journalling |
+| 2026-08-11 | `os.Chmod` on the spool directories is skipped on Windows | Mode bits are not the access-control mechanism there — `os.Chmod` only toggles the read-only attribute — so the call enforced nothing while being able to fail on a directory whose DACL denies WRITE_ATTRIBUTES. The explicit DACL the installer sets and `CheckDataDirACL` verifies is what actually restricts the data directory |
 | 2026-08-11 | `scripts/check-banned-imports.sh` matches importer/banned pairs against a named allowlist instead of asserting the banned package is absent from the graph | `modernc.org/sqlite`, which the no-cgo rule forces, pulls `os/exec` in through `modernc.org/libc` on every GOOS, so the absence assertion could no longer hold. Allowing the package outright would have retired the rule; naming the single importer keeps `kardianos/service` — the regression the script exists for — a failure, and reports who imports what when it fires |
