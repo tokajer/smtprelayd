@@ -95,7 +95,7 @@ func Open(dataDir string) (*Spool, error) {
 		if err := os.MkdirAll(d, 0o700); err != nil {
 			return nil, err
 		}
-		if err := ensureMode(d); err != nil {
+		if err := os.Chmod(d, 0o700); err != nil {
 			return nil, err
 		}
 	}
@@ -625,5 +625,21 @@ func (s *Spool) SetQuota(maxGB int, warnPercent int) {
 	s.warnQuotaPercent = warnPercent
 }
 
-// syncDir and ensureMode are platform-specific; see dirsync_unix.go and
-// dirsync_windows.go.
+// syncDir flushes a directory entry so that a rename survives a power loss.
+func syncDir(path string) error {
+	d, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer d.Close()
+	// Directory fsync is not supported on Windows and fails with EACCES or
+	// similar there; that is not an error worth aborting a delivery for.
+	// On other platforms, fsync errors should be reported.
+	if err := d.Sync(); err != nil {
+		if errors.Is(err, os.ErrInvalid) {
+			return nil
+		}
+		return err
+	}
+	return nil
+}
