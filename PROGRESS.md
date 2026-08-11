@@ -14,7 +14,27 @@ and the Windows service wrapper (normally phase 5) were pulled forward and
 validated. MSI installs and uninstalls; `install`/`uninstall`/`start`/`stop`
 work on Windows. Log rotation and Windows ACL verification at startup are
 complete.
-**Last session**: 2026-08-11 (sixteenth session) — Dashboard visual redesign
+**Last session**: 2026-08-11 (seventeenth session) — Second full-tree security
+review, no phase work and **no code changed**. Requested as "prüfe mir das
+ganze auf Schwachstellen und Sicherheit". Eleven findings, all open, written
+up in `docs/Findings.md` with a checklist so they can be worked one at a time;
+this file carries only the pointer under "Open security findings". Three were
+reproduced against the tree rather than reasoned about: a bare `<LF>.<LF>`
+ends DATA and the remainder is executed as SMTP commands (the smuggling shape
+— an attacker who controls only a message body on an allowlisted host gains
+control of the envelope), the dashboard serves a full page for any `Host`
+header, which makes the loopback-is-the-authentication decision reachable by
+DNS rebinding from a page the operator visits, and `/bounces?class=` has never
+worked because `FindBounces` filters on a column its own derived table does
+not select. The third Medium is that `limits.spool_max_gb` does not bound disk
+usage at all: `Fail()` drops a message from the index that `spoolSize()` sums,
+so a permanently failing message frees quota while still occupying the disk,
+and nothing ever prunes `spool/failed`. Baseline was clean: `gofmt`, `go vet`,
+`go test ./...` and `govulncheck` v1.1.4 (run locally this time, no
+vulnerabilities). What the review confirmed solid is recorded in
+`docs/Findings.md` too, so the next review starts from it instead of
+repeating it.
+**Previous session**: 2026-08-11 (sixteenth session) — Dashboard visual redesign
 plus a configurable colour theme, no phase work. Requested as "make the
 dashboard fancy, and let the colours be customised in the config file".
 `internal/web/static/style.css` was rewritten around the design tokens it
@@ -769,6 +789,36 @@ Confirmed solid in that review and not worth re-auditing: `ca_pin` on
 parameterised SQL (the one `ORDER BY` interpolation is an allowlist lookup),
 validated queue-ID path joins, fail-closed client matching, and the dotReader
 un-stuffing correctly paired with `net/smtp`'s re-stuffing `DotWriter`.
+
+## Open security findings (second review, 2026-08-11)
+
+A second full-tree review the same day produced **eleven findings, none of
+them fixed**. They live in `docs/Findings.md`, which carries the reproduction
+for each of the three that were reproduced rather than reasoned about, the
+proposed fix, and a checklist to tick off. Only the headline is repeated here
+so this file stays the handover document and not the work list:
+
+- **Medium** — a bare `<LF>.<LF>` ends DATA and the remainder is executed as
+  SMTP commands. Reachable by anyone who controls a message body on an
+  allowlisted host, which is an escalation from "controls body" to "controls
+  envelope". Not an open relay: rewriting and rate limiting still apply.
+- **Medium** — the dashboard checks no `Host` header, so DNS rebinding from a
+  page the operator visits reaches everything the loopback-only decision of
+  the first review assumed was protected. `/api/v1/*` is unaffected.
+- **Medium** — `limits.spool_max_gb` does not bound disk usage: `Fail()`
+  removes a message from the index `spoolSize()` sums, and nothing prunes
+  `spool/failed`.
+- **Low/Medium** — `bounce.sender` and every `bounce.notify` entry reach a
+  header through `fmt.Fprintf` unvalidated.
+- **Low** ×5 — `/bounces?class=` is a guaranteed 500; four unvalidated
+  numeric limits silently mean "unlimited"; `service.hostname` is unchecked
+  in `Received:`; `ca_pin` has no length check; CI pins a Go toolchain it
+  does not use and runs no gosec.
+- **Info** — a dead lumberjack v3 dependency, a dead `sql.ErrNoRows` branch,
+  and HTTP servers without a write or idle timeout.
+
+Suggested order: the three Mediums first, with the `/bounces` fix taken along
+because it is one line and repairs a filter that has never worked.
 
 ## Open defects
 
