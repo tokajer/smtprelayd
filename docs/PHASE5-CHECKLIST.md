@@ -46,28 +46,59 @@ evidence, not where it was likely.
       ran, exit status clean
 - [x] `id smtprelayd` — the service runs as a non-root uid (963 observed
       holding the listener), so the system user exists and is in use
-- [ ] `/etc/smtprelayd` is `0750 root:smtprelayd`, `/var/lib/smtprelayd` is
-      `0700 smtprelayd:smtprelayd` — the postinstall sets these, not observed
-- [ ] `systemctl status smtprelayd` — unit loaded, inactive, not started
+- [x] `/etc/smtprelayd` is `0750 root:smtprelayd`, `/var/lib/smtprelayd` is
+      `0700 smtprelayd:smtprelayd` — both observed on the live host after the
+      upgrade (`drwxr-x--- root:smtprelayd` and `drwx------ smtprelayd:
+      smtprelayd`). The log file inside it is `0600 smtprelayd:smtprelayd`
+      although it was created on 2026-08-11 at 01:05 by a version that still
+      wrote 0644, so the restrict-on-startup upgrade path works in the field
+- [x] `systemctl status smtprelayd` — unit loaded, inactive, not started.
+      Verified 2026-08-11 on a genuine first install, made testable again by
+      the `dnf remove` earlier that day: `Loaded: loaded (…; disabled; preset:
+      disabled)` and `Active: inactive (dead)`. The package registers the unit
+      and neither starts nor enables it, which is the intended behaviour on a
+      host that has no usable configuration yet.
+      The reinstall also showed that a remove/install cycle keeps the data:
+      `/var/lib/smtprelayd` still carries its original birth time
+      (00:58:47 that morning), so it is the same directory with the same
+      spool and history, not a freshly created one.
 - [x] Copy the example config, edit it, then:
       `smtprelayd -config /etc/smtprelayd/smtprelayd.toml check`
 - [x] `systemctl enable --now smtprelayd` — **binds port 25 as uid 963, not
       root**: `tcp 0 0 192.168.8.102:25 0.0.0.0:* LISTEN 963`. This is the
       item most likely to fail silently, and it confirms
       `AmbientCapabilities=CAP_NET_BIND_SERVICE` in the packaged unit works.
-- [ ] `journalctl -u smtprelayd` shows the startup log line
+- [x] The startup line appears — **in the log file, not the journal**, which
+      is not what this item said. Confirmed from both sides on the live host:
+      `journalctl -u smtprelayd` carries only systemd's own `Started …`, while
+      `/var/lib/smtprelayd/smtprelayd.log` has
+      `{"msg":"starting","version":"v0.2.6",…}`. The packaged unit does not
+      pass `-console`, and `logging.New` writes to stderr only when it is set
+      or when no log file is configured. `MEMORY.md` section 10 claims Linux
+      logs "to journald plus file", so either the unit should pass `-console`
+      or that sentence is wrong — open decision, 2026-08-11
 - [x] `systemctl stop smtprelayd`
-- [ ] `dnf remove` / `dpkg -r` (remove, not purge) — service stopped and
-      disabled, `/var/lib/smtprelayd` and its contents survive
+- [x] `dnf remove` (remove, not purge) — verified 2026-08-11. The binary,
+      the unit and the package are gone (`systemctl is-enabled` reports
+      `not-found`, no process left), while `/var/lib/smtprelayd` survives as
+      `0700 smtprelayd:smtprelayd` and `/etc/smtprelayd` as `0750
+      root:smtprelayd`. Both are package-owned directories, and rpm removes an
+      owned directory only when it is empty — so the fact that they survived
+      *is* the evidence that the spool, the history database and the
+      operator's own `smtprelayd.toml` are still in them. The system user and
+      group are deliberately retained, so nothing is left owned by an orphaned
+      uid. `dpkg -r` still untested.
 - [ ] `dpkg -i smtprelayd_<version>_amd64.deb` on a real Debian/Ubuntu host,
       whole sequence above
 - [x] Upgrade in place, `rpm -U`: 0.2.0-1 → 0.2.5-1 replaced the old package
       and ran `%post` without error
-- [ ] …and the running/stopped state survives that upgrade. The restart on
-      upgrade was missing entirely and was added on 2026-08-11
-      (`systemctl try-restart` on the upgrade path only); every branch of the
-      script was exercised against stubbed `systemctl`, but the behaviour has
-      not yet been observed on a real upgrade of a running service
+- [x] …and the running service is restarted into the new binary. Verified on
+      a real `rpm -U` 0.2.5 → 0.2.6 of a *running* service on 2026-08-11: the
+      scriptlet printed `smtprelayd upgraded and restarted.`, the RPM install
+      time (22:24:43) matches the journal's
+      `Stopping … Stopped … Starting … Started` pair, and the process was up
+      again one second later. Before the 2026-08-11 fix nothing restarted the
+      service and the replaced binary kept running
 
 ## Follow-up implementation work (next coding session, not manual testing)
 

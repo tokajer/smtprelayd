@@ -459,13 +459,19 @@ check` ✅ works; now need: a message through the m365 route, a message with
 recipients in two routes to confirm the split, and one deliberate wrong secret
 to confirm the queue defers. Needs tenant, mailbox and sending-domain values
 (see Open questions).
-**Next action, phase 5**: the `.rpm` path is verified on a live Fedora host
-(2026-08-11) — install, configure, `check`, start, stop, and an `rpm -U`
-upgrade, with port 25 confirmed bound by uid 963 rather than root, which is
-the item that proves `AmbientCapabilities=CAP_NET_BIND_SERVICE` works. Still
-open: the same sequence for the `.deb` on Debian/Ubuntu, the remove-keeps-data
-step on either, and the Windows MSI on hardware. See also the upgrade-restart
-defect below, found during that test.
+**Next action, phase 5**: the `.rpm` path is **fully verified** on a live
+Fedora host (2026-08-11) — 11 of 12 checklist items, the whole cycle: first
+install with the unit registered but neither started nor enabled, configure,
+`check`, start with port 25 bound by uid 963 rather than root (which is what
+proves `AmbientCapabilities=CAP_NET_BIND_SERVICE` works), stop, an `rpm -U`
+upgrade that restarts the running service into the new binary, `dnf remove`
+that keeps the data and the service account, and a reinstall onto the
+surviving data directory. Two things were found and fixed along the way: the
+missing restart on upgrade (see Open defects) and the misleading first-install
+text on an upgrade. One open decision: the relay's own startup line goes to
+the log file, never to journald, while `MEMORY.md` section 10 claims both.
+Still open for phase 5: the same sequence for the `.deb` on Debian/Ubuntu, and
+the Windows MSI on hardware.
 
 ## Phases
 
@@ -714,7 +720,11 @@ below date from that review.
    opens the file. Same input now fails `check` and `run` with
    `log.file "..." must not contain a ".." path element`, and no file appears
    outside the data directory.
-4. ✅ **Medium/Low — `history.db` and the log file were created 0644** while
+4. ✅ **Medium/Low — `history.db` and the log file were created 0644**
+   (field-confirmed on 2026-08-11: on the live Fedora host the log file dates
+   from 01:05 that morning, written by a version that still created it 0644,
+   and reads `0600 smtprelayd:smtprelayd` after the upgrade — so the
+   restrict-an-existing-file path is not just a unit test) while
    every spool file is correctly 0600. Both are created by code that does not
    let the caller choose a mode (the SQLite driver, lumberjack), so the fix is
    a post-creation restrict: `fsmode.RestrictFile`, a no-op on Windows for the
@@ -786,6 +796,10 @@ Verified by building both packages with nfpm and running every branch of the
 script against stubbed `systemctl`/`chown`: first install (both conventions),
 upgrade with the unit running, upgrade with the unit stopped, upgrade with no
 configuration file yet, and an upgrade where the unit fails to come back.
+Then verified for real: an `rpm -U` 0.2.5 → 0.2.6 over a running service
+printed `smtprelayd upgraded and restarted.`, and the journal shows the
+`Stopping … Stopped … Starting … Started` pair at the RPM's own install
+timestamp, with the process back up a second later.
 
 The original report follows.
 
