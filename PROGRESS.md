@@ -13,7 +13,29 @@ and the Windows service wrapper (normally phase 5) were pulled forward and
 validated. MSI installs and uninstalls; `install`/`uninstall`/`start`/`stop`
 work on Windows. Log rotation and Windows ACL verification at startup are
 complete.
-**Last session**: 2026-08-11 (eleventh session) — Implemented phase 4e per
+**Last session**: 2026-08-11 (twelfth session) — Field fix, no phase work. A
+deployed instance passed `check` and then failed every start with
+`listen tcp 10.0.0.10:25: bind: cannot assign requested address`: the example
+config's placeholder address had been kept and is not assignable on that host.
+Validation could not have caught it — `net.SplitHostPort` proves an address is
+well formed, and nothing short of an actual bind proves it is assignable — so
+`check` now binds and immediately releases every listener, dashboard and
+metrics address (`cmd/smtprelayd/bind.go`). Two error classes are notes rather
+than failures, because treating them as failures would make `check` lie in the
+common case: address-in-use (the normal result when validating the config of a
+running instance) and permission-denied (the service reaches ports below 1024
+through `CAP_NET_BIND_SERVICE`, which a shell user invoking `check` does not
+have). In-use detection needs a per-OS file: Winsock's `WSAEADDRINUSE` is a
+different number from the syscall package's `EADDRINUSE` and does not compare
+equal to it. Second half of the same failure: the packaged unit has
+`RestartSec=5`, so systemd's default start limit of 5 starts per 10 s can
+never trip, and the instance restarted 87 times with the cause buried in the
+journal; `StartLimitIntervalSec=60` / `StartLimitBurst=5` now put the unit into
+`failed` instead. Verified against the reported configuration: `check` exits 1
+with the daemon's own bind error, and reports the `0.0.0.0:587` listener as an
+unverified note. The example config's placeholder is now marked as one.
+
+**Previous session**: 2026-08-11 (eleventh session) — Implemented phase 4e per
 `docs/PHASE4-PLAN.md` and `MEMORY.md` §8. `internal/bounce.Notifier` batches
 permanently-failed and expired messages (recorded via a new `RecordFail`
 call from `delivery.Manager.fail()` — the single choke point every "moved to

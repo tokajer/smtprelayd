@@ -63,8 +63,13 @@ smtprelayd -config /etc/smtprelayd/smtprelayd.toml selftest   # open relay probe
 ```
 
 `check` refuses to pass a configuration that would relay for an unmatched
-source. `selftest` connects to the running listeners and fails loudly if a
-relay attempt from an unlisted address succeeds. Run it after every
+source. It also binds and releases every configured listener, dashboard and
+metrics address, so a `listener.address` that is not assignable on this host
+fails here instead of in a restart loop. An address that is already in use, or
+a privileged port that the invoking user may not bind, is reported as a note
+and left unverified — the service itself binds those through
+`CAP_NET_BIND_SERVICE`. `selftest` connects to the running listeners and fails
+loudly if a relay attempt from an unlisted address succeeds. Run it after every
 configuration change.
 
 On Windows, `smtprelayd install` / `uninstall` / `start` / `stop` (elevated

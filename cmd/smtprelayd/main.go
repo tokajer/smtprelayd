@@ -40,7 +40,7 @@ usage: smtprelayd [-config <file>] <command>
 
 commands:
   run        start the relay in the foreground (default)
-  check      load and validate the configuration, then exit
+  check      validate the configuration and its bind addresses, then exit
   selftest   attempt to relay through the running instance and fail if it works
   version    print the version and exit
 
@@ -105,6 +105,9 @@ func run(cmd, configPath string, console bool) error {
 	case "check":
 		cfg, err := config.Load(configPath)
 		if err != nil {
+			return err
+		}
+		if err := checkBind(cfg, os.Stdout); err != nil {
 			return err
 		}
 		fmt.Printf("configuration OK: %d listener(s), %d client(s), %d route(s)\n",

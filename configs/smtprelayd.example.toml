@@ -18,7 +18,8 @@ max_age_days = 90
 # A non-loopback listener with no matching client CIDR is a startup error.
 [[listener]]
 name        = "smtp"
-address     = "10.0.0.10:25"        # bind the internal interface, not 0.0.0.0
+address     = "10.0.0.10:25"        # replace with an address of THIS host;
+                                    # bind the internal interface, not 0.0.0.0
 tls         = "starttls"           # none | starttls | implicit
 min_tls     = "1.0"                # legacy devices frequently cannot do 1.2
 require_tls = false                # plaintext allowed, IP allowlist still applies

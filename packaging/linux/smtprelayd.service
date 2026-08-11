@@ -4,6 +4,13 @@ Documentation=https://github.com/tokajer/smtprelayd
 After=network-online.target
 Wants=network-online.target
 
+# A misconfigured bind address never heals by itself. Without these the
+# default limit (5 starts / 10s) can never trip at RestartSec=5, and the
+# cause is buried under an unbounded restart loop instead of surfacing
+# as a failed unit.
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
 [Service]
 # Type=exec, not Type=notify: the binary does not send sd_notify(READY=1) yet.
 Type=exec
