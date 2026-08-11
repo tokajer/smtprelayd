@@ -6,23 +6,66 @@ Keep it short — this file is pasted into every new chat.
 ## Current state
 
 **Phase**: 4e — `internal/bounce` (digest notification) implemented and
-manually verified end to end this session, **completing phase 4 in full**.
-4a–4d remain complete from previous sessions. Phase 3 (client policy, sender
+manually verified end to end in the eleventh session, **completing phase 4 in
+full**.
+4a–4d remain complete from earlier sessions. Phase 3 (client policy, sender
 rewriting, recipient routing) remains complete and compiles clean. Packaging
 and the Windows service wrapper (normally phase 5) were pulled forward and
 validated. MSI installs and uninstalls; `install`/`uninstall`/`start`/`stop`
 work on Windows. Log rotation and Windows ACL verification at startup are
 complete.
-**Last session**: 2026-08-11 (fourteenth session) — Installer fix, no phase
+**Last session**: 2026-08-11 (fifteenth session) — Message metadata journal, no
+phase work. Developed in parallel with the fourteenth session and merged into
+it (`34077ac`); its own commit is `a63b216`. Requested as "logging of all
+mails", scoped after checking what already existed: every accepted message was
+already journalled (a row in `messages` plus a `message accepted` log line) and
+every attempt recorded with its verbatim SMTP response, so the gap was in
+*what* a row carried, not in whether one existed. `messages` gained
+`message_id`, `content_type`, `size_bytes`, `header_count` and `helo`; all five
+are read from what was actually spooled (the rewritten header block via a new
+`rewrite.HeaderCount` alongside the existing `HeaderValue`, and
+`spool.Staged.Size()`), never from what the client announced, and all five go
+through `sanitizeHeaderMeta` — the generalised `sanitizeSubject`, which now
+also truncates on a rune boundary instead of mid-rune. Since `CREATE TABLE IF
+NOT EXISTS` never touches an existing table, `Store.migrate` adds missing
+columns via `PRAGMA table_info` plus `ALTER TABLE`; they are nullable with no
+default, so a pre-migration row reads back as unknown rather than as a
+fabricated zero. `RecordMessage` became `RecordMessage(MessageRecord)`: with
+the new fields it would otherwise have been eleven consecutive string
+parameters, where two transposed at a call site still compile. Second half,
+from the follow-up ask ("is this enough for troubleshooting? add the SMTP
+code"): `Message` now carries `AttemptCount`, `LastCode` and `LastErr` from the
+latest attempt in the list queries too, so the queue, search and bounce views
+show *why* something is deferred without opening each message. That surfaced a
+real bug — `bounces.html` has always rendered `{{.LastErr}}` but `FindBounces`
+never selected an attempt row, so the dashboard's "Last response" column was
+silently empty for every bounce ever shown. Verified against a running
+instance, not only by unit test: a message sent through the real listener
+recorded HELO, Message-ID, Content-Type, 512 bytes and 7 headers; a deliberate
+`550` from a fake smarthost showed as `550 5.1.1 User unknown...` on the
+bounces page and as `last_smtp_code` in the API; the journal columns were then
+dropped from the live database with `ALTER TABLE DROP COLUMN` and re-added on
+the next start ("store: schema migrated" ×5), with the pre-migration row still
+readable and its journal fields absent from the JSON rather than zeroed.
+**This session also cleared the toolchain debt the thirteenth and fourteenth
+sessions left open**: on the merged tree `gofmt`, `go vet` (linux *and*
+`GOOS=windows`), `go test ./...` and both cross-builds are clean, so the
+Windows `syncDir`/`Chmod` split and `config.SecureDataDir` are now
+compile-checked. An MSI build and an install on hardware are still outstanding.
+`govulncheck`/`gosec` were not run locally (not installed on this machine; CI
+covers them).
+
+**Previous session**: 2026-08-11 (fourteenth session) — Installer fix, no phase
 work. The MSI never produced a data directory that `CheckDataDirACL` accepts,
 so no fresh Windows install could start; `util:PermissionEx` adds ACEs but
 leaves the DACL inheriting from `%ProgramData%`. Replaced by
 `config.SecureDataDir`, invoked as `smtprelayd secure-datadir` from a deferred
 custom action after the service registration, and named as the remediation in
-`CheckDataDirACL`'s own error message. Not compile-checked and no MSI built —
-no Go toolchain or WiX in the session; `go vet`, `gofmt`, `go test ./...` and
-an install on hardware still need to be run. See Open defects for the full
-write-up.
+`CheckDataDirACL`'s own error message. Not compile-checked and no MSI built in
+that session — no Go toolchain or WiX available; `gofmt`, `go vet` (both GOOS)
+and `go test ./...` were run in the fifteenth session and are clean, so only
+the MSI build and an install on hardware remain outstanding. See Open defects
+for the full write-up.
 **Previous session**: 2026-08-11 (thirteenth session) — Field fix, no phase work.
 A Windows deployment accepted mail but failed every enqueue and every delivered
 message's cleanup with `sync ...\spool\queue: Access is denied`. `syncDir`'s
@@ -40,8 +83,9 @@ failure is still fatal, unchanged. Same split applied to the `os.Chmod(d,
 ...\spool\tmp: Access is denied`. Mode bits do not govern access on Windows
 (`os.Chmod` only toggles the read-only attribute); the data directory's
 explicit DACL does, which the installer sets and `CheckDataDirACL` already
-verifies at startup. Not compile-checked here — no Go toolchain was available
-in the session; `go vet`, `gofmt` and `go test ./...` still need to be run.
+verifies at startup. Not compile-checked in that session — no Go toolchain was
+available; `gofmt`, `go vet` (both GOOS) and `go test ./...` were run in the
+fifteenth session and are clean.
 Field-verified on the reporting host the same day: with the patched binary and
 a corrected DACL the relay logs `message accepted` and delivers, where before
 it accepted and relayed the message but then failed both the enqueue and the
@@ -435,7 +479,10 @@ dependencies. Detailed plan in `docs/PHASE4-PLAN.md` (2026-08-10).
       working FK cascade, `FindMessages`/`FindBounces`/`FindMessageByID`/
       `CountQueue`, `[history]` validation, wired into the listener and
       delivery manager, subject extraction. Manual end-to-end test against a
-      live tenant still outstanding.
+      live tenant still outstanding. Extended in the fifteenth session into a
+      per-message metadata journal (`message_id`, `content_type`, `size_bytes`,
+      `header_count`, `helo`, plus the latest attempt's code, response and
+      count on the message row), with `Store.migrate` for existing databases.
 - [x] 4b: `internal/metrics` (Prometheus `/metrics` endpoint) — queue size,
       delivered/bounced/deferred/auth-failure counters, OAuth token age, last
       delivery time, approximate delivery rate; all seeded at zero per route;
@@ -689,3 +736,8 @@ it has.
 | 2026-08-11 | Directory fsync is a build-tag no-op on Windows rather than an error the caller filters | `FlushFileBuffers` requires a handle opened with `GENERIC_WRITE`, which a directory handle cannot have, so the call can only ever fail there. Recognising its error class was the wrong shape of fix — it had already been attempted, against `ErrInvalid` when the real error is EACCES, and every enqueue on Windows failed for it. The durability it buys on Unix is provided by NTFS's own rename journalling |
 | 2026-08-11 | `os.Chmod` on the spool directories is skipped on Windows | Mode bits are not the access-control mechanism there — `os.Chmod` only toggles the read-only attribute — so the call enforced nothing while being able to fail on a directory whose DACL denies WRITE_ATTRIBUTES. The explicit DACL the installer sets and `CheckDataDirACL` verifies is what actually restricts the data directory |
 | 2026-08-11 | `scripts/check-banned-imports.sh` matches importer/banned pairs against a named allowlist instead of asserting the banned package is absent from the graph | `modernc.org/sqlite`, which the no-cgo rule forces, pulls `os/exec` in through `modernc.org/libc` on every GOOS, so the absence assertion could no longer hold. Allowing the package outright would have retired the rule; naming the single importer keeps `kardianos/service` — the regression the script exists for — a failure, and reports who imports what when it fires |
+| 2026-08-11 | The history store journals message metadata, never the message body | An archive of message content is a different feature with a different legal footprint (retention, access control, subject access requests); the journal answers "what came in, from where, how big, and what did the smarthost say about it" without ever holding the content itself |
+| 2026-08-11 | Journal values are read from the rewritten header block and the staged size, not from what the client announced | `MAIL FROM SIZE` is a claim and the pre-rewrite headers are not what was queued; a journal that records the announcement rather than the artefact is misleading in exactly the case someone is troubleshooting |
+| 2026-08-11 | Journal columns are added by `Store.migrate` and are nullable with no default | `CREATE TABLE IF NOT EXISTS` silently leaves an existing table alone, so an upgraded installation would otherwise keep the old column set forever. NULL for a pre-migration row says "unknown", which is true; a `DEFAULT 0` would say "a zero-byte message", which is not |
+| 2026-08-11 | `RecordMessage` takes a `MessageRecord` struct instead of a parameter list | With the journal fields it would be eleven consecutive string parameters; two transposed at a call site would still compile and would store a sender as a recipient list |
+| 2026-08-11 | The latest attempt's code, response and count are carried on the message row in list queries | The dashboard's queue, search and bounce views must show why a message is deferred without a per-row follow-up query. This is also how the long-standing empty "Last response" column on the bounce view was found: `FindBounces` never selected an attempt row at all |
