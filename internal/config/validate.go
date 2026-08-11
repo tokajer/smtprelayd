@@ -51,6 +51,17 @@ func (c *Config) Validate() error {
 		}
 	}
 
+	// The log file is the one configuration string that becomes a path by
+	// being joined to another, so it is the one that has to be proved
+	// incapable of naming a location outside the data directory. A daemon
+	// that runs privileged enough to bind port 25 must not be steerable into
+	// creating or appending to a file anywhere on the host.
+	if c.Service.DataDir != "" {
+		if _, err := LogPath(c.Service.DataDir, c.Log.File); err != nil {
+			add("%v", err)
+		}
+	}
+
 	if len(c.Listeners) == 0 {
 		add("at least one [[listener]] is required")
 	}

@@ -124,6 +124,17 @@ attacker-influenced values and writes them into a message.
   administrators.
 - Spool files 0600, directories 0700. Permissions are verified at startup and
   a mismatch is a startup failure.
+- Every file the service writes lives under the data directory, and the
+  configuration cannot move one outside it. `log.file` is the only setting
+  that becomes a path by being joined to another; `config.LogPath` is the
+  single place that join happens, it rejects an absolute path, a Windows
+  volume name, a NUL byte and any `..` element (on both separators, since a
+  configuration written on Windows is routinely deployed on Linux), and it
+  re-checks containment on the result. A violation fails startup rather than
+  relocating the log. The check is lexical: it proves the *configured value*
+  cannot name a location outside the data directory, not that the path is
+  safe to open — a symlink planted inside the data directory is the data
+  directory's own trust check to catch.
 - The service never executes external commands and never loads plugins. No
   first-party file imports `os/exec`. The pure-Go SQLite runtime
   `modernc.org/libc` does, for the C `system()`/`popen()` shims that the

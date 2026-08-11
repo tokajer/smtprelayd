@@ -61,17 +61,29 @@ installation on a live system was not.
 
 ## Follow-up implementation work (next coding session, not manual testing)
 
-- [ ] Windows ACL verification at startup (`golang.org/x/sys/windows`,
-      deferred from phase 1, natural fit alongside the MSI's own ACL setup)
-- [ ] A CI workflow that runs on every push/PR: `go vet`, `gofmt -l`,
-      `go test -race`, and the banned-import check
-      (`unsafe`, `os/exec`, `plugin`, cgo, ...) that CLAUDE.md requires but
-      that doesn't exist as an enforced check anywhere yet
-- [ ] Log rotation dependency decision (`lumberjack` vs. external `logrotate`
-      / Windows equivalent)
+All done; kept for the record. Ticked 2026-08-11 after checking each against
+the tree rather than against the session notes.
+
+- [x] Windows ACL verification at startup — `config.CheckDataDirACL`
+      (`internal/config/trust_windows.go`) refuses to start on a DACL that
+      still inherits from `%ProgramData%`. The installer side of the same
+      contract is `config.SecureDataDir` / `smtprelayd secure-datadir`; the
+      MSI has not been rebuilt with it yet, which is the open item in the
+      Windows section above, not here
+- [x] A CI workflow that runs on every push/PR — `.github/workflows/ci.yml`:
+      gofmt, `go vet`, `go test -race`, `govulncheck`, plus a cross-compile
+      job. The banned-import check exists in two halves, both wired in:
+      `internal/buildpolicy` (AST over first-party source) and
+      `scripts/check-banned-imports.sh` (`go list -deps` over the full graph,
+      per target)
+- [x] Log rotation dependency decision — `lumberjack`, in-process. Rotation
+      is disabled and the log simply appends when `max_size_mb` is 0
 
 ## Unrelated, phase 3/4 (not packaging)
 
 - [ ] End-to-end test against a real Microsoft 365 tenant (needs tenant,
       mailbox, sending domain — see "Open questions" in `PROGRESS.md`)
-- [ ] Phase 4 — observability (dashboard, history store, metrics) not started
+- [x] Phase 4 — observability: complete, all five sub-phases. `internal/store`
+      (history and per-message metadata journal), `internal/metrics`,
+      `internal/web`, `internal/api`, `internal/bounce`. Only the live-tenant
+      run above is still missing, not the code

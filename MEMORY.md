@@ -32,19 +32,28 @@ behaviour and diagnosability are.
 
 ## 2. Technology decisions
 
+**Corrected 2026-08-11.** The rows for the SMTP server and client, SASL,
+message parsing and OAuth2 named `emersion/go-smtp`, `emersion/go-sasl`,
+`emersion/go-message` and `golang.org/x/oauth2` — a plan from before phase 1
+that was never how the code was written. None of the four has ever been in
+`go.mod`; all of that is first-party. The table now describes the tree. The
+runtime dependency set is three direct modules, which is the property the
+security posture in section 9 actually rests on, so a table naming four
+libraries that do not exist understated it in the one direction that matters.
+
 | Area | Choice | Rationale |
 |---|---|---|
-| Language | Go 1.23.0+ | Single static binary, trivial cross-compilation, no runtime dependency on Windows; raised from 1.22 on 2026-08-08, required by `kardianos/service` v1.3.0 |
-| SMTP server | `github.com/emersion/go-smtp` | Mature, hooks for auth and per-connection state |
-| SMTP client | `github.com/emersion/go-smtp` client | Same message model on both sides, supports SASL |
-| SASL | `github.com/emersion/go-sasl` | PLAIN, LOGIN, XOAUTH2 |
-| Message parsing | `github.com/emersion/go-message` | Header rewriting without corrupting MIME |
-| OAuth2 | `golang.org/x/oauth2/clientcredentials` | Standard Entra ID client credentials flow |
+| Language | Go | Single static binary, trivial cross-compilation, no runtime dependency on Windows. `go.mod` declares `go 1.25.0`; CI and the release workflow still pin `GO_VERSION: "1.23"`, which is an inconsistency to resolve, not a second supported floor |
+| SMTP server | First-party, `internal/listener` | Written against the protocol directly: the command loop, size and header limits, per-client matching and the data-phase failure behaviour are all security-relevant decisions this project makes differently from a general-purpose library |
+| SMTP client | First-party, `internal/delivery/smarthost`, over stdlib `net/smtp` | `net/smtp` covers the client side of the conversation; the TLS policy, `ca_pin` verification and the 4xx/5xx classification sit above it |
+| SASL | First-party, `internal/delivery/smarthost` | PLAIN, LOGIN and XOAUTH2 are a few dozen lines each against `net/smtp`'s `Auth` interface, including the 334 continuation path Microsoft 365 needs |
+| Message parsing | First-party header-block parser, `internal/rewrite` | Only the header block is parsed, structurally, never the MIME body — the relay rewrites `From` and reads a few values for the journal, and no MIME parsing exists at all (see the open MIME nesting-depth item) |
+| OAuth2 | First-party, `internal/authms365`, over `net/http` | The client credentials flow is one form POST; a library would have added a dependency without removing the parts that actually needed care — the fixed authority, refused redirects and the cooldown after a rejected request |
 | Service wrapper | `github.com/kardianos/service`, Windows-only | Its systemd backend shells out to `systemctl` via `os/exec`, which section 9 bans; imported only from a `_windows.go` file so that backend is never compiled in. Linux runs under the packaged systemd unit directly, no self-registration code needed |
 | Config | TOML via `github.com/BurntSushi/toml` | Comments allowed, readable for operators |
 | History store | `modernc.org/sqlite` | **Pure Go**, no cgo, keeps Windows builds trivial. Its `modernc.org/libc` runtime imports `os/exec` on every GOOS for the C `system()`/`popen()` shims; the SQLite amalgamation never calls either (`system()` belongs to the sqlite3 CLI, not the library), so the code is linked but unreachable. Recorded decision, 2026-08-11: this is the **only** accepted `os/exec` importer, named explicitly in `scripts/check-banned-imports.sh` |
-| Logging | stdlib `log/slog` (JSON) + `gopkg.in/natefinch/lumberjack.v2` | Structured, rotating, no external agent |
-| Dashboard | Go `html/template` + htmx, embedded via `embed.FS` | No Node build step, ships inside the binary |
+| Logging | stdlib `log/slog` (JSON) + `github.com/natefinch/lumberjack` | Structured, rotating, no external agent. The import path is the v1 module, not the `gopkg.in/...v2` path this row named until 2026-08-11 |
+| Dashboard | Go `html/template` + CSS, embedded via `embed.FS` | No Node build step, ships inside the binary. The 2026-08-07 decision was `html/template` plus htmx; phase 4c needed no client-side behaviour, so htmx was never added and the dashboard carries no JavaScript at all. Adding it later is still open, and the CSP would have to allow it |
 | TLS | stdlib `crypto/tls` | No OpenSSL linkage |
 
 ## 3. Component layout

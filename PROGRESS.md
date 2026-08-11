@@ -54,6 +54,44 @@ Windows `syncDir`/`Chmod` split and `config.SecureDataDir` are now
 compile-checked. An MSI build and an install on hardware are still outstanding.
 `govulncheck`/`gosec` were not run locally (not installed on this machine; CI
 covers them).
+Same session, a documentation-hygiene pass, each item checked against the tree
+rather than against the session notes: `docs/PHASE5-CHECKLIST.md`'s
+"Follow-up implementation work" listed the Windows ACL check, the CI workflow
+and the log-rotation decision as open although all three shipped, and still
+said phase 4 had not started; phase 1's own Windows-ACL box contradicted
+phase 5's in this file. Both fixed. `MEMORY.md` §2 named
+`emersion/go-smtp`, `emersion/go-sasl`, `emersion/go-message` and
+`golang.org/x/oauth2` as technology decisions — a pre-phase-1 plan that was
+never how the code was written; none has ever been in `go.mod`, the SMTP
+server, client, SASL, header parsing and the OAuth2 flow are all first-party
+over `net/smtp` and `net/http`. The table now describes the tree, which
+matters because the small runtime dependency set is what section 9's posture
+rests on. Two smaller drifts in the same table: the logging row named the
+`gopkg.in/...v2` module while the code imports `github.com/natefinch/
+lumberjack`, and the dashboard row named htmx, which phase 4c never needed and
+never added — the dashboard carries no JavaScript at all.
+Then finding 3 of the 2026-08-11 security review, on request: `log.file` was
+joined to `service.data_dir` with no validation. The traversal was reproduced
+against a binary built from `HEAD` before fixing it — `check` passed and the
+daemon wrote its log to `/tmp/escaped.log` — so the fix is against a
+demonstrated defect, not a suspected one. `config.LogPath` is now the only
+place the two values meet, called by `Validate()` and by the code that opens
+the file, so the validation cannot be refactored away from the construction.
+It rejects an absolute path, a Windows volume name, a NUL byte and any `..`
+element split on *both* separators (a configuration written on Windows is
+routinely deployed on Linux, where `..\..` survives `Clean` as one long file
+name), then re-checks containment on the result rather than trusting the
+element scan. The check is deliberately lexical and says so: it proves the
+configured value cannot name a location outside the data directory, not that
+the path is safe to open — a symlink inside the data directory is
+`CheckDir`/`CheckDataDirACL`'s job. The six findings now have a section of
+their own under "Known gaps"; they had never been recorded in this file.
+**Found and not fixed**: `go.mod` declares `go 1.25.0` (raised in `47fe229`
+with no note anywhere), while `.github/workflows/ci.yml` and `release.yml`
+pin `GO_VERSION: "1.23"`. The build only works because the default
+`GOTOOLCHAIN=auto` silently downloads a newer toolchain than the workflow
+pins, so the pinned version is not what CI actually runs. Needs a decision:
+lower `go.mod` or raise both workflows.
 
 **Previous session**: 2026-08-11 (fourteenth session) — Installer fix, no phase
 work. The MSI never produced a data directory that `CheckDataDirACL` accepts,
@@ -419,8 +457,9 @@ Debian/RPM; upgrade cycle test on both platforms.
 - [x] `O_NOFOLLOW` and `O_EXCL` on spool writes
 - [x] Per-connection `recover`, streaming size enforcement, header limits
 - [x] Runs in the foreground on both platforms
-- [ ] Windows ACL verification at startup (deferred to phase 5 with the
-      installer; needs `golang.org/x/sys/windows`)
+- [x] Windows ACL verification at startup — deferred to phase 5 with the
+      installer and done there (`config.CheckDataDirACL`); listed again under
+      phase 5 rather than only here
 - [ ] MIME nesting depth bound (no MIME parsing exists yet; the header limits
       cover the current surface)
 
@@ -466,9 +505,10 @@ Debian/RPM; upgrade cycle test on both platforms.
       the loader refuses a client value above it
 - [x] `Envelope.OriginalFrom` records the pre-rewrite sender for the bounce
       records of phase 4
-- [ ] Per-client rate limiting in the listener and the route-level pacing from
-      phase 2 remain separate and both apply; no decision needed, recorded so
-      it is not rediscovered
+Note, not an open item: per-client rate limiting in the listener and the
+route-level pacing from phase 2 remain separate and both apply. No decision
+needed; recorded so it is not rediscovered. It was written as an unticked
+checkbox until 2026-08-11, which made settled behaviour read as pending work.
 
 ### Phase 4 — Observability ✅ (all of 4a–4e done, see `docs/PHASE4-PLAN.md`)
 
@@ -579,6 +619,60 @@ The selftest exception (8) remains deliberate and is not fixed.
 8. The selftest still uses `InsecureSkipVerify` plus certificate pin and trips
    gosec G123. This is the deliberate exception recorded in the decision log;
    it dials fresh with no session cache so resumption cannot occur. Not fixed.
+
+## Known gaps from the 2026-08-11 security review
+
+A full-tree review on 2026-08-11 produced six findings. It changed no code, and
+they were not recorded here at the time — this section was added on the same
+date, one finding later. The baseline was clean: gofmt, `go vet`, `go test
+./...`, both cross-builds, `govulncheck` and `scripts/check-banned-imports.sh`
+all passed. Re-verify each against the tree before acting; the descriptions
+below date from that review.
+
+1. **High — the dashboard has no authentication and may be bound publicly.**
+   `Validate()` requires only a TLS certificate for a non-loopback
+   `[web].address`, not tokens and not loopback. Verified live: `0.0.0.0:8443`
+   with zero tokens served `/queue` and `/config` over the LAN address, and
+   the requeue/delete forms are reachable — their CSRF token is fetched from
+   the page, so it is not authentication. The JSON API on the *same* listener
+   correctly returns 401: the same data behind two doors. `internal/web/csrf.go`
+   assumes loopback is the trust boundary and nothing enforces that. Not
+   insecure by default (`web.enabled` is false, the default address is
+   loopback). **Not fixed.**
+2. **Medium — the metrics endpoint** has no loopback enforcement, no TLS and
+   no authentication. The decision log says the listener "is expected to bind
+   to loopback"; that is an expectation, not an enforcement. **Not fixed.**
+3. ✅ **Medium — `log.file` path traversal.** `main.go` joined `Log.File` to
+   `DataDir` with no validation anywhere, which is exactly the "path built by
+   joining an unvalidated string" `CLAUDE.md` bans. Reproduced against the
+   pre-fix binary on 2026-08-11: `file = "../../../../../../tmp/escaped.log"`
+   passed `check` and the daemon then wrote its log to `/tmp/escaped.log`.
+   Fixed by `config.LogPath` (`internal/config/logpath.go`), the single place
+   the two values are joined, called both by `Validate()` and by the code that
+   opens the file. Same input now fails `check` and `run` with
+   `log.file "..." must not contain a ".." path element`, and no file appears
+   outside the data directory.
+4. **Medium/Low — `history.db` and the log file are created 0644** while every
+   spool file is correctly 0600. The database holds every sender, recipient
+   and subject (`retain_subjects` defaults on). Contained on packaged installs
+   by the 0700 data directory, but `config.CheckDir` rejects only group/other
+   *write*, not *read*, so a 0755 data directory passes startup validation and
+   exposes it to any local user. **Not fixed.**
+5. **Low — `checkSecretFile` does not check the containing directory**, unlike
+   `CheckConfigFile`, which was fixed for exactly this unlink-and-replace
+   attack. Both check only the immediate parent, not the full ancestor chain.
+   **Not fixed.**
+6. **Low — a bare CR survives inside header values** (`readLineLimited` strips
+   only a trailing CR). Hardening, not an exploitable injection, but the
+   comment in `internal/listener/session.go` claiming every interpolated value
+   has already been control-character-checked overstates what is verified.
+   **Not fixed.**
+
+Confirmed solid in that review and not worth re-auditing: `ca_pin` on
+`VerifyConnection`/`VerifiedChains`, the `authms365` token endpoint, fully
+parameterised SQL (the one `ORDER BY` interpolation is an allowlist lookup),
+validated queue-ID path joins, fail-closed client matching, and the dotReader
+un-stuffing correctly paired with `net/smtp`'s re-stuffing `DotWriter`.
 
 ## Open defects
 

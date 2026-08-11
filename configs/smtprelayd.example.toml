@@ -6,7 +6,10 @@ data_dir  = "/var/lib/smtprelayd"   # Windows: C:\ProgramData\SMTPRelayd
 log_level = "info"                 # debug | info | warn | error
 
 [log]
-file        = "smtprelayd.log"      # relative to data_dir
+file        = "smtprelayd.log"      # relative to data_dir, and must stay
+                                    # inside it: an absolute path or a ".."
+                                    # element is a startup error, not a
+                                    # silently relocated log file
 max_size_mb = 50
 max_backups = 10
 max_age_days = 90

@@ -154,9 +154,11 @@ func serve(ctx context.Context, configPath string, console bool) error {
 	if err != nil {
 		return err
 	}
-	logFile := ""
-	if cfg.Log.File != "" {
-		logFile = filepath.Join(cfg.Service.DataDir, cfg.Log.File)
+	logFile, err := config.LogPath(cfg.Service.DataDir, cfg.Log.File)
+	if err != nil {
+		// Load has already validated this; reaching here means the value
+		// changed underneath us, which is not a case to paper over.
+		return err
 	}
 	log, closer, err := logging.New(logging.Options{
 		Level:      level,
