@@ -788,10 +788,21 @@ it has.
 - Should a failed token acquisition at startup abort, or only be logged? Today
   no token is fetched before the first delivery, so a tenant outage at boot is
   invisible until a message arrives.
-- Should the dashboard require authentication, or is localhost binding enough?
+- ~~Should the dashboard require authentication, or is localhost binding
+  enough?~~ **Answered 2026-08-11**: loopback binding is the authentication and
+  is now enforced — a non-loopback `[web].address` fails startup. A token login
+  for the dashboard is wanted eventually but is its own phase, not a blocker.
 - Which addresses go into `[bounce].notify`?
 - Should downstream bounces be ingested from the relay mailbox via Graph?
-- Should the API listener be exposed beyond localhost?
+- ~~Should the API listener be exposed beyond localhost?~~ **Answered
+  2026-08-11 by implication**: the API shares the dashboard's listener, which
+  is now loopback-only, so the API is too until that login exists. The API
+  itself is token-authenticated and would be safe to expose; the dashboard on
+  the same listener is what is not.
+- Should the history database be switched to WAL journal mode? `Store.Open`'s DSN says
+  `_journal_mode=WAL` but modernc's driver ignores it, so the history database
+  has always used the rollback journal. Changing it alters crash behaviour, so
+  it wants a decision rather than a quiet fix.
 - A Postfix `main.cf` importer (`smtprelayd import-postfix`) was raised as a
   migration path. Scoped as a one-shot converter with an explicit report of
   what could not be translated, never a runtime parser. Not yet planned into a
