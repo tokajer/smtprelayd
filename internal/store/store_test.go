@@ -4,10 +4,13 @@
 package store
 
 import (
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -24,6 +27,30 @@ func testStore(t *testing.T) *Store {
 	return s
 }
 
+// testRecord is the message a query test records when it does not care about
+// the message itself, only about what the query does with it. A test that
+// depends on a particular sender, client or subject overrides that one field
+// on the returned value.
+func testRecord(queueID string, received, expires time.Time) MessageRecord {
+	return MessageRecord{
+		QueueID:      queueID,
+		Client:       "client",
+		Route:        "route",
+		EnvelopeFrom: "from@example.com",
+		Recipients:   `["user@example.com"]`,
+		Subject:      "Subject",
+		Listener:     "smtp",
+		RemoteAddr:   "10.0.0.1",
+		MessageID:    "<test@example.com>",
+		ContentType:  "text/plain",
+		SizeBytes:    1024,
+		HeaderCount:  8,
+		Helo:         "device.local",
+		ReceivedAt:   received,
+		ExpiresAt:    expires,
+	}
+}
+
 func TestRecordMessageAndAttempt(t *testing.T) {
 	s := testStore(t)
 
@@ -31,20 +58,25 @@ func TestRecordMessageAndAttempt(t *testing.T) {
 	now := time.Now()
 	expires := now.Add(96 * time.Hour)
 
-	err := s.RecordMessage(
-		"TESTQUEUEID1",
-		"printer-client",
-		"m365",
-		"relay@example.com",
-		"printer@local",
-		string(recipients),
-		"Test Subject",
-		"smtp",
-		"10.0.0.5",
-		now,
-		expires,
-		true,
-	)
+	err := s.RecordMessage(MessageRecord{
+		QueueID:      "TESTQUEUEID1",
+		Client:       "printer-client",
+		Route:        "m365",
+		EnvelopeFrom: "relay@example.com",
+		OriginalFrom: "printer@local",
+		Recipients:   string(recipients),
+		Subject:      "Test Subject",
+		Listener:     "smtp",
+		RemoteAddr:   "10.0.0.5",
+		MessageID:    "<abc123@printer.local>",
+		ContentType:  "text/plain; charset=utf-8",
+		SizeBytes:    4096,
+		HeaderCount:  9,
+		Helo:         "printer.local",
+		ReceivedAt:   now,
+		ExpiresAt:    expires,
+		TLSUsed:      true,
+	})
 	if err != nil {
 		t.Fatalf("RecordMessage failed: %v", err)
 	}
@@ -76,6 +108,19 @@ func TestRecordMessageAndAttempt(t *testing.T) {
 	if m.Attempts[0].SMTPCode != 550 {
 		t.Errorf("SMTP code mismatch: got %d, want 550", m.Attempts[0].SMTPCode)
 	}
+
+	// The journal metadata and the last attempt's outcome both have to come
+	// back on the message itself: the dashboard's list views and the API's
+	// message object read them from there, not from the attempt list.
+	if m.MessageID != "<abc123@printer.local>" || m.ContentType != "text/plain; charset=utf-8" {
+		t.Errorf("journal headers mismatch: got %q / %q", m.MessageID, m.ContentType)
+	}
+	if m.SizeBytes != 4096 || m.HeaderCount != 9 || m.Helo != "printer.local" {
+		t.Errorf("journal metadata mismatch: got %d bytes, %d headers, helo %q", m.SizeBytes, m.HeaderCount, m.Helo)
+	}
+	if m.LastCode != 550 || m.LastErr != "5.1.1 User unknown" || m.AttemptCount != 1 {
+		t.Errorf("last attempt summary mismatch: got %d %q after %d attempts", m.LastCode, m.LastErr, m.AttemptCount)
+	}
 }
 
 func TestSubjectRedaction(t *testing.T) {
@@ -88,24 +133,11 @@ func TestSubjectRedaction(t *testing.T) {
 	}
 	defer s.Close()
 
-	recipients, _ := json.Marshal([]string{"user@example.com"})
 	now := time.Now()
-	expires := now.Add(96 * time.Hour)
+	rec := testRecord("SUBJECT-TEST", now, now.Add(96*time.Hour))
+	rec.Subject = "Personal Subject"
 
-	err = s.RecordMessage(
-		"SUBJECT-TEST",
-		"client",
-		"route",
-		"from@example.com",
-		"",
-		string(recipients),
-		"Personal Subject",
-		"smtp",
-		"10.0.0.1",
-		now,
-		expires,
-		false,
-	)
+	err = s.RecordMessage(rec)
 	if err != nil {
 		t.Fatalf("RecordMessage failed: %v", err)
 	}
@@ -123,7 +155,6 @@ func TestFindBounces(t *testing.T) {
 	s := testStore(t)
 
 	// Record multiple messages with different statuses.
-	recipients, _ := json.Marshal([]string{"user@example.com"})
 	now := time.Now()
 
 	testCases := []struct {
@@ -136,7 +167,7 @@ func TestFindBounces(t *testing.T) {
 	}
 	for i, tc := range testCases {
 		expires := now.Add(96 * time.Hour)
-		_ = s.RecordMessage(tc.id, "client", "route", "from@example.com", "", string(recipients), "Subject", "smtp", "10.0.0.1", now.Add(-time.Duration(i)*time.Hour), expires, false)
+		_ = s.RecordMessage(testRecord(tc.id, now.Add(-time.Duration(i)*time.Hour), expires))
 		_ = s.RecordAttempt(tc.id, 1, 550, "Error", tc.class, nil)
 	}
 
@@ -158,11 +189,10 @@ func TestFindBounces(t *testing.T) {
 func TestDeleteMessage(t *testing.T) {
 	s := testStore(t)
 
-	recipients, _ := json.Marshal([]string{"user@example.com"})
 	now := time.Now()
 	expires := now.Add(96 * time.Hour)
 
-	_ = s.RecordMessage("TO-DELETE", "client", "route", "from@example.com", "", string(recipients), "Subject", "smtp", "10.0.0.1", now, expires, false)
+	_ = s.RecordMessage(testRecord("TO-DELETE", now, expires))
 
 	err := s.DeleteMessage("TO-DELETE")
 	if err != nil {
@@ -219,9 +249,8 @@ func TestFindAuditByQueueID(t *testing.T) {
 func TestDeleteMessageCascadesAttempts(t *testing.T) {
 	s := testStore(t)
 
-	recipients, _ := json.Marshal([]string{"user@example.com"})
 	now := time.Now()
-	_ = s.RecordMessage("CASCADE-TEST", "client", "route", "from@example.com", "", string(recipients), "Subject", "smtp", "10.0.0.1", now, now.Add(96*time.Hour), false)
+	_ = s.RecordMessage(testRecord("CASCADE-TEST", now, now.Add(96*time.Hour)))
 	if err := s.RecordAttempt("CASCADE-TEST", 1, 421, "temporary failure", "temporary", nil); err != nil {
 		t.Fatalf("RecordAttempt failed: %v", err)
 	}
@@ -252,16 +281,15 @@ func TestRecordAttemptRejectsUnknownQueueID(t *testing.T) {
 
 func TestFindMessagesFiltersByDerivedStatus(t *testing.T) {
 	s := testStore(t)
-	recipients, _ := json.Marshal([]string{"user@example.com"})
 	now := time.Now()
 	expires := now.Add(96 * time.Hour)
 
-	_ = s.RecordMessage("Q-QUEUED", "client", "route", "from@example.com", "", string(recipients), "s", "smtp", "10.0.0.1", now, expires, false)
-	_ = s.RecordMessage("Q-DEFERRED", "client", "route", "from@example.com", "", string(recipients), "s", "smtp", "10.0.0.1", now, expires, false)
+	_ = s.RecordMessage(testRecord("Q-QUEUED", now, expires))
+	_ = s.RecordMessage(testRecord("Q-DEFERRED", now, expires))
 	_ = s.RecordAttempt("Q-DEFERRED", 1, 421, "try later", "temporary", nil)
-	_ = s.RecordMessage("Q-DELIVERED", "client", "route", "from@example.com", "", string(recipients), "s", "smtp", "10.0.0.1", now, expires, false)
+	_ = s.RecordMessage(testRecord("Q-DELIVERED", now, expires))
 	_ = s.RecordAttempt("Q-DELIVERED", 1, 250, "ok", "delivered", nil)
-	_ = s.RecordMessage("Q-BOUNCED", "client", "route", "from@example.com", "", string(recipients), "s", "smtp", "10.0.0.1", now, expires, false)
+	_ = s.RecordMessage(testRecord("Q-BOUNCED", now, expires))
 	_ = s.RecordAttempt("Q-BOUNCED", 1, 550, "no such user", "permanent", nil)
 
 	for _, tc := range []struct {
@@ -289,12 +317,15 @@ func TestFindMessagesFiltersByDerivedStatus(t *testing.T) {
 
 func TestFindMessagesSenderAndSubjectFilters(t *testing.T) {
 	s := testStore(t)
-	recipients, _ := json.Marshal([]string{"user@example.com"})
 	now := time.Now()
 	expires := now.Add(96 * time.Hour)
 
-	_ = s.RecordMessage("SENDER-1", "client", "route", "printer@floor2.local", "", string(recipients), "Scan job 42", "smtp", "10.0.0.1", now, expires, true)
-	_ = s.RecordMessage("SENDER-2", "client", "route", "erp@floor2.local", "", string(recipients), "Invoice", "smtp", "10.0.0.1", now, expires, true)
+	r := testRecord("SENDER-1", now, expires)
+	r.EnvelopeFrom, r.Subject, r.TLSUsed = "printer@floor2.local", "Scan job 42", true
+	_ = s.RecordMessage(r)
+	r = testRecord("SENDER-2", now, expires)
+	r.EnvelopeFrom, r.Subject, r.TLSUsed = "erp@floor2.local", "Invoice", true
+	_ = s.RecordMessage(r)
 
 	got, err := s.FindMessages(MessageFilter{Sender: "printer@", Limit: 100})
 	if err != nil {
@@ -315,14 +346,13 @@ func TestFindMessagesSenderAndSubjectFilters(t *testing.T) {
 
 func TestFindMessagesActiveStatusIsQueuedOrDeferred(t *testing.T) {
 	s := testStore(t)
-	recipients, _ := json.Marshal([]string{"user@example.com"})
 	now := time.Now()
 	expires := now.Add(96 * time.Hour)
 
-	_ = s.RecordMessage("ACTIVE-QUEUED", "client", "route", "from@example.com", "", string(recipients), "s", "smtp", "10.0.0.1", now, expires, false)
-	_ = s.RecordMessage("ACTIVE-DEFERRED", "client", "route", "from@example.com", "", string(recipients), "s", "smtp", "10.0.0.1", now, expires, false)
+	_ = s.RecordMessage(testRecord("ACTIVE-QUEUED", now, expires))
+	_ = s.RecordMessage(testRecord("ACTIVE-DEFERRED", now, expires))
 	_ = s.RecordAttempt("ACTIVE-DEFERRED", 1, 421, "try later", "temporary", nil)
-	_ = s.RecordMessage("ACTIVE-DELIVERED", "client", "route", "from@example.com", "", string(recipients), "s", "smtp", "10.0.0.1", now, expires, false)
+	_ = s.RecordMessage(testRecord("ACTIVE-DELIVERED", now, expires))
 	_ = s.RecordAttempt("ACTIVE-DELIVERED", 1, 250, "ok", "delivered", nil)
 
 	got, err := s.FindMessages(MessageFilter{Status: "active", Limit: 100})
@@ -345,9 +375,8 @@ func TestFindMessagesActiveStatusIsQueuedOrDeferred(t *testing.T) {
 // rows for one message instead of picking the actual most recent attempt.
 func TestFindMessagesStatusStableAcrossRapidAttempts(t *testing.T) {
 	s := testStore(t)
-	recipients, _ := json.Marshal([]string{"user@example.com"})
 	now := time.Now()
-	_ = s.RecordMessage("RAPID-ATTEMPTS", "client", "route", "from@example.com", "", string(recipients), "s", "smtp", "10.0.0.1", now, now.Add(96*time.Hour), false)
+	_ = s.RecordMessage(testRecord("RAPID-ATTEMPTS", now, now.Add(96*time.Hour)))
 	_ = s.RecordAttempt("RAPID-ATTEMPTS", 1, 421, "try later", "temporary", nil)
 	_ = s.RecordAttempt("RAPID-ATTEMPTS", 2, 250, "ok", "delivered", nil)
 
@@ -377,12 +406,15 @@ func TestFindMessagesStatusStableAcrossRapidAttempts(t *testing.T) {
 
 func TestFindMessagesSortIsAllowlisted(t *testing.T) {
 	s := testStore(t)
-	recipients, _ := json.Marshal([]string{"user@example.com"})
 	now := time.Now()
 	expires := now.Add(96 * time.Hour)
 
-	_ = s.RecordMessage("SORT-B", "client-b", "route", "from@example.com", "", string(recipients), "s", "smtp", "10.0.0.1", now, expires, false)
-	_ = s.RecordMessage("SORT-A", "client-a", "route", "from@example.com", "", string(recipients), "s", "smtp", "10.0.0.1", now.Add(time.Second), expires, false)
+	r := testRecord("SORT-B", now, expires)
+	r.Client = "client-b"
+	_ = s.RecordMessage(r)
+	r = testRecord("SORT-A", now.Add(time.Second), expires)
+	r.Client = "client-a"
+	_ = s.RecordMessage(r)
 
 	got, err := s.FindMessages(MessageFilter{Sort: "client", Order: "asc", Limit: 100})
 	if err != nil {
@@ -405,14 +437,13 @@ func TestFindMessagesSortIsAllowlisted(t *testing.T) {
 
 func TestFindMessagesSortByStatus(t *testing.T) {
 	s := testStore(t)
-	recipients, _ := json.Marshal([]string{"user@example.com"})
 	now := time.Now()
 	expires := now.Add(96 * time.Hour)
 
-	_ = s.RecordMessage("SORT-BOUNCED", "client", "route", "from@example.com", "", string(recipients), "s", "smtp", "10.0.0.1", now, expires, false)
+	_ = s.RecordMessage(testRecord("SORT-BOUNCED", now, expires))
 	_ = s.RecordAttempt("SORT-BOUNCED", 1, 550, "no", "permanent", nil)
-	_ = s.RecordMessage("SORT-QUEUED", "client", "route", "from@example.com", "", string(recipients), "s", "smtp", "10.0.0.1", now, expires, false)
-	_ = s.RecordMessage("SORT-DEFERRED", "client", "route", "from@example.com", "", string(recipients), "s", "smtp", "10.0.0.1", now, expires, false)
+	_ = s.RecordMessage(testRecord("SORT-QUEUED", now, expires))
+	_ = s.RecordMessage(testRecord("SORT-DEFERRED", now, expires))
 	_ = s.RecordAttempt("SORT-DEFERRED", 1, 421, "later", "temporary", nil)
 
 	got, err := s.FindMessages(MessageFilter{Sort: "status", Order: "asc", Limit: 100})
@@ -440,8 +471,11 @@ func TestFindBounceSummariesMatchesAPIShape(t *testing.T) {
 	recipients, _ := json.Marshal([]string{"someone@partner.example"})
 	now := time.Now()
 
-	if err := s.RecordMessage("BOUNCE-SUMMARY-1", "printers-vienna", "m365", "relay@example.at", "kopierer@local",
-		string(recipients), "Scan 2026-08-07", "smtp", "10.0.0.1", now, now.Add(96*time.Hour), true); err != nil {
+	rec := testRecord("BOUNCE-SUMMARY-1", now, now.Add(96*time.Hour))
+	rec.Client, rec.Route = "printers-vienna", "m365"
+	rec.EnvelopeFrom, rec.OriginalFrom = "relay@example.at", "kopierer@local"
+	rec.Recipients, rec.Subject, rec.TLSUsed = string(recipients), "Scan 2026-08-07", true
+	if err := s.RecordMessage(rec); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.RecordAttempt("BOUNCE-SUMMARY-1", 1, 421, "try later", "temporary", nil); err != nil {
@@ -476,11 +510,10 @@ func TestFindBounceSummariesMatchesAPIShape(t *testing.T) {
 
 func TestFindBounceSummariesPagination(t *testing.T) {
 	s := testStore(t)
-	recipients, _ := json.Marshal([]string{"user@example.com"})
 	now := time.Now()
 	for i := 0; i < 3; i++ {
 		id := fmt.Sprintf("PAGE-BOUNCE-%d", i)
-		_ = s.RecordMessage(id, "client", "route", "from@example.com", "", string(recipients), "s", "smtp", "10.0.0.1", now.Add(time.Duration(i)*time.Second), now.Add(96*time.Hour), false)
+		_ = s.RecordMessage(testRecord(id, now.Add(time.Duration(i)*time.Second), now.Add(96*time.Hour)))
 		_ = s.RecordAttempt(id, 1, 550, "no such user", "permanent", nil)
 	}
 
@@ -506,9 +539,8 @@ func TestFindBounceSummariesPagination(t *testing.T) {
 func TestFindMessagesRecipientFilterIsParameterized(t *testing.T) {
 	s := testStore(t)
 
-	recipients, _ := json.Marshal([]string{"user@example.com"})
 	now := time.Now()
-	_ = s.RecordMessage("SQLI-TEST", "client", "route", "from@example.com", "", string(recipients), "Subject", "smtp", "10.0.0.1", now, now.Add(96*time.Hour), false)
+	_ = s.RecordMessage(testRecord("SQLI-TEST", now, now.Add(96*time.Hour)))
 
 	results, err := s.FindMessages(MessageFilter{Recipient: "' OR 1=1 --", Limit: 100})
 	if err != nil {
@@ -516,5 +548,71 @@ func TestFindMessagesRecipientFilterIsParameterized(t *testing.T) {
 	}
 	if len(results) != 0 {
 		t.Errorf("SQL-shaped recipient filter matched %d rows, want 0 (should be a literal substring, not injected SQL)", len(results))
+	}
+}
+
+// TestMigrationAddsJournalColumns covers the upgrade path: a database written
+// by a version without the journal columns must gain them on the next Open,
+// because CREATE TABLE IF NOT EXISTS silently leaves an existing table alone.
+func TestMigrationAddsJournalColumns(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "spool"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	dbPath := filepath.Join(dir, "spool", "history.db")
+
+	// The messages table exactly as the first released schema declared it.
+	db, err := sql.Open("sqlite", "file:"+dbPath+"?mode=rwc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`CREATE TABLE messages (
+		queue_id TEXT PRIMARY KEY, client TEXT NOT NULL, route TEXT NOT NULL,
+		envelope_from TEXT NOT NULL, original_from TEXT, recipients TEXT NOT NULL,
+		subject TEXT, listener TEXT NOT NULL, remote_addr TEXT NOT NULL,
+		received_at TEXT NOT NULL, expires_at TEXT NOT NULL, tls_used INTEGER NOT NULL,
+		created_at TEXT NOT NULL)`); err != nil {
+		t.Fatal(err)
+	}
+	ts := time.Now().UTC().Format(time.RFC3339)
+	if _, err := db.Exec(`INSERT INTO messages VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		"OLD-ROW", "client", "route", "from@example.com", "", `["user@example.com"]`,
+		"Subject", "smtp", "10.0.0.1", ts, ts, 0, ts); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	s, err := Open(dir, slog.New(slog.NewTextHandler(io.Discard, nil)), 90, true)
+	if err != nil {
+		t.Fatalf("Open on a pre-journal database failed: %v", err)
+	}
+	defer s.Close()
+
+	// A pre-migration row must still be readable, with the journal fields
+	// reading as unknown rather than failing the scan.
+	old, err := s.FindMessageByID("OLD-ROW")
+	if err != nil {
+		t.Fatalf("reading a pre-migration row failed: %v", err)
+	}
+	if old == nil {
+		t.Fatal("pre-migration row disappeared")
+	}
+	if old.MessageID != "" || old.SizeBytes != 0 || old.Helo != "" {
+		t.Errorf("pre-migration row invented journal values: %+v", old)
+	}
+
+	// And a row written after the migration must round-trip them.
+	now := time.Now()
+	if err := s.RecordMessage(testRecord("NEW-ROW", now, now.Add(time.Hour))); err != nil {
+		t.Fatalf("RecordMessage after migration failed: %v", err)
+	}
+	fresh, err := s.FindMessageByID("NEW-ROW")
+	if err != nil || fresh == nil {
+		t.Fatalf("reading the post-migration row failed: %v", err)
+	}
+	if fresh.SizeBytes != 1024 || fresh.HeaderCount != 8 || fresh.Helo != "device.local" {
+		t.Errorf("journal columns not written after migration: %+v", fresh)
 	}
 }

@@ -150,6 +150,14 @@ Three layers, deliberately separate:
 2. **History** — SQLite. One row per message, one row per delivery attempt
    including the verbatim SMTP response. Configurable retention, default 90
    days. This is the data source for the dashboard.
+
+   Decided 2026-08-11: the message row is a **metadata journal**, never an
+   archive. It carries the envelope, client, route, listener, remote address,
+   HELO name, `Message-ID`, `Content-Type`, spooled size and header count,
+   plus the most recent attempt's SMTP code and response so a list view needs
+   no per-message follow-up query. The body is still deleted on delivery:
+   retaining message content is a different feature with a different legal
+   footprint and is out of scope until decided separately.
 3. **Metrics** — `/metrics` in Prometheus text format for Checkmk: queue depth
    per state and route, deferred count, bounce count, authentication failures,
    OAuth token age, delivery rate, last successful delivery timestamp.

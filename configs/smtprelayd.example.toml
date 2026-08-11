@@ -203,6 +203,10 @@ path    = "/metrics"
 enabled = true
 
 [history]
+# Every accepted message is journalled: envelope, client, route, listener,
+# remote address, HELO name, Message-ID, Content-Type, size, header count,
+# and one row per delivery attempt with its verbatim SMTP response. The
+# message body itself is never retained.
 retention_days   = 90
 retain_subjects  = true    # subjects often contain personal data
 

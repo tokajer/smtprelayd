@@ -97,7 +97,12 @@ func (s *Store) createSchema() error {
 			received_at TEXT NOT NULL,
 			expires_at TEXT NOT NULL,
 			tls_used INTEGER NOT NULL,
-			created_at TEXT NOT NULL
+			created_at TEXT NOT NULL,
+			message_id TEXT,
+			content_type TEXT,
+			size_bytes INTEGER,
+			header_count INTEGER,
+			helo TEXT
 		)`,
 		`CREATE TABLE IF NOT EXISTS attempts (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -136,28 +141,111 @@ func (s *Store) createSchema() error {
 		}
 	}
 
+	return s.migrate()
+}
+
+// journalColumns are the per-message metadata columns added after the first
+// released schema. `CREATE TABLE IF NOT EXISTS` never touches a table that
+// already exists, so a database written by an earlier version keeps the old
+// column set until it is migrated here.
+var journalColumns = []struct{ name, decl string }{
+	{"message_id", "message_id TEXT"},
+	{"content_type", "content_type TEXT"},
+	{"size_bytes", "size_bytes INTEGER"},
+	{"header_count", "header_count INTEGER"},
+	{"helo", "helo TEXT"},
+}
+
+// migrate adds columns missing from an existing database. Every added column
+// is nullable with no default, so rows written before the migration read back
+// as NULL — an unknown value, which is what they are — rather than as a
+// fabricated zero.
+func (s *Store) migrate() error {
+	rows, err := s.db.Query(`PRAGMA table_info(messages)`)
+	if err != nil {
+		return fmt.Errorf("store: inspect messages table: %w", err)
+	}
+	present := map[string]bool{}
+	for rows.Next() {
+		var cid int
+		var name, colType string
+		var notNull, pk int
+		var dflt sql.NullString
+		if err := rows.Scan(&cid, &name, &colType, &notNull, &dflt, &pk); err != nil {
+			rows.Close()
+			return fmt.Errorf("store: scan table info: %w", err)
+		}
+		present[name] = true
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return fmt.Errorf("store: table info query error: %w", err)
+	}
+	rows.Close()
+
+	for _, c := range journalColumns {
+		if present[c.name] {
+			continue
+		}
+		// The column name is a package constant, never request input.
+		if _, err := s.db.Exec(`ALTER TABLE messages ADD COLUMN ` + c.decl); err != nil {
+			return fmt.Errorf("store: add column %s: %w", c.name, err)
+		}
+		s.log.Info("store: schema migrated", "added_column", c.name)
+	}
+
 	return nil
 }
 
-// RecordMessage inserts a message record. recipients is a JSON array string.
+// MessageRecord is one accepted message as it enters the history journal.
+// It is a struct rather than a parameter list because the record is eleven
+// strings wide: two adjacent ones transposed at a call site would still
+// compile and would silently store a sender as a recipient list.
+type MessageRecord struct {
+	QueueID      string
+	Client       string
+	Route        string
+	EnvelopeFrom string
+	OriginalFrom string
+	Recipients   string // JSON array
+	Subject      string
+	Listener     string
+	RemoteAddr   string
+
+	// Journal metadata about the message itself, all taken from what was
+	// actually spooled rather than from what the client announced.
+	MessageID   string // Message-ID header, "" when absent
+	ContentType string // Content-Type header, "" when absent
+	SizeBytes   int64  // octets spooled, excluding the relay's own Received header
+	HeaderCount int    // header fields after rewriting
+	Helo        string // HELO/EHLO name the client announced, "" for relay-generated mail
+
+	ReceivedAt time.Time
+	ExpiresAt  time.Time
+	TLSUsed    bool
+}
+
+// RecordMessage inserts a message record.
 // Subject is redacted to empty string if retain_subjects is false.
-func (s *Store) RecordMessage(queueID, client, route, envelopeFrom, originalFrom, recipients, subject, listener, remoteAddr string, receivedAt, expiresAt time.Time, tlsUsed bool) error {
+func (s *Store) RecordMessage(rec MessageRecord) error {
+	subject := rec.Subject
 	if !s.retain.retainSubjects {
 		subject = ""
 	}
 
 	tlsInt := 0
-	if tlsUsed {
+	if rec.TLSUsed {
 		tlsInt = 1
 	}
 
 	now := time.Now().UTC()
 	_, err := s.db.Exec(`
-		INSERT INTO messages (queue_id, client, route, envelope_from, original_from, recipients, subject, listener, remote_addr, received_at, expires_at, tls_used, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO messages (queue_id, client, route, envelope_from, original_from, recipients, subject, listener, remote_addr, received_at, expires_at, tls_used, created_at, message_id, content_type, size_bytes, header_count, helo)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`,
-		queueID, client, route, envelopeFrom, originalFrom, recipients, subject, listener, remoteAddr,
-		receivedAt.UTC().Format(time.RFC3339), expiresAt.UTC().Format(time.RFC3339), tlsInt, now.Format(time.RFC3339),
+		rec.QueueID, rec.Client, rec.Route, rec.EnvelopeFrom, rec.OriginalFrom, rec.Recipients, subject, rec.Listener, rec.RemoteAddr,
+		rec.ReceivedAt.UTC().Format(time.RFC3339), rec.ExpiresAt.UTC().Format(time.RFC3339), tlsInt, now.Format(time.RFC3339),
+		rec.MessageID, rec.ContentType, rec.SizeBytes, rec.HeaderCount, rec.Helo,
 	)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {

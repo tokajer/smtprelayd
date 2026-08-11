@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/tokajer/smtprelayd/internal/config"
+	"github.com/tokajer/smtprelayd/internal/rewrite"
 	"github.com/tokajer/smtprelayd/internal/spool"
 	"github.com/tokajer/smtprelayd/internal/store"
 )
@@ -146,6 +147,19 @@ func (n *Notifier) dispatch(now time.Time) {
 	}
 }
 
+// digestContentType is written into the digest's own header block and into
+// its journal record, so the two cannot disagree about what was sent.
+const digestContentType = "text/plain; charset=utf-8"
+
+// headerBlock returns the header part of a composed message, terminating
+// blank line included. A message with no blank line at all is all headers.
+func headerBlock(data string) string {
+	if i := strings.Index(data, "\r\n\r\n"); i >= 0 {
+		return data[:i+4]
+	}
+	return data
+}
+
 // send composes and enqueues one digest for client, listing every message in
 // ids. It is enqueued exactly like any other message — through the spool,
 // for the configured notify route — except for the three loop-prevention
@@ -162,7 +176,7 @@ func (n *Notifier) send(client string, recipients, ids []string, now time.Time) 
 	fmt.Fprintf(&body, "To: %s\r\n", strings.Join(recipients, ", "))
 	fmt.Fprintf(&body, "Subject: %s\r\n", subject)
 	fmt.Fprintf(&body, "Date: %s\r\n", now.Format(time.RFC1123Z))
-	body.WriteString("Content-Type: text/plain; charset=utf-8\r\n\r\n")
+	body.WriteString("Content-Type: " + digestContentType + "\r\n\r\n")
 	fmt.Fprintf(&body, "%d message(s) from client %q could not be delivered:\r\n", len(ids), client)
 
 	for _, id := range ids {
@@ -196,14 +210,27 @@ func (n *Notifier) send(client string, recipients, ids []string, now time.Time) 
 		Notification: true,
 	}
 	lifetime := time.Duration(n.cfg.Queue.MaxLifetimeHours) * time.Hour
-	queueID, err := n.spool.Enqueue(env, strings.NewReader(body.String()), 0, lifetime)
+	data := body.String()
+	queueID, err := n.spool.Enqueue(env, strings.NewReader(data), 0, lifetime)
 	if err != nil {
 		return fmt.Errorf("bounce: enqueue digest: %w", err)
 	}
 
 	recipientsJSON, _ := json.Marshal(recipients)
-	if rerr := n.store.RecordMessage(queueID.String(), client, n.cfg.Bounce.NotifyRoute, "", "",
-		string(recipientsJSON), subject, "bounce-notifier", "internal", now, now.Add(lifetime), false); rerr != nil {
+	if rerr := n.store.RecordMessage(store.MessageRecord{
+		QueueID:     queueID.String(),
+		Client:      client,
+		Route:       n.cfg.Bounce.NotifyRoute,
+		Recipients:  string(recipientsJSON),
+		Subject:     subject,
+		Listener:    "bounce-notifier",
+		RemoteAddr:  "internal",
+		ContentType: digestContentType,
+		SizeBytes:   int64(len(data)),
+		HeaderCount: rewrite.HeaderCount(headerBlock(data)),
+		ReceivedAt:  now,
+		ExpiresAt:   now.Add(lifetime),
+	}); rerr != nil {
 		n.log.Warn("recording digest in history failed", "queue_id", queueID.String(), "error", rerr)
 	}
 

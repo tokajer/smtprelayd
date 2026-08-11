@@ -60,6 +60,50 @@ Messages the relay could not hand over to a smarthost.
 Full message history. Same filters plus `status` with values `queued`,
 `deferred`, `delivered`, `bounced`.
 
+```json
+{
+  "messages": [
+    {
+      "queue_id": "01J8ZQ2K9F3XA7B",
+      "client": "printers-vienna",
+      "route": "m365",
+      "envelope_from": "relay@example.at",
+      "original_from": "kopierer@local",
+      "recipients": ["someone@partner.example"],
+      "subject": "Scan 2026-08-07",
+      "listener": "submission",
+      "remote_addr": "10.20.1.44:51022",
+      "received_at": "2026-08-07T09:14:01Z",
+      "expires_at": "2026-08-11T09:14:01Z",
+      "tls_used": true,
+      "created_at": "2026-08-07T09:14:01Z",
+      "message_id": "<4711@kopierer.local>",
+      "content_type": "multipart/mixed; boundary=\"x\"",
+      "size_bytes": 184320,
+      "header_count": 12,
+      "helo": "kopierer.local",
+      "status": "bounced",
+      "attempt_count": 1,
+      "last_smtp_code": 550,
+      "last_error": "5.1.1 User unknown"
+    }
+  ],
+  "next_cursor": null
+}
+```
+
+The journal fields (`message_id`, `content_type`, `size_bytes`,
+`header_count`, `helo`) describe the message as it was spooled, not as it was
+announced: the headers are read from the rewritten header block and the size
+is what was actually written to disk, excluding the relay's own `Received`
+header. They are omitted for a message recorded before the release that added
+them, and `subject` stays redacted when `retain_subjects` is off.
+
+`attempt_count`, `last_smtp_code` and `last_error` summarise the most recent
+delivery attempt so that a list response needs no per-message follow-up
+request; the full per-attempt history stays on
+`GET /api/v1/messages/{queue_id}`.
+
 ### `GET /api/v1/queue`
 
 Current queue state per route: counts by state, oldest message age, last

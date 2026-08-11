@@ -125,8 +125,17 @@ func TestXSSShapedSubjectIsEscaped(t *testing.T) {
 	recipients, _ := json.Marshal([]string{"user@example.com"})
 	now := time.Now()
 	const evilSubject = `<script>alert(1)</script><img src=x onerror=alert(2)>`
-	if err := st.RecordMessage("XSSTESTAAAAAAAAA", "printers", "m365", "relay@example.com", "",
-		string(recipients), evilSubject, "smtp", "10.10.5.5", now, now.Add(time.Hour), false); err != nil {
+	// The journal fields carry client-supplied text just like the subject
+	// does, so they are filled with the same payload here rather than
+	// trusting that a header is somehow safer than a subject.
+	if err := st.RecordMessage(store.MessageRecord{
+		QueueID: "XSSTESTAAAAAAAAA", Client: "printers", Route: "m365",
+		EnvelopeFrom: "relay@example.com", Recipients: string(recipients),
+		Subject: evilSubject, Listener: "smtp", RemoteAddr: "10.10.5.5",
+		MessageID: evilSubject, ContentType: evilSubject, Helo: evilSubject,
+		SizeBytes: 2048, HeaderCount: 7,
+		ReceivedAt: now, ExpiresAt: now.Add(time.Hour),
+	}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -156,8 +165,7 @@ func TestSubjectRedactedWhenRetentionDisabled(t *testing.T) {
 	// store.RecordMessage itself already redacts when retain_subjects is
 	// false, so this proves the display layer's fallback matches, not that
 	// it does the only redaction.
-	if err := st.RecordMessage("REDACTEDAAAAAAAA", "printers", "m365", "relay@example.com", "",
-		string(recipients), "should never appear", "smtp", "10.10.5.5", now, now.Add(time.Hour), false); err != nil {
+	if err := st.RecordMessage(store.MessageRecord{QueueID: "REDACTEDAAAAAAAA", Client: "printers", Route: "m365", EnvelopeFrom: "relay@example.com", OriginalFrom: "", Recipients: string(recipients), Subject: "should never appear", Listener: "smtp", RemoteAddr: "10.10.5.5", ReceivedAt: now, ExpiresAt: now.Add(time.Hour), TLSUsed: false}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -207,8 +215,8 @@ func TestQueueStatusFilterOnlyShowsActiveMessages(t *testing.T) {
 
 	recipients, _ := json.Marshal([]string{"user@example.com"})
 	now := time.Now()
-	_ = st.RecordMessage("QUEUEDAAAAAAAAAA", "printers", "m365", "relay@example.com", "", string(recipients), "still queued", "smtp", "10.10.5.5", now, now.Add(time.Hour), false)
-	_ = st.RecordMessage("DELIVEREDAAAAAAA", "printers", "m365", "relay@example.com", "", string(recipients), "already gone", "smtp", "10.10.5.5", now, now.Add(time.Hour), false)
+	_ = st.RecordMessage(store.MessageRecord{QueueID: "QUEUEDAAAAAAAAAA", Client: "printers", Route: "m365", EnvelopeFrom: "relay@example.com", OriginalFrom: "", Recipients: string(recipients), Subject: "still queued", Listener: "smtp", RemoteAddr: "10.10.5.5", ReceivedAt: now, ExpiresAt: now.Add(time.Hour), TLSUsed: false})
+	_ = st.RecordMessage(store.MessageRecord{QueueID: "DELIVEREDAAAAAAA", Client: "printers", Route: "m365", EnvelopeFrom: "relay@example.com", OriginalFrom: "", Recipients: string(recipients), Subject: "already gone", Listener: "smtp", RemoteAddr: "10.10.5.5", ReceivedAt: now, ExpiresAt: now.Add(time.Hour), TLSUsed: false})
 	_ = st.RecordAttempt("DELIVEREDAAAAAAA", 1, 250, "ok", "delivered", nil)
 
 	rec := get(t, srv.Handler(), "/queue")
@@ -276,8 +284,7 @@ func TestMessagePageIncludesCSRFTokens(t *testing.T) {
 	srv, st, _ := testServer(t, cfg)
 	recipients, _ := json.Marshal([]string{"user@example.com"})
 	now := time.Now()
-	if err := st.RecordMessage("CSRFPAGEAAAAAAAA", "printers", "m365", "relay@example.com", "",
-		string(recipients), "s", "smtp", "10.10.5.5", now, now.Add(time.Hour), false); err != nil {
+	if err := st.RecordMessage(store.MessageRecord{QueueID: "CSRFPAGEAAAAAAAA", Client: "printers", Route: "m365", EnvelopeFrom: "relay@example.com", OriginalFrom: "", Recipients: string(recipients), Subject: "s", Listener: "smtp", RemoteAddr: "10.10.5.5", ReceivedAt: now, ExpiresAt: now.Add(time.Hour), TLSUsed: false}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -378,8 +385,7 @@ func enqueueMessage(t *testing.T, st *store.Store, sp *spool.Spool, route string
 		t.Fatal(err)
 	}
 	recipients, _ := json.Marshal([]string{"b@example.net"})
-	if err := st.RecordMessage(id.String(), "client", route, "a@example.at", "", string(recipients),
-		"Test", "smtp", "10.0.0.1", time.Now(), time.Now().Add(time.Hour), false); err != nil {
+	if err := st.RecordMessage(store.MessageRecord{QueueID: id.String(), Client: "client", Route: route, EnvelopeFrom: "a@example.at", OriginalFrom: "", Recipients: string(recipients), Subject: "Test", Listener: "smtp", RemoteAddr: "10.0.0.1", ReceivedAt: time.Now(), ExpiresAt: time.Now().Add(time.Hour), TLSUsed: false}); err != nil {
 		t.Fatal(err)
 	}
 	return id.String()

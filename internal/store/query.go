@@ -27,9 +27,57 @@ type Message struct {
 	TLSUsed      bool      `json:"tls_used"`
 	CreatedAt    time.Time `json:"created_at"`
 
-	Status   string    `json:"status,omitempty"`     // queued, deferred, delivered, bounced
-	Attempts []Attempt `json:"attempts,omitempty"`   // per-message details query
-	LastErr  string    `json:"last_error,omitempty"` // from last attempt
+	// Journal metadata. A row written before these columns existed reads
+	// back as the zero value; SizeBytes and HeaderCount are omitted from
+	// JSON when zero, which is also what an empty message would report and
+	// is the reason neither is a useful filter.
+	MessageID   string `json:"message_id,omitempty"`
+	ContentType string `json:"content_type,omitempty"`
+	SizeBytes   int64  `json:"size_bytes,omitempty"`
+	HeaderCount int    `json:"header_count,omitempty"`
+	Helo        string `json:"helo,omitempty"`
+
+	Status   string    `json:"status,omitempty"`   // queued, deferred, delivered, bounced
+	Attempts []Attempt `json:"attempts,omitempty"` // per-message details query
+
+	// Outcome of the most recent attempt, carried on the message itself so
+	// that a list view can show why something is deferred or bounced
+	// without a per-row query for its attempt history.
+	AttemptCount int    `json:"attempt_count,omitempty"`
+	LastCode     int    `json:"last_smtp_code,omitempty"`
+	LastErr      string `json:"last_error,omitempty"`
+}
+
+// journalScan receives the journal columns during a row scan. They are
+// nullable because they were added to an existing schema (see migrate), so a
+// message recorded by an earlier version has no value for them and must not
+// scan into a plain string or int.
+type journalScan struct {
+	messageID   sql.NullString
+	contentType sql.NullString
+	sizeBytes   sql.NullInt64
+	headerCount sql.NullInt64
+	helo        sql.NullString
+}
+
+// journalCols is the column list every message query selects, in the order
+// journalScan expects them. Kept in one place so a query and its scan cannot
+// drift apart; prefix is the table alias including its dot, or "".
+func journalCols(prefix string) string {
+	return prefix + "message_id, " + prefix + "content_type, " + prefix + "size_bytes, " +
+		prefix + "header_count, " + prefix + "helo"
+}
+
+func (j *journalScan) dest() []interface{} {
+	return []interface{}{&j.messageID, &j.contentType, &j.sizeBytes, &j.headerCount, &j.helo}
+}
+
+func (j *journalScan) apply(m *Message) {
+	m.MessageID = j.messageID.String
+	m.ContentType = j.contentType.String
+	m.SizeBytes = j.sizeBytes.Int64
+	m.HeaderCount = int(j.headerCount.Int64)
+	m.Helo = j.helo.String
 }
 
 // Attempt represents a single delivery attempt.
@@ -107,14 +155,19 @@ func (s *Store) FindMessageByID(queueID string) (*Message, error) {
 	var recipientsJSON string
 	var tlsInt int
 	var receivedAtStr, expiresAtStr, createdAtStr string
+	var j journalScan
 
 	row := s.db.QueryRow(`
-		SELECT queue_id, client, route, envelope_from, original_from, recipients, subject, listener, remote_addr, received_at, expires_at, tls_used, created_at
+		SELECT queue_id, client, route, envelope_from, original_from, recipients, subject, listener, remote_addr, received_at, expires_at, tls_used, created_at,
+		       `+journalCols("")+`
 		FROM messages
 		WHERE queue_id = ?
 	`, queueID)
 
-	err := row.Scan(&m.QueueID, &m.Client, &m.Route, &m.EnvelopeFrom, &m.OriginalFrom, &recipientsJSON, &m.Subject, &m.Listener, &m.RemoteAddr, &receivedAtStr, &expiresAtStr, &tlsInt, &createdAtStr)
+	err := row.Scan(append([]interface{}{
+		&m.QueueID, &m.Client, &m.Route, &m.EnvelopeFrom, &m.OriginalFrom, &recipientsJSON, &m.Subject, &m.Listener, &m.RemoteAddr,
+		&receivedAtStr, &expiresAtStr, &tlsInt, &createdAtStr,
+	}, j.dest()...)...)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -125,6 +178,7 @@ func (s *Store) FindMessageByID(queueID string) (*Message, error) {
 	m.ReceivedAt, _ = time.Parse(time.RFC3339, receivedAtStr)
 	m.ExpiresAt, _ = time.Parse(time.RFC3339, expiresAtStr)
 	m.CreatedAt, _ = time.Parse(time.RFC3339, createdAtStr)
+	j.apply(&m)
 
 	m.TLSUsed = tlsInt != 0
 	if err := json.Unmarshal([]byte(recipientsJSON), &m.Recipients); err != nil {
@@ -174,8 +228,10 @@ func (s *Store) FindMessageByID(queueID string) (*Message, error) {
 
 	// Derive status from attempts.
 	m.Status = deriveStatus(m.Attempts)
+	m.AttemptCount = len(m.Attempts)
 	if len(m.Attempts) > 0 {
-		m.LastErr = m.Attempts[len(m.Attempts)-1].SMTPResp
+		last := m.Attempts[len(m.Attempts)-1]
+		m.LastCode, m.LastErr = last.SMTPCode, last.SMTPResp
 	}
 
 	return &m, nil
@@ -194,18 +250,22 @@ func (s *Store) FindMessages(filter MessageFilter) ([]*Message, error) {
 	}
 
 	query := `
-		SELECT m.queue_id, m.client, m.route, m.envelope_from, m.original_from, m.recipients, m.subject, m.listener, m.remote_addr, m.received_at, m.expires_at, m.tls_used, m.created_at, latest.class
+		SELECT m.queue_id, m.client, m.route, m.envelope_from, m.original_from, m.recipients, m.subject, m.listener, m.remote_addr, m.received_at, m.expires_at, m.tls_used, m.created_at,
+		       ` + journalCols("m.") + `, latest.class, latest.smtp_code, latest.smtp_response, agg.attempts
 		FROM messages m
 		LEFT JOIN (
 			-- The tiebreak is the autoincrement id, not MAX(at_time): at_time
 			-- has only second precision, so two attempts within the same
 			-- second would otherwise both match and fan this join out into
 			-- duplicate result rows.
-			SELECT queue_id, class FROM attempts
+			SELECT queue_id, class, smtp_code, smtp_response FROM attempts
 			WHERE id IN (
 				SELECT MAX(id) FROM attempts GROUP BY queue_id
 			)
 		) latest ON m.queue_id = latest.queue_id
+		LEFT JOIN (
+			SELECT queue_id, COUNT(*) AS attempts FROM attempts GROUP BY queue_id
+		) agg ON m.queue_id = agg.queue_id
 		WHERE 1=1
 	`
 	args := []interface{}{}
@@ -284,12 +344,23 @@ func (s *Store) FindMessages(filter MessageFilter) ([]*Message, error) {
 		var recipientsJSON string
 		var tlsInt int
 		var receivedAtStr, expiresAtStr, createdAtStr string
-		var latestClass sql.NullString
+		var latestClass, latestResp sql.NullString
+		var latestCode, attemptCount sql.NullInt64
+		var j journalScan
 
-		if err := rows.Scan(&m.QueueID, &m.Client, &m.Route, &m.EnvelopeFrom, &m.OriginalFrom, &recipientsJSON, &m.Subject, &m.Listener, &m.RemoteAddr, &receivedAtStr, &expiresAtStr, &tlsInt, &createdAtStr, &latestClass); err != nil {
+		dest := append([]interface{}{
+			&m.QueueID, &m.Client, &m.Route, &m.EnvelopeFrom, &m.OriginalFrom, &recipientsJSON, &m.Subject, &m.Listener, &m.RemoteAddr,
+			&receivedAtStr, &expiresAtStr, &tlsInt, &createdAtStr,
+		}, j.dest()...)
+		dest = append(dest, &latestClass, &latestCode, &latestResp, &attemptCount)
+		if err := rows.Scan(dest...); err != nil {
 			return nil, fmt.Errorf("store: scan message: %w", err)
 		}
 
+		j.apply(&m)
+		m.LastCode = int(latestCode.Int64)
+		m.LastErr = latestResp.String
+		m.AttemptCount = int(attemptCount.Int64)
 		m.TLSUsed = tlsInt != 0
 		m.ReceivedAt, _ = time.Parse(time.RFC3339, receivedAtStr)
 		m.ExpiresAt, _ = time.Parse(time.RFC3339, expiresAtStr)
@@ -336,11 +407,22 @@ func (s *Store) FindBounces(filter BounceFilter) ([]*Message, error) {
 
 	// Find queue IDs that have a final attempt with class='permanent' or 'expired'.
 	query := `
-		SELECT DISTINCT m.queue_id, m.client, m.route, m.envelope_from, m.original_from, m.recipients, m.subject, m.listener, m.remote_addr, m.received_at, m.expires_at, m.tls_used, m.created_at
+		SELECT DISTINCT m.queue_id, m.client, m.route, m.envelope_from, m.original_from, m.recipients, m.subject, m.listener, m.remote_addr, m.received_at, m.expires_at, m.tls_used, m.created_at,
+		       ` + journalCols("m.") + `, last.smtp_code, last.smtp_response, agg.attempts
 		FROM messages m
 		INNER JOIN (
 			SELECT queue_id FROM attempts WHERE class IN ('permanent', 'expired')
 		) a ON m.queue_id = a.queue_id
+		INNER JOIN (
+			-- Tiebreak on id for the same reason as FindMessages: at_time
+			-- alone would duplicate a row whenever two attempts landed in
+			-- the same wall-clock second.
+			SELECT queue_id, smtp_code, smtp_response FROM attempts
+			WHERE id IN (SELECT MAX(id) FROM attempts GROUP BY queue_id)
+		) last ON m.queue_id = last.queue_id
+		INNER JOIN (
+			SELECT queue_id, COUNT(*) AS attempts FROM attempts GROUP BY queue_id
+		) agg ON m.queue_id = agg.queue_id
 		WHERE 1=1
 	`
 	args := []interface{}{}
@@ -393,11 +475,23 @@ func (s *Store) FindBounces(filter BounceFilter) ([]*Message, error) {
 		var recipientsJSON string
 		var tlsInt int
 		var receivedAtStr, expiresAtStr, createdAtStr string
+		var j journalScan
+		var lastResp sql.NullString
+		var lastCode, attemptCount sql.NullInt64
 
-		if err := rows.Scan(&m.QueueID, &m.Client, &m.Route, &m.EnvelopeFrom, &m.OriginalFrom, &recipientsJSON, &m.Subject, &m.Listener, &m.RemoteAddr, &receivedAtStr, &expiresAtStr, &tlsInt, &createdAtStr); err != nil {
+		dest := append([]interface{}{
+			&m.QueueID, &m.Client, &m.Route, &m.EnvelopeFrom, &m.OriginalFrom, &recipientsJSON, &m.Subject, &m.Listener, &m.RemoteAddr,
+			&receivedAtStr, &expiresAtStr, &tlsInt, &createdAtStr,
+		}, j.dest()...)
+		dest = append(dest, &lastCode, &lastResp, &attemptCount)
+		if err := rows.Scan(dest...); err != nil {
 			return nil, fmt.Errorf("store: scan bounce: %w", err)
 		}
 
+		j.apply(&m)
+		m.LastCode = int(lastCode.Int64)
+		m.LastErr = lastResp.String
+		m.AttemptCount = int(attemptCount.Int64)
 		m.TLSUsed = tlsInt != 0
 		m.ReceivedAt, _ = time.Parse(time.RFC3339, receivedAtStr)
 		m.ExpiresAt, _ = time.Parse(time.RFC3339, expiresAtStr)

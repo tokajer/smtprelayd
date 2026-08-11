@@ -334,8 +334,7 @@ func enqueueTestMessage(t *testing.T, st *store.Store, sp *spool.Spool, route st
 		t.Fatal(err)
 	}
 	recipients, _ := json.Marshal([]string{"b@example.net"})
-	if err := st.RecordMessage(id.String(), "client", route, "a@example.at", "", string(recipients),
-		"Test", "smtp", "10.0.0.1", time.Now(), time.Now().Add(time.Hour), false); err != nil {
+	if err := st.RecordMessage(store.MessageRecord{QueueID: id.String(), Client: "client", Route: route, EnvelopeFrom: "a@example.at", OriginalFrom: "", Recipients: string(recipients), Subject: "Test", Listener: "smtp", RemoteAddr: "10.0.0.1", ReceivedAt: time.Now(), ExpiresAt: time.Now().Add(time.Hour), TLSUsed: false}); err != nil {
 		t.Fatal(err)
 	}
 	return id.String()

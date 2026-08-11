@@ -37,7 +37,7 @@
 <div class="table-wrap">
 <table>
 <thead><tr>
-	<th>Sent</th><th>Status</th><th>Client</th><th>Route</th><th>From</th><th>Recipients</th><th>Subject</th>
+	<th>Sent</th><th>Status</th><th>Client</th><th>Route</th><th>From</th><th>Recipients</th><th>Subject</th><th>Size</th><th>Last response</th>
 </tr></thead>
 <tbody>
 {{range .Messages}}
@@ -49,9 +49,11 @@
 	<td>{{.EnvelopeFrom}}</td>
 	<td>{{range .Recipients}}{{.}}<br>{{end}}</td>
 	<td><a href="/messages/{{.QueueID}}">{{if .Subject}}{{.Subject}}{{else}}<span class="empty">(no subject)</span>{{end}}</a></td>
+	<td>{{if .SizeBytes}}{{.SizeBytes}}{{end}}</td>
+	<td>{{if .AttemptCount}}{{if .LastCode}}{{.LastCode}} {{end}}{{.LastErr}}{{else}}<span class="empty">no attempt yet</span>{{end}}</td>
 </tr>
 {{else}}
-<tr><td colspan="7" class="empty">no messages match this search</td></tr>
+<tr><td colspan="9" class="empty">no messages match this search</td></tr>
 {{end}}
 </tbody>
 </table>

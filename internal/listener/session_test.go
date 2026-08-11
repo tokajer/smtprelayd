@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 // TestReadDeadlineClampedToSession covers the unmatched-source path: the per
@@ -54,5 +55,15 @@ func TestSanitizeSubjectStripsControlCharsAndTruncates(t *testing.T) {
 	long := strings.Repeat("a", maxStoredSubject+50)
 	if got := sanitizeSubject(long); len(got) != maxStoredSubject {
 		t.Errorf("got length %d, want %d", len(got), maxStoredSubject)
+	}
+}
+
+// A journal value is truncated on a rune boundary: half a rune in the store
+// renders as a replacement character on every page that displays it.
+func TestSanitizeHeaderMetaTruncatesOnRuneBoundary(t *testing.T) {
+	// Ten three-byte runes, cut at 8 bytes: the cut must fall back to 6.
+	got := sanitizeHeaderMeta(strings.Repeat("€", 10), 8)
+	if len(got) != 6 || !utf8.ValidString(got) {
+		t.Errorf("got %q (%d bytes), want a valid 6-byte prefix", got, len(got))
 	}
 }

@@ -258,6 +258,21 @@ func TestHeaderValueExtractsAndUnfolds(t *testing.T) {
 	}
 }
 
+func TestHeaderCountCountsFieldsNotLines(t *testing.T) {
+	if got := HeaderCount(plainHeaders); got != 3 {
+		t.Errorf("got %d, want 3", got)
+	}
+	// A folded value is one field, not two: the journal counts headers, and
+	// a device that folds a long Subject has not sent an extra header.
+	folded := "From: a@b\r\nSubject: a very\r\n long subject\r\n\r\n"
+	if got := HeaderCount(folded); got != 2 {
+		t.Errorf("folded value counted as %d fields, want 2", got)
+	}
+	if got := HeaderCount("Subject: x\r\n\r\ntrailing"); got != 0 {
+		t.Errorf("got %d for an unparsable block, want 0", got)
+	}
+}
+
 func TestHeaderValueOnUnparsableBlockYieldsEmpty(t *testing.T) {
 	// A continuation line with a blank line before it and trailing data is
 	// the one input parseBlock rejects; HeaderValue must not panic or

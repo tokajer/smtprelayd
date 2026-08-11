@@ -17,6 +17,12 @@
 	{{if .Message.OriginalFrom}}<dt>Original sender</dt><dd>{{.Message.OriginalFrom}}</dd>{{end}}
 	<dt>Recipients</dt><dd>{{range .Message.Recipients}}{{.}}<br>{{end}}</dd>
 	<dt>Subject</dt><dd>{{if .Message.Subject}}{{.Message.Subject}}{{else}}<span class="empty">(no subject)</span>{{end}}</dd>
+	<dt>HELO name</dt><dd>{{if .Message.Helo}}{{.Message.Helo}}{{else}}<span class="empty">(none)</span>{{end}}</dd>
+	<dt>Message-ID</dt><dd>{{if .Message.MessageID}}{{.Message.MessageID}}{{else}}<span class="empty">(none)</span>{{end}}</dd>
+	<dt>Content type</dt><dd>{{if .Message.ContentType}}{{.Message.ContentType}}{{else}}<span class="empty">(none)</span>{{end}}</dd>
+	<dt>Size</dt><dd>{{if .Message.SizeBytes}}{{.Message.SizeBytes}} bytes{{else}}<span class="empty">(not recorded)</span>{{end}}</dd>
+	<dt>Headers</dt><dd>{{if .Message.HeaderCount}}{{.Message.HeaderCount}}{{else}}<span class="empty">(not recorded)</span>{{end}}</dd>
+	<dt>Last response</dt><dd>{{if .Message.LastCode}}{{.Message.LastCode}} {{.Message.LastErr}}{{else}}<span class="empty">(no attempt yet)</span>{{end}}</dd>
 </dl>
 
 <div class="actions">

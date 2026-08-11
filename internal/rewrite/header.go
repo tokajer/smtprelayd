@@ -80,6 +80,18 @@ func HeaderValue(headers, name string) string {
 	return blk.value(strings.ToLower(name))
 }
 
+// HeaderCount returns the number of header fields in a raw header block, a
+// folded continuation counting towards the field it continues rather than as
+// a field of its own. Best-effort like HeaderValue: an unparsable block
+// yields 0.
+func HeaderCount(headers string) int {
+	blk, err := parseBlock(headers)
+	if err != nil {
+		return 0
+	}
+	return len(blk.fields)
+}
+
 func (b *block) count(name string) int {
 	n := 0
 	for _, f := range b.fields {

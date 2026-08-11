@@ -58,8 +58,7 @@ func recordFailed(t *testing.T, st *store.Store, id, client string) {
 	t.Helper()
 	recipients, _ := json.Marshal([]string{"someone@partner.example"})
 	now := time.Now()
-	if err := st.RecordMessage(id, client, "m365", "relay@example.at", "orig@local",
-		string(recipients), "Scan job", "smtp", "10.0.0.1", now, now.Add(96*time.Hour), true); err != nil {
+	if err := st.RecordMessage(store.MessageRecord{QueueID: id, Client: client, Route: "m365", EnvelopeFrom: "relay@example.at", OriginalFrom: "orig@local", Recipients: string(recipients), Subject: "Scan job", Listener: "smtp", RemoteAddr: "10.0.0.1", ReceivedAt: now, ExpiresAt: now.Add(96 * time.Hour), TLSUsed: true}); err != nil {
 		t.Fatal(err)
 	}
 	if err := st.RecordAttempt(id, 1, 550, "5.1.1 User unknown", "permanent", nil); err != nil {

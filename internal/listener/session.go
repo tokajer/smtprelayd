@@ -17,10 +17,12 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/tokajer/smtprelayd/internal/config"
 	"github.com/tokajer/smtprelayd/internal/rewrite"
 	"github.com/tokajer/smtprelayd/internal/spool"
+	"github.com/tokajer/smtprelayd/internal/store"
 )
 
 const defaultMaxMessageMB = 50
@@ -421,17 +423,36 @@ func (s *session) doData() bool {
 		if s.srv.cfg.History.RetainSubjects {
 			subject = sanitizeSubject(rewrite.HeaderValue(res.Headers, "Subject"))
 		}
-		_ = s.srv.store.RecordMessage(
-			id.String(), s.client.Name, g.Route,
-			res.EnvelopeFrom, res.OriginalFrom, string(recipientsJSON),
-			subject, s.srv.lc.Name, s.remote.String(),
-			env.Received, env.Received.Add(lifetime), s.isTLS,
-		)
+		// Journal metadata describes what was spooled, so it is read from
+		// the rewritten header block and the staged size rather than from
+		// the headers the client sent or the size it announced.
+		messageID := sanitizeHeaderMeta(rewrite.HeaderValue(res.Headers, "Message-ID"), maxStoredMessageID)
+		contentType := sanitizeHeaderMeta(rewrite.HeaderValue(res.Headers, "Content-Type"), maxStoredContentType)
+		_ = s.srv.store.RecordMessage(store.MessageRecord{
+			QueueID:      id.String(),
+			Client:       s.client.Name,
+			Route:        g.Route,
+			EnvelopeFrom: res.EnvelopeFrom,
+			OriginalFrom: res.OriginalFrom,
+			Recipients:   string(recipientsJSON),
+			Subject:      subject,
+			Listener:     s.srv.lc.Name,
+			RemoteAddr:   s.remote.String(),
+			MessageID:    messageID,
+			ContentType:  contentType,
+			SizeBytes:    staged.Size(),
+			HeaderCount:  rewrite.HeaderCount(res.Headers),
+			Helo:         sanitizeHeaderMeta(s.helo, maxStoredHelo),
+			ReceivedAt:   env.Received,
+			ExpiresAt:    env.Received.Add(lifetime),
+			TLSUsed:      s.isTLS,
+		})
 
 		s.log.Info("message accepted",
 			"queue_id", id.String(), "from", res.EnvelopeFrom,
 			"original_from", res.OriginalFrom, "rewritten", res.Rewritten,
-			"recipients", len(g.Recipients), "route", g.Route, "route_reason", g.Reason)
+			"recipients", len(g.Recipients), "route", g.Route, "route_reason", g.Reason,
+			"message_id", messageID, "size_bytes", staged.Size())
 	}
 
 	s.reply(250, "2.0.0 OK queued as "+strings.Join(ids, " "))
@@ -439,27 +460,41 @@ func (s *session) doData() bool {
 	return true
 }
 
-// maxStoredSubject bounds the subject text kept in the history store. It is
-// display metadata, not a protocol value, so this is generous headroom
-// rather than a protocol limit.
-const maxStoredSubject = 500
+// Bounds on the header values kept in the history store. These are display
+// and journal metadata, not protocol values, so they are generous headroom
+// rather than protocol limits.
+const (
+	maxStoredSubject     = 500
+	maxStoredMessageID   = 200
+	maxStoredContentType = 200
+	maxStoredHelo        = 255 // the protocol limit doHelo already enforces
+)
 
-// sanitizeSubject strips control characters from a header value before it
-// enters the history store. This is metadata for display, not a header that
-// gets written back onto the wire, so stripping is the right response to a
-// stray control character rather than rejecting the whole message the way
-// the rewrite package does for From.
-func sanitizeSubject(s string) string {
+// sanitizeHeaderMeta strips control characters from a header value before it
+// enters the history store and bounds its length. This is metadata for
+// display, not a header that gets written back onto the wire, so stripping is
+// the right response to a stray control character rather than rejecting the
+// whole message the way the rewrite package does for From.
+func sanitizeHeaderMeta(s string, max int) string {
 	s = strings.Map(func(r rune) rune {
 		if r < 0x20 || r == 0x7f {
 			return -1
 		}
 		return r
 	}, s)
-	if len(s) > maxStoredSubject {
-		s = s[:maxStoredSubject]
+	if len(s) > max {
+		// Cut on a rune boundary: a stored half rune would render as a
+		// replacement character everywhere it is displayed.
+		for max > 0 && !utf8.RuneStart(s[max]) {
+			max--
+		}
+		s = s[:max]
 	}
 	return s
+}
+
+func sanitizeSubject(s string) string {
+	return sanitizeHeaderMeta(s, maxStoredSubject)
 }
 
 func (s *session) replyDataError(err error) {
