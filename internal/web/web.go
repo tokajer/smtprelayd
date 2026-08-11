@@ -46,6 +46,8 @@ type Server struct {
 	log     *slog.Logger
 	tmpl    map[string]*template.Template
 	csrf    *csrfSigner
+	css     []byte
+	theme   string
 }
 
 // New parses the embedded templates and builds a dashboard server. cfg, st,
@@ -54,8 +56,9 @@ type Server struct {
 func New(cfg *config.Config, st *store.Store, sp *spool.Spool, reg *metrics.Registry, version string, log *slog.Logger) (*Server, error) {
 	pages := []string{"queue", "search", "bounces", "message", "routes", "config"}
 	tmpl := make(map[string]*template.Template, len(pages))
+	funcs := template.FuncMap{"bytes": formatBytes}
 	for _, name := range pages {
-		t, err := template.ParseFS(templateFS,
+		t, err := template.New(name).Funcs(funcs).ParseFS(templateFS,
 			"templates/layout.html", "templates/sidebar.html", "templates/pager.html",
 			"templates/"+name+".html")
 		if err != nil {
@@ -67,9 +70,14 @@ func New(cfg *config.Config, st *store.Store, sp *spool.Spool, reg *metrics.Regi
 	if err != nil {
 		return nil, fmt.Errorf("web: generating CSRF key: %w", err)
 	}
+	// The themed stylesheet is assembled once here rather than per request:
+	// the configuration cannot change while the process runs, so a request
+	// that regenerated it could only ever produce the same bytes.
+	css := append(append([]byte(nil), styleCSS...), themeOverrides(cfg.Web.Theme)...)
 	return &Server{
 		cfg: cfg, store: st, spool: sp, metrics: reg, version: version,
 		log: log.With("component", "web"), tmpl: tmpl, csrf: csrf,
+		css: css, theme: themeMode(cfg.Web.Theme),
 	}, nil
 }
 
@@ -77,14 +85,33 @@ func New(cfg *config.Config, st *store.Store, sp *spool.Spool, reg *metrics.Regi
 // and sidebar have what they need regardless of which page is rendering.
 type baseData struct {
 	Version       string
+	Page          string
+	Theme         string
 	Routes        []metrics.RouteStatus
+	Totals        totals
 	RecentBounces []*store.Message
 }
 
-func (s *Server) base() baseData {
+// totals is the sum of the per-route counters already held in memory for the
+// header tiles. It deliberately adds no query of its own: the tiles are the
+// same numbers /metrics and the route page report, summed.
+type totals struct {
+	Queued, Deferred int
+	Delivered        uint64
+	Bounced          uint64
+}
+
+func (s *Server) base(page string) baseData {
 	var routes []metrics.RouteStatus
 	if s.metrics != nil {
 		routes = s.metrics.Status()
+	}
+	var sum totals
+	for _, r := range routes {
+		sum.Queued += r.Queued
+		sum.Deferred += r.Deferred
+		sum.Delivered += r.Delivered
+		sum.Bounced += r.Bounced
 	}
 	recent, err := s.store.FindBounces(store.BounceFilter{Limit: 5})
 	if err != nil {
@@ -95,7 +122,10 @@ func (s *Server) base() baseData {
 		recent = recent[:5]
 	}
 	s.redactSubjects(recent)
-	return baseData{Version: s.version, Routes: routes, RecentBounces: recent}
+	return baseData{
+		Version: s.version, Page: page, Theme: s.theme,
+		Routes: routes, Totals: sum, RecentBounces: recent,
+	}
 }
 
 // redactSubjects overwrites Subject with a fixed marker when the operator
@@ -146,7 +176,7 @@ func (s *Server) serverError(w http.ResponseWriter, page string, err error) {
 
 func (s *Server) handleStyle(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "text/css; charset=utf-8")
-	_, _ = w.Write(styleCSS)
+	_, _ = w.Write(s.css)
 }
 
 // handleQueue shows messages still in the spool: queued or deferred,
@@ -178,7 +208,7 @@ func (s *Server) handleQueue(w http.ResponseWriter, r *http.Request) {
 		NextHref  string
 		PrevHref  string
 	}{
-		baseData:  s.base(),
+		baseData:  s.base("queue"),
 		Messages:  msgs,
 		SortLinks: sortLinks("/queue", nil, sortCol, order),
 		HasMore:   hasMore,
@@ -238,7 +268,7 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		NextHref    string
 		PrevHref    string
 	}{
-		baseData: s.base(),
+		baseData: s.base("search"),
 		Filter: searchFilterView{
 			Sender: filter.Sender, Recipient: filter.Recipient, Subject: filter.Subject,
 			Client: filter.Client, Route: filter.Route, Status: filter.Status,
@@ -313,7 +343,7 @@ func (s *Server) handleBounces(w http.ResponseWriter, r *http.Request) {
 		NextHref    string
 		PrevHref    string
 	}{
-		baseData: s.base(),
+		baseData: s.base("bounces"),
 		Filter: bounceFilterView{
 			Sender: filter.Sender, Recipient: filter.Recipient, Subject: filter.Subject,
 			Client: filter.Client, Route: filter.Route, Class: filter.Class,
@@ -353,7 +383,7 @@ func (s *Server) handleMessage(w http.ResponseWriter, r *http.Request) {
 		Message      *store.Message
 		RequeueToken string
 		DeleteToken  string
-	}{baseData: s.base(), Message: msg}
+	}{baseData: s.base("message"), Message: msg}
 	if msg != nil {
 		now := time.Now()
 		data.RequeueToken = s.csrf.token("requeue", id.String(), now)
@@ -422,7 +452,7 @@ func (s *Server) handleDeleteAction(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleRoutes(w http.ResponseWriter, _ *http.Request) {
-	s.render(w, "routes", s.base())
+	s.render(w, "routes", s.base("routes"))
 }
 
 func (s *Server) handleConfig(w http.ResponseWriter, _ *http.Request) {
@@ -433,7 +463,7 @@ func (s *Server) handleConfig(w http.ResponseWriter, _ *http.Request) {
 		RoutesText    string
 		BounceText    string
 	}{
-		baseData:      s.base(),
+		baseData:      s.base("config"),
 		ListenersText: formatListeners(s.cfg.Listeners),
 		ClientsText:   formatClients(s.cfg.Clients),
 		RoutesText:    formatRoutes(s.cfg.Routes),
@@ -542,6 +572,20 @@ func pageHref(path string, extra url.Values, sortCol, order string, offset int) 
 		return path + "?" + enc
 	}
 	return path
+}
+
+// formatBytes renders a spooled size for a table cell. Below a kilobyte the
+// exact octet count is kept, since that range is where a truncated or empty
+// message is being diagnosed and rounding would hide it.
+func formatBytes(n int64) string {
+	switch {
+	case n < 1024:
+		return strconv.FormatInt(n, 10) + " B"
+	case n < 1024*1024:
+		return fmt.Sprintf("%.1f KB", float64(n)/1024)
+	default:
+		return fmt.Sprintf("%.1f MB", float64(n)/(1024*1024))
+	}
 }
 
 func orNone(s string) string {

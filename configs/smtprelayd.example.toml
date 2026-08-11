@@ -191,6 +191,25 @@ max_per_hour    = 12                       # cap, excess is recorded but not mai
 address = "127.0.0.1:8025"
 enabled = true
 
+# Dashboard appearance. Every value is optional; an omitted one keeps the
+# built-in colour. mode = "auto" follows the browser's light/dark preference,
+# "light" or "dark" pin one scheme. A colour must be a literal hex value
+# (#rgb or #rrggbb) -- it is written into the stylesheet, so nothing else is
+# accepted -- and applies to the light and the dark scheme alike, which is why
+# overriding more than the accent usually goes together with pinning mode.
+#[web.theme]
+#mode        = "auto"
+#accent      = "#2f5fa8"   # links, buttons, active navigation, focus ring
+#accent_text = "#ffffff"   # text on top of accent
+#background  = "#eceff4"   # page background
+#surface     = "#ffffff"   # cards, tables
+#border      = "#d5dae2"
+#text        = "#161b22"
+#muted       = "#5b6570"   # labels, secondary text
+#ok          = "#1f7a4d"   # delivered
+#warn        = "#9a6b13"   # deferred
+#danger      = "#b02a2a"   # bounced
+
 # Bearer tokens for /api/v1. Scope is "read" or "admin".
 # Generate with: smtprelayd token new --name checkmk --scope read
 # The plaintext token is printed once; only its digest is stored here.

@@ -9,13 +9,13 @@
 <tbody>
 {{range .Routes}}
 <tr>
-	<td>{{.Route}}</td>
-	<td>{{.Queued}}</td>
-	<td>{{.Deferred}}</td>
-	<td>{{.Delivered}}</td>
-	<td>{{.Bounced}}</td>
-	<td>{{.AuthFailures}}</td>
-	<td>{{if not .LastDelivery.IsZero}}{{.LastDelivery.Format "2006-01-02 15:04:05"}}{{else}}<span class="empty">never</span>{{end}}</td>
+	<td><strong>{{.Route}}</strong></td>
+	<td class="num">{{.Queued}}</td>
+	<td class="num">{{.Deferred}}</td>
+	<td class="num">{{.Delivered}}</td>
+	<td class="num">{{.Bounced}}</td>
+	<td class="num">{{.AuthFailures}}</td>
+	<td class="nowrap">{{if not .LastDelivery.IsZero}}{{.LastDelivery.Format "2006-01-02 15:04:05"}}{{else}}<span class="empty">never</span>{{end}}</td>
 	<td>{{if .HasToken}}{{.TokenAge}}{{else}}<span class="empty">n/a</span>{{end}}</td>
 </tr>
 {{else}}

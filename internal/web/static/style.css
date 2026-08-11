@@ -1,144 +1,489 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 /* Copyright (C) 2026 Tokajer */
 
+/* Every colour below is a custom property so that [web.theme] can override it
+   by appending one block to this file. The dark scheme redefines the same
+   properties rather than introducing its own, for the same reason. */
+
 :root {
-	--bg: #f5f6f8;
-	--panel: #ffffff;
-	--border: #d7dbe0;
-	--text: #1c2126;
+	--bg: #eceff4;
+	--surface: #ffffff;
+	--surface-2: #f5f7fa;
+	--border: #d5dae2;
+	--text: #161b22;
 	--muted: #5b6570;
 	--accent: #2f5fa8;
-	--danger: #a83232;
-	--warn: #a87d1f;
-	--ok: #2f7d4f;
+	--accent-text: #ffffff;
+	--ok: #1f7a4d;
+	--warn: #9a6b13;
+	--danger: #b02a2a;
+
+	--radius: 10px;
+	--radius-sm: 6px;
+	--shadow: 0 1px 2px rgb(16 24 40 / 6%), 0 8px 24px -12px rgb(16 24 40 / 18%);
+	--shadow-sm: 0 1px 2px rgb(16 24 40 / 8%);
+	--ring: 0 0 0 3px color-mix(in srgb, var(--accent) 28%, transparent);
+	--mono: ui-monospace, SFMono-Regular, "Cascadia Mono", Consolas, "Liberation Mono", monospace;
+}
+
+/* The dark scheme follows the operating system unless [web.theme].mode pins
+   one, which the document element carries as data-theme. No JavaScript is
+   involved in either direction. */
+@media (prefers-color-scheme: dark) {
+	:root:not([data-theme="light"]) {
+		--bg: #0f1319;
+		--surface: #161b23;
+		--surface-2: #1c222c;
+		--border: #2a323e;
+		--text: #e6ebf2;
+		--muted: #97a3b4;
+		--accent: #6f9ae8;
+		--accent-text: #0f1319;
+		--ok: #4cc38a;
+		--warn: #e0b341;
+		--danger: #f0736a;
+		--shadow: 0 1px 2px rgb(0 0 0 / 40%), 0 10px 28px -14px rgb(0 0 0 / 70%);
+		--shadow-sm: 0 1px 2px rgb(0 0 0 / 45%);
+	}
+}
+
+:root[data-theme="dark"] {
+	--bg: #0f1319;
+	--surface: #161b23;
+	--surface-2: #1c222c;
+	--border: #2a323e;
+	--text: #e6ebf2;
+	--muted: #97a3b4;
+	--accent: #6f9ae8;
+	--accent-text: #0f1319;
+	--ok: #4cc38a;
+	--warn: #e0b341;
+	--danger: #f0736a;
+	--shadow: 0 1px 2px rgb(0 0 0 / 40%), 0 10px 28px -14px rgb(0 0 0 / 70%);
+	--shadow-sm: 0 1px 2px rgb(0 0 0 / 45%);
+}
+
+/* The one colour that is not configurable: the slightly raised fill behind
+   table headers, chips and the filter bar. Deriving it from the surface and
+   text colours in effect keeps it in the same family as whatever [web.theme]
+   sets, which a fixed neutral would not — a warm palette with a blue-grey
+   header is exactly the mismatch this avoids. The static declarations above
+   remain the fallback where color-mix() is unsupported. */
+:root, :root[data-theme="light"], :root[data-theme="dark"] {
+	--surface-2: color-mix(in srgb, var(--surface) 95%, var(--text));
 }
 
 * { box-sizing: border-box; }
 
 body {
 	margin: 0;
-	font-family: -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+	font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
 	font-size: 14px;
+	line-height: 1.5;
 	background: var(--bg);
 	color: var(--text);
+	-webkit-font-smoothing: antialiased;
 }
 
-header {
+a { color: var(--accent); }
+
+::selection { background: color-mix(in srgb, var(--accent) 30%, transparent); }
+
+/* ---------- header ---------- */
+
+header.topbar {
+	position: sticky;
+	top: 0;
+	z-index: 10;
 	display: flex;
-	align-items: baseline;
+	align-items: center;
 	gap: 1rem;
-	padding: 0.75rem 1.25rem;
-	background: var(--panel);
+	padding: 0.7rem 1.25rem;
+	background: color-mix(in srgb, var(--surface) 88%, transparent);
+	backdrop-filter: saturate(160%) blur(10px);
 	border-bottom: 1px solid var(--border);
+	box-shadow: var(--shadow-sm);
 }
 
-header .logo { font-weight: 700; font-size: 1.1rem; }
-header .version { color: var(--muted); font-size: 0.85rem; }
+header.topbar::before {
+	content: "";
+	position: absolute;
+	inset: 0 0 auto 0;
+	height: 3px;
+	background: linear-gradient(90deg, var(--accent), color-mix(in srgb, var(--accent) 35%, var(--ok)));
+}
 
-header nav { margin-left: auto; display: flex; gap: 1rem; }
-header nav a { color: var(--accent); text-decoration: none; }
-header nav a:hover { text-decoration: underline; }
+.brand {
+	display: flex;
+	align-items: center;
+	gap: 0.55rem;
+	font-weight: 700;
+	font-size: 1.05rem;
+	letter-spacing: -0.01em;
+	color: var(--text);
+	text-decoration: none;
+}
+
+.brand .mark {
+	display: grid;
+	place-items: center;
+	width: 26px;
+	height: 26px;
+	border-radius: 8px;
+	background: var(--accent);
+	color: var(--accent-text);
+	font-size: 0.8rem;
+	font-weight: 700;
+	box-shadow: var(--shadow-sm);
+}
+
+.version {
+	color: var(--muted);
+	font-family: var(--mono);
+	font-size: 0.75rem;
+	padding: 0.1rem 0.45rem;
+	border: 1px solid var(--border);
+	border-radius: 999px;
+}
+
+header nav {
+	margin-left: auto;
+	display: flex;
+	flex-wrap: wrap;
+	gap: 0.25rem;
+}
+
+header nav a {
+	padding: 0.35rem 0.75rem;
+	border-radius: 999px;
+	color: var(--muted);
+	text-decoration: none;
+	font-weight: 500;
+	transition: background 0.15s ease, color 0.15s ease;
+}
+
+header nav a:hover { background: var(--surface-2); color: var(--text); }
+
+header nav a.active {
+	color: var(--accent);
+	background: color-mix(in srgb, var(--accent) 14%, transparent);
+}
+
+/* ---------- layout ---------- */
 
 .layout {
 	display: grid;
-	grid-template-columns: 220px 1fr;
-	gap: 1rem;
-	padding: 1rem;
-	max-width: 1400px;
+	grid-template-columns: 260px minmax(0, 1fr);
+	gap: 1.25rem;
+	padding: 1.25rem;
+	max-width: 1700px;
 	margin: 0 auto;
 }
 
-@media (max-width: 800px) {
-	.layout { grid-template-columns: 1fr; }
-}
+aside { display: flex; flex-direction: column; gap: 1rem; min-width: 0; }
 
-aside, main {
-	background: var(--panel);
+.card {
+	background: var(--surface);
 	border: 1px solid var(--border);
-	border-radius: 6px;
-	padding: 1rem;
+	border-radius: var(--radius);
+	padding: 1.1rem 1.25rem;
+	box-shadow: var(--shadow);
 	min-width: 0;
 }
 
-aside h2, main h1, main h2 { margin-top: 0; font-size: 1rem; }
+main.card { padding: 1.25rem 1.4rem; }
+
+h1 {
+	margin: 0 0 1rem;
+	font-size: 1.25rem;
+	letter-spacing: -0.02em;
+}
+
+h2 { margin: 1.5rem 0 0.6rem; font-size: 1rem; }
+aside h2 { margin: 0 0 0.6rem; font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); }
+
+footer.foot {
+	max-width: 1700px;
+	margin: 0 auto;
+	padding: 0 1.25rem 2rem;
+	color: var(--muted);
+	font-size: 0.8rem;
+}
+
+/* ---------- stat tiles ---------- */
+
+.stats {
+	display: grid;
+	grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+	gap: 0.6rem;
+	margin-bottom: 1.25rem;
+}
+
+.tile {
+	background: var(--surface);
+	border: 1px solid var(--border);
+	border-left: 3px solid var(--accent);
+	border-radius: var(--radius-sm);
+	padding: 0.6rem 0.8rem;
+	box-shadow: var(--shadow-sm);
+}
+
+.tile .label { color: var(--muted); font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.06em; }
+.tile .value { font-size: 1.5rem; font-weight: 650; letter-spacing: -0.02em; font-variant-numeric: tabular-nums; }
+
+.tile-queued { border-left-color: var(--accent); }
+.tile-deferred { border-left-color: var(--warn); }
+.tile-delivered { border-left-color: var(--ok); }
+.tile-bounced { border-left-color: var(--danger); }
+
+/* ---------- tables ---------- */
+
+.table-wrap {
+	overflow-x: auto;
+	border: 1px solid var(--border);
+	border-radius: var(--radius-sm);
+	background: var(--surface);
+}
 
 table {
 	width: 100%;
-	border-collapse: collapse;
-	font-size: 0.9rem;
+	border-collapse: separate;
+	border-spacing: 0;
+	font-size: 0.87rem;
+}
+
+thead th {
+	position: sticky;
+	top: 0;
+	background: var(--surface-2);
+	color: var(--muted);
+	font-size: 0.74rem;
+	text-transform: uppercase;
+	letter-spacing: 0.05em;
+	white-space: nowrap;
+	z-index: 1;
 }
 
 th, td {
 	text-align: left;
-	padding: 0.4rem 0.5rem;
+	padding: 0.55rem 0.7rem;
 	border-bottom: 1px solid var(--border);
 	overflow-wrap: anywhere;
+	vertical-align: top;
 }
 
+td.nowrap, th.nowrap { white-space: nowrap; }
+td.num { text-align: right; font-variant-numeric: tabular-nums; }
+
+/* Addresses and subjects have no break opportunity a table can use, so auto
+   layout squeezes them to one word per line as soon as the row is crowded.
+   The cells stay breakable anywhere -- that is what keeps the table inside
+   its container instead of scrolling -- and these floors keep the columns
+   that suffer most from it wide enough for the break to fall somewhere
+   readable. */
+td.cell-subject, th.cell-subject { min-width: 13rem; }
+td.cell-addr, th.cell-addr { min-width: 11rem; }
+td.cell-resp, th.cell-resp { min-width: 12rem; }
+
+table a { color: var(--accent); text-decoration: none; }
+table a:hover { text-decoration: underline; }
+
+tbody tr:last-child td { border-bottom: none; }
+tbody tr { transition: background 0.12s ease; }
+tbody tr:hover { background: var(--surface-2); }
+
 th a { color: inherit; text-decoration: none; }
-th a:hover { text-decoration: underline; }
+th a::after { content: " ⇅"; opacity: 0.45; }
+th a:hover { color: var(--accent); }
 
-.table-wrap { overflow-x: auto; }
+td .qid, .qid {
+	font-family: var(--mono);
+	font-size: 0.85em;
+}
 
-.status { font-weight: 600; }
-.status-queued { color: var(--muted); }
-.status-deferred { color: var(--warn); }
-.status-delivered { color: var(--ok); }
-.status-bounced { color: var(--danger); }
+/* ---------- status pills ---------- */
+
+.pill {
+	display: inline-block;
+	padding: 0.12rem 0.55rem;
+	border-radius: 999px;
+	font-size: 0.75rem;
+	font-weight: 600;
+	white-space: nowrap;
+	border: 1px solid currentColor;
+	background: color-mix(in srgb, currentColor 12%, transparent);
+}
+
+.pill-queued { color: var(--muted); }
+.pill-deferred { color: var(--warn); }
+.pill-delivered { color: var(--ok); }
+.pill-bounced, .pill-permanent, .pill-expired { color: var(--danger); }
+.pill-temporary { color: var(--warn); }
+
+/* ---------- sidebar lists ---------- */
 
 .route-list { list-style: none; margin: 0; padding: 0; font-size: 0.85rem; }
-.route-list li { padding: 0.3rem 0; border-bottom: 1px solid var(--border); }
+
+.route-list li {
+	padding: 0.5rem 0;
+	border-bottom: 1px dashed var(--border);
+}
+
+.route-list li:last-child { border-bottom: none; }
+.route-list .name { font-weight: 600; }
+
+.counts { display: flex; gap: 0.4rem; margin-top: 0.25rem; flex-wrap: wrap; }
+
+.chip {
+	font-size: 0.72rem;
+	padding: 0.05rem 0.45rem;
+	border-radius: 999px;
+	background: var(--surface-2);
+	border: 1px solid var(--border);
+	color: var(--muted);
+	font-variant-numeric: tabular-nums;
+}
+
+.chip strong { color: var(--text); font-weight: 600; }
+
+.meta { color: var(--muted); font-size: 0.75rem; margin-top: 0.25rem; }
+
+/* ---------- forms ---------- */
 
 form.filters {
 	display: flex;
 	flex-wrap: wrap;
-	gap: 0.5rem 1rem;
-	margin-bottom: 1rem;
+	gap: 0.6rem 0.9rem;
 	align-items: end;
+	margin-bottom: 1.1rem;
+	padding: 0.9rem 1rem;
+	background: var(--surface-2);
+	border: 1px solid var(--border);
+	border-radius: var(--radius-sm);
 }
 
 form.filters label {
 	display: flex;
 	flex-direction: column;
-	font-size: 0.8rem;
+	gap: 0.25rem;
+	font-size: 0.75rem;
+	font-weight: 600;
+	letter-spacing: 0.02em;
 	color: var(--muted);
-	gap: 0.2rem;
 }
 
 input, select {
 	font: inherit;
-	padding: 0.3rem 0.4rem;
+	padding: 0.35rem 0.5rem;
+	background: var(--surface);
+	color: var(--text);
 	border: 1px solid var(--border);
-	border-radius: 4px;
+	border-radius: var(--radius-sm);
+	transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+input:focus, select:focus, button:focus-visible, a:focus-visible {
+	outline: none;
+	border-color: var(--accent);
+	box-shadow: var(--ring);
 }
 
 button {
 	font: inherit;
-	padding: 0.35rem 0.9rem;
+	font-weight: 600;
+	padding: 0.4rem 1rem;
 	border: 1px solid var(--accent);
-	border-radius: 4px;
+	border-radius: var(--radius-sm);
 	background: var(--accent);
-	color: #fff;
+	color: var(--accent-text);
 	cursor: pointer;
+	box-shadow: var(--shadow-sm);
+	transition: filter 0.15s ease, transform 0.05s ease;
 }
 
-.pager { display: flex; gap: 1rem; margin-top: 1rem; }
-.pager a { color: var(--accent); }
+button:hover { filter: brightness(1.08); }
+button:active { transform: translateY(1px); }
 
-.actions { display: flex; gap: 0.75rem; margin: 1rem 0; }
-.actions button.danger { background: var(--danger); border-color: var(--danger); }
+button.danger { background: var(--danger); border-color: var(--danger); color: #fff; }
 
-dl.envelope { display: grid; grid-template-columns: 10rem 1fr; gap: 0.3rem 1rem; }
-dl.envelope dt { color: var(--muted); }
-dl.envelope dd { margin: 0; overflow-wrap: anywhere; }
+.actions { display: flex; flex-wrap: wrap; gap: 0.75rem; margin: 1.25rem 0; }
+
+/* ---------- message detail ---------- */
+
+dl.envelope {
+	display: grid;
+	grid-template-columns: 11rem minmax(0, 1fr);
+	gap: 0;
+	margin: 0;
+	border: 1px solid var(--border);
+	border-radius: var(--radius-sm);
+	overflow: hidden;
+}
+
+dl.envelope dt {
+	padding: 0.4rem 0.7rem;
+	color: var(--muted);
+	font-size: 0.8rem;
+	background: var(--surface-2);
+	border-bottom: 1px solid var(--border);
+}
+
+dl.envelope dd {
+	margin: 0;
+	padding: 0.4rem 0.7rem;
+	border-bottom: 1px solid var(--border);
+	overflow-wrap: anywhere;
+}
+
+dl.envelope dt:last-of-type, dl.envelope dd:last-of-type { border-bottom: none; }
+
+/* ---------- misc ---------- */
+
+.pager { display: flex; gap: 0.5rem; margin-top: 1rem; }
+
+.pager a {
+	padding: 0.3rem 0.8rem;
+	border: 1px solid var(--border);
+	border-radius: var(--radius-sm);
+	background: var(--surface);
+	text-decoration: none;
+	font-weight: 600;
+	font-size: 0.85rem;
+}
+
+.pager a:hover { border-color: var(--accent); }
 
 .empty { color: var(--muted); font-style: italic; }
+td.empty, .table-wrap .empty { text-align: center; padding: 1.5rem; }
+
+.notice {
+	padding: 0.6rem 0.85rem;
+	border-radius: var(--radius-sm);
+	border: 1px solid var(--danger);
+	color: var(--danger);
+	background: color-mix(in srgb, var(--danger) 10%, transparent);
+	margin-bottom: 1rem;
+}
 
 pre.config-section {
-	background: var(--bg);
+	background: var(--surface-2);
 	border: 1px solid var(--border);
-	border-radius: 4px;
-	padding: 0.75rem;
+	border-radius: var(--radius-sm);
+	padding: 0.85rem 1rem;
 	overflow-x: auto;
-	font-size: 0.85rem;
+	font-family: var(--mono);
+	font-size: 0.82rem;
+	line-height: 1.55;
+}
+
+@media (max-width: 900px) {
+	.layout { grid-template-columns: minmax(0, 1fr); padding: 0.75rem; }
+	header.topbar { flex-wrap: wrap; }
+	header nav { margin-left: 0; width: 100%; }
+	dl.envelope { grid-template-columns: minmax(0, 1fr); }
+	dl.envelope dt { border-bottom: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+	* { transition: none !important; }
 }

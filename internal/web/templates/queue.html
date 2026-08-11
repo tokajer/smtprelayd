@@ -7,24 +7,24 @@
 	<th><a href="{{index .SortLinks "status"}}">Status</a></th>
 	<th><a href="{{index .SortLinks "client"}}">Client</a></th>
 	<th><a href="{{index .SortLinks "route"}}">Route</a></th>
-	<th>From</th>
-	<th>Recipients</th>
-	<th>Subject</th>
+	<th class="cell-addr">From</th>
+	<th class="cell-addr">Recipients</th>
+	<th class="cell-subject">Subject</th>
 	<th>Size</th>
-	<th>Last response</th>
+	<th class="cell-resp">Last response</th>
 </tr></thead>
 <tbody>
 {{range .Messages}}
 <tr>
-	<td>{{.ReceivedAt.Format "2006-01-02 15:04:05"}}</td>
-	<td class="status status-{{.Status}}">{{.Status}}</td>
+	<td class="nowrap">{{.ReceivedAt.Format "2006-01-02 15:04:05"}}</td>
+	<td><span class="pill pill-{{.Status}}">{{.Status}}</span></td>
 	<td>{{.Client}}</td>
 	<td>{{.Route}}</td>
-	<td>{{.EnvelopeFrom}}</td>
-	<td>{{range .Recipients}}{{.}}<br>{{end}}</td>
-	<td><a href="/messages/{{.QueueID}}">{{if .Subject}}{{.Subject}}{{else}}<span class="empty">(no subject)</span>{{end}}</a></td>
-	<td>{{if .SizeBytes}}{{.SizeBytes}}{{end}}</td>
-	<td>{{if .AttemptCount}}{{if .LastCode}}{{.LastCode}} {{end}}{{.LastErr}}{{else}}<span class="empty">no attempt yet</span>{{end}}</td>
+	<td class="cell-addr">{{.EnvelopeFrom}}</td>
+	<td class="cell-addr">{{range .Recipients}}{{.}}<br>{{end}}</td>
+	<td class="cell-subject"><a href="/messages/{{.QueueID}}">{{if .Subject}}{{.Subject}}{{else}}<span class="empty">(no subject)</span>{{end}}</a></td>
+	<td class="nowrap num">{{if .SizeBytes}}{{bytes .SizeBytes}}{{end}}</td>
+	<td class="cell-resp">{{if .AttemptCount}}{{if .LastCode}}{{.LastCode}} {{end}}{{.LastErr}}{{else}}<span class="empty">no attempt yet</span>{{end}}</td>
 </tr>
 {{else}}
 <tr><td colspan="9" class="empty">the queue is empty</td></tr>

@@ -407,6 +407,24 @@ func (c *Config) Validate() error {
 				c.Web.Address)
 		}
 	}
+	// Validated whether or not the dashboard is enabled: a rejected colour is
+	// a typo the operator wants to hear about now, not the first time the
+	// dashboard is switched on.
+	switch c.Web.Theme.Mode {
+	case "", "auto", "light", "dark":
+	default:
+		add("web.theme.mode %q: must be auto, light or dark", c.Web.Theme.Mode)
+	}
+	th := c.Web.Theme
+	for _, f := range []struct{ key, value string }{
+		{"accent", th.Accent}, {"accent_text", th.AccentText}, {"background", th.Background},
+		{"surface", th.Surface}, {"border", th.Border}, {"text", th.Text},
+		{"muted", th.Muted}, {"ok", th.OK}, {"warn", th.Warn}, {"danger", th.Danger},
+	} {
+		if f.value != "" && !IsHexColor(f.value) {
+			add("web.theme.%s %q: must be a hex colour such as #2f5fa8 or #fff", f.key, f.value)
+		}
+	}
 	for i, t := range c.Web.Tokens {
 		if t.Scope != "read" && t.Scope != "admin" {
 			add("web.token[%d] %q: scope must be read or admin", i, t.Name)

@@ -342,3 +342,54 @@ func TestMatchTokenIsScopeAware(t *testing.T) {
 		t.Fatal("an admin token must satisfy read")
 	}
 }
+
+func TestThemeColorMustBeHex(t *testing.T) {
+	// Every rejected value is one that would otherwise end up verbatim
+	// inside a CSS custom property declaration: the first two close the
+	// declaration and open a rule of their own, the third and fourth are
+	// syntaxes that can name a URL, the last is simply not a colour.
+	for _, bad := range []string{
+		`#fff; } body { display: none`,
+		`red; --x: url(http://evil.example/x)`,
+		`url(http://evil.example/x)`,
+		`var(--accent)`,
+		`rebeccapurple`,
+		`#ff`,
+		`#1234567`,
+		`#12345g`,
+	} {
+		body := baseConfig + "\n[web]\nenabled = true\n[web.theme]\naccent = " + fmt.Sprintf("%q", bad) + "\n"
+		_, err := Load(write(t, body))
+		if err == nil || !strings.Contains(err.Error(), "web.theme.accent") {
+			t.Errorf("theme colour %q accepted: %v", bad, err)
+		}
+	}
+}
+
+func TestThemeAcceptsHexColorsAndModes(t *testing.T) {
+	body := baseConfig + `
+[web]
+enabled = true
+
+[web.theme]
+mode       = "dark"
+accent     = "#7C4DFF"
+background = "#101"
+danger     = "#b02a2a"
+`
+	cfg, err := Load(write(t, body))
+	if err != nil {
+		t.Fatalf("valid theme rejected: %v", err)
+	}
+	if got := cfg.Web.Theme.Colors(); len(got) != 3 || got["--accent"] != "#7C4DFF" {
+		t.Fatalf("Colors() = %v", got)
+	}
+}
+
+func TestThemeModeIsCheckedAgainstAFixedSet(t *testing.T) {
+	body := baseConfig + "\n[web]\nenabled = true\n[web.theme]\nmode = \"neon\"\n"
+	_, err := Load(write(t, body))
+	if err == nil || !strings.Contains(err.Error(), "web.theme.mode") {
+		t.Fatalf("unknown theme mode accepted: %v", err)
+	}
+}

@@ -14,7 +14,38 @@ and the Windows service wrapper (normally phase 5) were pulled forward and
 validated. MSI installs and uninstalls; `install`/`uninstall`/`start`/`stop`
 work on Windows. Log rotation and Windows ACL verification at startup are
 complete.
-**Last session**: 2026-08-11 (fifteenth session) — Message metadata journal, no
+**Last session**: 2026-08-11 (sixteenth session) — Dashboard visual redesign
+plus a configurable colour theme, no phase work. Requested as "make the
+dashboard fancy, and let the colours be customised in the config file".
+`internal/web/static/style.css` was rewritten around the design tokens it
+already had: sticky header with an accent gradient, nav pills marking the
+current page (new `baseData.Page`, `s.base(page)`), stat tiles summing the
+per-route counters the metrics registry already holds — no query was added for
+them — status pills instead of coloured text, card surfaces, a filter bar,
+hover and focus states, a byte formatter (`bytes` template func), and a dark
+scheme. The dark scheme is `prefers-color-scheme` plus a `data-theme`
+attribute on `<html>`, so `mode = "light"|"dark"` pins a scheme with no
+JavaScript, which the CSP would forbid anyway. New `[web.theme]` section:
+`mode` and ten colours (`accent`, `accent_text`, `background`, `surface`,
+`border`, `text`, `muted`, `ok`, `warn`, `danger`), each optional.
+**The security-relevant part**: these values are written into a CSS
+declaration, where there is no contextual escaper — so they are restricted to
+literal `#rgb`/`#rrggbb`, rejected at load time in `internal/config` and
+dropped again in `internal/web.themeOverrides`, the same doubled check the
+config view uses for secrets; the property names are a fixed set in the code
+and never come from the file. `#fff; } body { display: none` and four other
+injection-shaped values are regression-tested. The override block is emitted
+with the same selector list as the dark scheme so it wins in both schemes,
+which is why an override applies to light and dark alike (documented in the
+example config and the README). `--surface-2` is derived with `color-mix()`
+from the configured surface and text rather than being a fixed neutral, so a
+warm palette does not get blue-grey table headers. Verified by rendering the
+real handler headless in Chrome across all six pages, in light, in dark, and
+under a custom amber palette, and the README screenshot
+(`docs/img/dashboard-queue.png`) was regenerated from the new dashboard.
+`gofmt`, `go vet` (both GOOS), `go test ./...` and both cross-builds clean;
+`scripts/check-banned-imports.sh` clean for all three targets.
+**Previous session**: 2026-08-11 (fifteenth session) — Message metadata journal, no
 phase work. Developed in parallel with the fourteenth session and merged into
 it (`34077ac`); its own commit is `a63b216`. Requested as "logging of all
 mails", scoped after checking what already existed: every accepted message was
@@ -428,8 +459,13 @@ check` ✅ works; now need: a message through the m365 route, a message with
 recipients in two routes to confirm the split, and one deliberate wrong secret
 to confirm the queue defers. Needs tenant, mailbox and sending-domain values
 (see Open questions).
-**Next action, phase 5**: Linux install/configure/start/stop cycle test on
-Debian/RPM; upgrade cycle test on both platforms.
+**Next action, phase 5**: the `.rpm` path is verified on a live Fedora host
+(2026-08-11) — install, configure, `check`, start, stop, and an `rpm -U`
+upgrade, with port 25 confirmed bound by uid 963 rather than root, which is
+the item that proves `AmbientCapabilities=CAP_NET_BIND_SERVICE` works. Still
+open: the same sequence for the `.deb` on Debian/Ubuntu, the remove-keeps-data
+step on either, and the Windows MSI on hardware. See also the upgrade-restart
+defect below, found during that test.
 
 ## Phases
 
@@ -726,6 +762,54 @@ un-stuffing correctly paired with `net/smtp`'s re-stuffing `DotWriter`.
 
 ## Open defects
 
+### An upgraded package leaves the old binary running (2026-08-11)
+
+**Fixed 2026-08-11**, same day. `postinstall.sh` now distinguishes an install
+from an upgrade — reading both conventions, rpm's instance count in `$1` and
+dpkg's `configure` with the old version in `$2` — prints the first-install
+instructions only on a first install, and on an upgrade runs
+`systemctl try-restart`, which restarts the unit only if it was running and so
+keeps the standing rule that a package never *starts* the service.
+
+One deliberate reversal while building it: validating the configuration with
+`check` before restarting looks like the safer order and is not. A
+`${ENV_VAR}` secret resolves from the service's own environment, supplied by a
+unit drop-in that a package script does not see, so `check` would fail with
+"environment variable is unset" on a perfectly good configuration and refuse
+to restart on essentially every real installation. The restart is therefore
+attempted and its *outcome* reported: if the unit does not come back within
+five seconds, the script says so, names the journal, and warns that `check`
+needs the service's environment. A relay that is down and says so is better
+than one silently running the binary the operator just replaced.
+
+Verified by building both packages with nfpm and running every branch of the
+script against stubbed `systemctl`/`chown`: first install (both conventions),
+upgrade with the unit running, upgrade with the unit stopped, upgrade with no
+configuration file yet, and an upgrade where the unit fails to come back.
+
+The original report follows.
+
+**Found during the first live Linux install**, an `rpm -U` from
+0.2.5 over 0.2.0 on Fedora. `preremove.sh` correctly distinguishes an upgrade
+from a removal and only stops the service on a real removal — which is right —
+but nothing then restarts it, so the service keeps executing the replaced
+binary until an operator restarts it by hand. On the host where this was
+found the operator did restart (package written 21:48, process started 21:54),
+so the upgrade *looked* fine; nothing in the package made it so.
+
+Second, smaller half: `postinstall.sh` prints its first-install text
+unconditionally, so an upgrade of a configured, running relay ends with
+"The service was not started automatically because it has no usable
+configuration yet", which is false and points the operator at steps they
+completed long ago. RPM passes `1` on install and `2` on upgrade; dpkg passes
+`configure` with the old version in `$2`. The script reads neither, although
+`preremove.sh` already reads exactly that argument.
+
+Restarting a mail relay unattended drops in-flight SMTP sessions; the spool is
+durable and recovers `active/` on startup, so nothing accepted is lost, but a
+device mid-DATA sees a dropped connection and retries. That was accepted as
+the lesser cost when the fix above was authorised.
+
 ### The Windows installer does not set the data directory DACL (2026-08-11)
 
 **Fixed 2026-08-11.** Found during the first field deployment on Windows. A
@@ -904,3 +988,6 @@ it has.
 | 2026-08-11 | A non-loopback `[metrics].address` is allowed but requires a read-scope token and TLS, superseding "no authentication and no TLS" | The 2026-08-10 decision rested on the listener being expected to bind to loopback, which nothing enforced. Unlike the dashboard, a monitoring system can send a header, so the answer is a credential rather than a refusal; the certificate is required with it because a bearer token crossing a LAN in the clear is a credential given away. Loopback behaviour is unchanged |
 | 2026-08-11 | The metrics endpoint does not rate limit failed authentication, unlike the API | It exists to be polled continuously by one or two known systems. Backing off after five failures would convert a mistyped token into an alerting outage, which is a worse failure than the guessing this would slow down against an endpoint that exposes counters rather than message content |
 | 2026-08-11 | The constant-time token comparison lives once, in `config.MatchToken` | The API and the metrics endpoint authenticate against the same digests. Two implementations of one constant-time comparison is how one of them eventually stops being constant-time |
+| 2026-08-11 | The postinstall script restarts the service on an upgrade with `systemctl try-restart`, having never started it on a first install | `preremove.sh` correctly declines to stop the service on an upgrade, but nothing restarted it afterwards, so an operator who upgraded for a fix kept running the binary they had just replaced. `try-restart` acts only on a unit that is already running, so a service deliberately left stopped stays stopped and the "a package never starts this service" rule survives intact |
+| 2026-08-11 | The upgrade path restarts first and reports the outcome, rather than validating the configuration with `check` beforehand | A `${ENV_VAR}` secret resolves from the service's environment, supplied by a unit drop-in that a package script cannot see, so a pre-flight `check` would report "environment variable is unset" for a perfectly good configuration and refuse to restart on essentially every real installation. Attempting the restart and reporting a unit that does not come back is honest in both directions; a relay that is down and says so beats one silently running the old code |
+| 2026-08-11 | `postinstall.sh` reads both the rpm and the dpkg upgrade convention | rpm passes an instance count in `$1`, dpkg passes `configure` with the old version in `$2`. nfpm installs the same script as both, and `preremove.sh` already had to make this distinction — printing first-install instructions to someone who has run the relay for a year is the visible half of getting it wrong; not restarting is the half that matters |

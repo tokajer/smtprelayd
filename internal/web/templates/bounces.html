@@ -31,23 +31,23 @@
 	</label>
 	<button type="submit">Search</button>
 </form>
-{{if .FilterError}}<p class="status status-bounced">{{.FilterError}}</p>{{end}}
+{{if .FilterError}}<p class="notice">{{.FilterError}}</p>{{end}}
 <div class="table-wrap">
 <table>
 <thead><tr>
-	<th>Sent</th><th>Client</th><th>Route</th><th>From</th><th>Recipients</th><th>Subject</th><th>Attempts</th><th>Last response</th>
+	<th>Sent</th><th>Client</th><th>Route</th><th class="cell-addr">From</th><th class="cell-addr">Recipients</th><th class="cell-subject">Subject</th><th>Attempts</th><th class="cell-resp">Last response</th>
 </tr></thead>
 <tbody>
 {{range .Messages}}
 <tr>
-	<td>{{.ReceivedAt.Format "2006-01-02 15:04:05"}}</td>
+	<td class="nowrap">{{.ReceivedAt.Format "2006-01-02 15:04:05"}}</td>
 	<td>{{.Client}}</td>
 	<td>{{.Route}}</td>
-	<td>{{.EnvelopeFrom}}</td>
-	<td>{{range .Recipients}}{{.}}<br>{{end}}</td>
-	<td><a href="/messages/{{.QueueID}}">{{if .Subject}}{{.Subject}}{{else}}<span class="empty">(no subject)</span>{{end}}</a></td>
-	<td>{{.AttemptCount}}</td>
-	<td>{{if .LastCode}}{{.LastCode}} {{end}}{{.LastErr}}</td>
+	<td class="cell-addr">{{.EnvelopeFrom}}</td>
+	<td class="cell-addr">{{range .Recipients}}{{.}}<br>{{end}}</td>
+	<td class="cell-subject"><a href="/messages/{{.QueueID}}">{{if .Subject}}{{.Subject}}{{else}}<span class="empty">(no subject)</span>{{end}}</a></td>
+	<td class="num">{{.AttemptCount}}</td>
+	<td class="cell-resp">{{if .LastCode}}{{.LastCode}} {{end}}{{.LastErr}}</td>
 </tr>
 {{else}}
 <tr><td colspan="8" class="empty">no bounces match this search</td></tr>

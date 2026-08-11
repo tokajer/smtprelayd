@@ -104,6 +104,20 @@ see `docs/API.md` for the full contract. The dashboard itself needs no token:
 it binds to loopback by default, the same trust boundary as the API's health
 endpoint.
 
+The dashboard follows the browser's light or dark preference and can be
+recoloured from the configuration file. Every value is optional and must be a
+literal hex colour:
+
+```toml
+[web.theme]
+mode   = "dark"      # auto (default), light, dark
+accent = "#f5a524"   # links, buttons, active navigation, focus ring
+surface = "#1b1710"  # cards and tables; see the example config for the rest
+```
+
+An override applies to both schemes, so recolouring more than the accent
+usually goes together with pinning `mode`.
+
 Tokens are stored as SHA-256 digests, never in plaintext. There is no
 `token new` helper yet; compute the digest yourself and put it under
 `[[web.token]]` in the configuration:

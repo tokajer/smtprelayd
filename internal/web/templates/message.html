@@ -3,9 +3,9 @@
 <h1>Message not found</h1>
 <p class="empty">No message with this queue ID exists in the history store.</p>
 {{else}}
-<h1>Message {{.Message.QueueID}}</h1>
+<h1>Message <span class="qid">{{.Message.QueueID}}</span></h1>
 <dl class="envelope">
-	<dt>Status</dt><dd class="status status-{{.Message.Status}}">{{.Message.Status}}</dd>
+	<dt>Status</dt><dd><span class="pill pill-{{.Message.Status}}">{{.Message.Status}}</span></dd>
 	<dt>Received</dt><dd>{{.Message.ReceivedAt.Format "2006-01-02 15:04:05 MST"}}</dd>
 	<dt>Expires</dt><dd>{{.Message.ExpiresAt.Format "2006-01-02 15:04:05 MST"}}</dd>
 	<dt>Client</dt><dd>{{.Message.Client}}</dd>
@@ -20,7 +20,7 @@
 	<dt>HELO name</dt><dd>{{if .Message.Helo}}{{.Message.Helo}}{{else}}<span class="empty">(none)</span>{{end}}</dd>
 	<dt>Message-ID</dt><dd>{{if .Message.MessageID}}{{.Message.MessageID}}{{else}}<span class="empty">(none)</span>{{end}}</dd>
 	<dt>Content type</dt><dd>{{if .Message.ContentType}}{{.Message.ContentType}}{{else}}<span class="empty">(none)</span>{{end}}</dd>
-	<dt>Size</dt><dd>{{if .Message.SizeBytes}}{{.Message.SizeBytes}} bytes{{else}}<span class="empty">(not recorded)</span>{{end}}</dd>
+	<dt>Size</dt><dd>{{if .Message.SizeBytes}}{{bytes .Message.SizeBytes}}{{else}}<span class="empty">(not recorded)</span>{{end}}</dd>
 	<dt>Headers</dt><dd>{{if .Message.HeaderCount}}{{.Message.HeaderCount}}{{else}}<span class="empty">(not recorded)</span>{{end}}</dd>
 	<dt>Last response</dt><dd>{{if .Message.LastCode}}{{.Message.LastCode}} {{.Message.LastErr}}{{else}}<span class="empty">(no attempt yet)</span>{{end}}</dd>
 </dl>
@@ -43,12 +43,12 @@
 <tbody>
 {{range .Message.Attempts}}
 <tr>
-	<td>{{.AttemptNum}}</td>
-	<td>{{.AtTime.Format "2006-01-02 15:04:05"}}</td>
-	<td>{{.Class}}</td>
-	<td>{{if .SMTPCode}}{{.SMTPCode}}{{end}}</td>
-	<td>{{.SMTPResp}}</td>
-	<td>{{if .NextAt}}{{.NextAt.Format "2006-01-02 15:04:05"}}{{end}}</td>
+	<td class="num">{{.AttemptNum}}</td>
+	<td class="nowrap">{{.AtTime.Format "2006-01-02 15:04:05"}}</td>
+	<td><span class="pill pill-{{.Class}}">{{.Class}}</span></td>
+	<td class="nowrap">{{if .SMTPCode}}{{.SMTPCode}}{{end}}</td>
+	<td class="cell-resp">{{.SMTPResp}}</td>
+	<td class="nowrap">{{if .NextAt}}{{.NextAt.Format "2006-01-02 15:04:05"}}{{end}}</td>
 </tr>
 {{else}}
 <tr><td colspan="6" class="empty">no delivery attempts yet</td></tr>

@@ -140,7 +140,73 @@ type Bounce struct {
 type Web struct {
 	Address string  `toml:"address"`
 	Enabled bool    `toml:"enabled"`
+	Theme   Theme   `toml:"theme"`
 	Tokens  []Token `toml:"token"`
+}
+
+// Theme carries the dashboard's appearance overrides. Every colour is a
+// literal hex value validated at load time and again where the stylesheet is
+// generated: the values end up inside a CSS custom property declaration, so an
+// unvalidated string would be a stylesheet injection. An empty field keeps the
+// built-in value; an override applies to the light and the dark scheme alike,
+// which is why Mode exists to pin the scheme an operator is theming for.
+type Theme struct {
+	Mode       string `toml:"mode"`
+	Accent     string `toml:"accent"`
+	AccentText string `toml:"accent_text"`
+	Background string `toml:"background"`
+	Surface    string `toml:"surface"`
+	Border     string `toml:"border"`
+	Text       string `toml:"text"`
+	Muted      string `toml:"muted"`
+	OK         string `toml:"ok"`
+	Warn       string `toml:"warn"`
+	Danger     string `toml:"danger"`
+}
+
+// Colors returns the configured overrides keyed by the CSS custom property
+// they set, skipping the empty ones. The key set is fixed here, so no
+// caller-supplied string can ever become a property name.
+func (t Theme) Colors() map[string]string {
+	out := make(map[string]string, 10)
+	for name, v := range map[string]string{
+		"--accent":      t.Accent,
+		"--accent-text": t.AccentText,
+		"--bg":          t.Background,
+		"--surface":     t.Surface,
+		"--border":      t.Border,
+		"--text":        t.Text,
+		"--muted":       t.Muted,
+		"--ok":          t.OK,
+		"--warn":        t.Warn,
+		"--danger":      t.Danger,
+	} {
+		if v != "" {
+			out[name] = v
+		}
+	}
+	return out
+}
+
+// IsHexColor reports whether s is a literal #rgb or #rrggbb colour. It is
+// deliberately the narrowest syntax that covers the use case: named colours,
+// rgb(), var() and anything carrying a semicolon, a brace or a comment marker
+// are all rejected, so a theme value cannot close the declaration it sits in
+// and start a rule of its own.
+func IsHexColor(s string) bool {
+	if len(s) != 4 && len(s) != 7 {
+		return false
+	}
+	if s[0] != '#' {
+		return false
+	}
+	for i := 1; i < len(s); i++ {
+		c := s[i]
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') && (c < 'A' || c > 'F') {
+			return false
+		}
+	}
+	return true
 }
 
 type Token struct {
@@ -238,7 +304,7 @@ func Defaults() *Config {
 		Log:     Log{File: "smtprelayd.log", MaxSizeMB: 50, MaxBackups: 10, MaxAgeDays: 90},
 		Queue:   Queue{RetryScheduleMin: []int{1, 5, 15, 30, 60, 120}, MaxLifetimeHours: 96},
 		Bounce:  Bounce{DigestMinutes: 15, MaxPerHour: 12},
-		Web:     Web{Address: "127.0.0.1:8025"},
+		Web:     Web{Address: "127.0.0.1:8025", Theme: Theme{Mode: "auto"}},
 		Metrics: Metrics{Address: "127.0.0.1:9025", Path: "/metrics"},
 		History: History{RetentionDays: 90, RetainSubjects: true},
 		Limits: Limits{

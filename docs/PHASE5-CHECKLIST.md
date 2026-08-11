@@ -37,27 +37,37 @@ Only doable on a real Windows machine.
 
 ## Linux: manual install/uninstall/upgrade test
 
-Package *contents* were verified locally with `dpkg-deb`/`rpm2cpio`; actual
-installation on a live system was not.
+Package *contents* were verified locally with `dpkg-deb`/`rpm2cpio`. The
+`.rpm` path was then run on a live Fedora host on 2026-08-11; the `.deb` path
+still has not been installed anywhere. Ticked below only where there was
+evidence, not where it was likely.
 
-- [ ] `dpkg -i smtprelayd_<version>_amd64.deb` on a real Debian/Ubuntu host
-- [ ] `id smtprelayd` — system user/group exist
+- [x] `rpm`/`dnf install` on a real Fedora host — 0.2.5-1 installed, `%post`
+      ran, exit status clean
+- [x] `id smtprelayd` — the service runs as a non-root uid (963 observed
+      holding the listener), so the system user exists and is in use
 - [ ] `/etc/smtprelayd` is `0750 root:smtprelayd`, `/var/lib/smtprelayd` is
-      `0700 smtprelayd:smtprelayd`
+      `0700 smtprelayd:smtprelayd` — the postinstall sets these, not observed
 - [ ] `systemctl status smtprelayd` — unit loaded, inactive, not started
-- [ ] Copy the example config, edit it, then:
+- [x] Copy the example config, edit it, then:
       `smtprelayd -config /etc/smtprelayd/smtprelayd.toml check`
-- [ ] `systemctl enable --now smtprelayd` — binds to port 25/587 without
-      running as root (confirms `AmbientCapabilities=CAP_NET_BIND_SERVICE`
-      actually works)
+- [x] `systemctl enable --now smtprelayd` — **binds port 25 as uid 963, not
+      root**: `tcp 0 0 192.168.8.102:25 0.0.0.0:* LISTEN 963`. This is the
+      item most likely to fail silently, and it confirms
+      `AmbientCapabilities=CAP_NET_BIND_SERVICE` in the packaged unit works.
 - [ ] `journalctl -u smtprelayd` shows the startup log line
-- [ ] `systemctl stop smtprelayd`
-- [ ] `dpkg -r smtprelayd` (remove, not purge) — service stopped and
+- [x] `systemctl stop smtprelayd`
+- [ ] `dnf remove` / `dpkg -r` (remove, not purge) — service stopped and
       disabled, `/var/lib/smtprelayd` and its contents survive
-- [ ] Repeat the same sequence with the `.rpm` on Fedora/RHEL/Alma
-      (`rpm -i`/`dnf install`, `dnf remove`)
-- [ ] Install version A, then upgrade in place to version B
-      (`dpkg -i` the newer `.deb` / `rpm -U`) — running/stopped state survives
+- [ ] `dpkg -i smtprelayd_<version>_amd64.deb` on a real Debian/Ubuntu host,
+      whole sequence above
+- [x] Upgrade in place, `rpm -U`: 0.2.0-1 → 0.2.5-1 replaced the old package
+      and ran `%post` without error
+- [ ] …and the running/stopped state survives that upgrade. The restart on
+      upgrade was missing entirely and was added on 2026-08-11
+      (`systemctl try-restart` on the upgrade path only); every branch of the
+      script was exercised against stubbed `systemctl`, but the behaviour has
+      not yet been observed on a real upgrade of a running service
 
 ## Follow-up implementation work (next coding session, not manual testing)
 
