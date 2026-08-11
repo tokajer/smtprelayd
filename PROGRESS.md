@@ -13,42 +13,40 @@ and the Windows service wrapper (normally phase 5) were pulled forward and
 validated. MSI installs and uninstalls; `install`/`uninstall`/`start`/`stop`
 work on Windows. Log rotation and Windows ACL verification at startup are
 complete.
-**Last session**: 2026-08-11 (thirteenth session) — Message metadata journal,
-no phase work. Requested as "logging of all mails", scoped after checking what
-already existed: every accepted message was already journalled (row in
-`messages` plus a `message accepted` log line) and every attempt recorded with
-its verbatim SMTP response, so the gap was in *what* a row carried, not in
-whether one existed. `messages` gained `message_id`, `content_type`,
-`size_bytes`, `header_count` and `helo`; all five are read from what was
-actually spooled (the rewritten header block via a new `rewrite.HeaderCount`
-alongside the existing `HeaderValue`, and `spool.Staged.Size()`), never from
-what the client announced, and all five go through `sanitizeHeaderMeta` — the
-generalised `sanitizeSubject`, which now also truncates on a rune boundary
-instead of mid-rune. Since `CREATE TABLE IF NOT EXISTS` never touches an
-existing table, `Store.migrate` adds missing columns via `PRAGMA table_info`
-plus `ALTER TABLE`; the columns are nullable with no default so a
-pre-migration row reads back as unknown rather than as a fabricated zero.
-`RecordMessage` became `RecordMessage(MessageRecord)`: with the new fields it
-would otherwise have been eleven consecutive string parameters, where two
-transposed at a call site still compile. Second half, from the follow-up ask
-("is this enough for troubleshooting? add the SMTP code"): `Message` now
-carries `AttemptCount`, `LastCode` and `LastErr` from the latest attempt in
-the list queries too, so the queue, search and bounce views show *why*
-something is deferred without opening each message. That surfaced a real bug —
-`bounces.html` has always rendered `{{.LastErr}}` but `FindBounces` never
-selected an attempt row, so the dashboard's "Last response" column was
-silently empty for every bounce ever shown. Verified against a running
-instance, not only by unit test: a message sent through the real listener
-recorded HELO, Message-ID, Content-Type, 512 bytes and 7 headers; a deliberate
-`550` from a fake smarthost showed as `550 5.1.1 User unknown...` on the
-bounces page and as `last_smtp_code` in the API; the journal columns were then
-dropped from the live database with `ALTER TABLE DROP COLUMN` and re-added on
-the next start ("store: schema migrated" ×5), with the pre-migration row still
-readable and its journal fields absent from the JSON rather than zeroed.
-`GOOS=windows`/`GOOS=linux` build clean, `gofmt`/`go vet` clean, `go test
-./...` green. `govulncheck`/`gosec` not run locally (not installed on this
-machine; CI covers them).
-
+**Last session**: 2026-08-11 (fourteenth session) — Installer fix, no phase
+work. The MSI never produced a data directory that `CheckDataDirACL` accepts,
+so no fresh Windows install could start; `util:PermissionEx` adds ACEs but
+leaves the DACL inheriting from `%ProgramData%`. Replaced by
+`config.SecureDataDir`, invoked as `smtprelayd secure-datadir` from a deferred
+custom action after the service registration, and named as the remediation in
+`CheckDataDirACL`'s own error message. Not compile-checked and no MSI built —
+no Go toolchain or WiX in the session; `go vet`, `gofmt`, `go test ./...` and
+an install on hardware still need to be run. See Open defects for the full
+write-up.
+**Previous session**: 2026-08-11 (thirteenth session) — Field fix, no phase work.
+A Windows deployment accepted mail but failed every enqueue and every delivered
+message's cleanup with `sync ...\spool\queue: Access is denied`. `syncDir`'s
+comment already said directory fsync "is not supported on Windows and fails
+with EACCES or similar", but the code only filtered `os.ErrInvalid`, so the
+EACCES it predicted was returned to the caller and aborted the operation.
+`FlushFileBuffers` needs a handle opened with `GENERIC_WRITE`, which cannot be
+obtained for a directory, so the call could never have succeeded there — it is
+now a no-op on Windows via a build-tag split (`dirsync_windows.go` /
+`dirsync_unix.go`) rather than an error class the caller tries to recognise.
+Durability is unaffected: the metadata and body files are individually fsynced
+before the rename, and NTFS journals the rename. On Unix a directory fsync
+failure is still fatal, unchanged. Same split applied to the `os.Chmod(d,
+0o700)` in `Open` — the second symptom of the same deployment, `chmod
+...\spool\tmp: Access is denied`. Mode bits do not govern access on Windows
+(`os.Chmod` only toggles the read-only attribute); the data directory's
+explicit DACL does, which the installer sets and `CheckDataDirACL` already
+verifies at startup. Not compile-checked here — no Go toolchain was available
+in the session; `go vet`, `gofmt` and `go test ./...` still need to be run.
+Field-verified on the reporting host the same day: with the patched binary and
+a corrected DACL the relay logs `message accepted` and delivers, where before
+it accepted and relayed the message but then failed both the enqueue and the
+delivered-message cleanup. Separately found in that session and fixed in the next: the
+Windows installer never set that DACL, so no fresh install started at all.
 **Previous session**: 2026-08-11 (twelfth session) — Field fix, no phase work. A
 deployed instance passed `check` and then failed every start with
 `listen tcp 10.0.0.10:25: bind: cannot assign requested address`: the example
@@ -524,14 +522,74 @@ The selftest exception (8) remains deliberate and is not fixed.
 2. ✅ `config.CheckConfigFile` now validates directory holding the file,
    preventing unlink-and-create replacement in group-writable /etc/smtprelayd.
 3. ✅ `checkSecretFile` now verifies ownership like `checkTrusted`.
-4. ✅ `spool.syncDir` now propagates fsync errors on Linux; ErrInvalid
-   (Windows) still ignored as documented.
+4. ✅ `spool.syncDir` now propagates fsync errors on Linux. The Windows half
+   of this was wrong until 2026-08-11: it filtered `ErrInvalid` but the actual
+   error is EACCES, so every rename-completing sync failed. Windows is now a
+   build-tag no-op, not an error class the caller tries to recognise.
 5. ✅ `limits.max_headers` and `limits.max_header_bytes` now validated as > 0.
 6. ✅ `MAIL FROM SIZE` is now validated early in DATA phase if present.
 7. ✅ Token client proxy environment removed; no metadata leakage through proxies.
 8. The selftest still uses `InsecureSkipVerify` plus certificate pin and trips
    gosec G123. This is the deliberate exception recorded in the decision log;
    it dials fresh with no session cache so resumption cannot occur. Not fixed.
+
+## Open defects
+
+### The Windows installer does not set the data directory DACL (2026-08-11)
+
+**Fixed 2026-08-11.** Found during the first field deployment on Windows. A
+fresh install refused to start with:
+
+```
+smtprelayd: data directory ACL: C:\ProgramData\SMTPRelayd: DACL is not
+protected against inheritance
+```
+
+`CheckDataDirACL` was correct to refuse. The directory as the installer left
+it inherited from `C:\ProgramData`, which carries
+`BUILTIN\Users:(OI)(CI)(RX)` — every interactive user on the host could read
+the spool, and the spool holds message bodies.
+
+Cause: the `util:PermissionEx` elements in `smtprelayd.wxs` add ACEs but do
+not set `PROTECTED_DACL_SECURITY_INFORMATION`, so the two explicit grants were
+appended on top of the inherited ones instead of replacing them. That answers
+the untriaged question — the MSI never produced a passing directory, and no
+Windows install has passed the check since it landed.
+
+Fix: `config.SecureDataDir` (`internal/config/secure_windows.go`) writes the
+DACL with `SetNamedSecurityInfo` and `PROTECTED_DACL_SECURITY_INFORMATION`,
+exposed as `smtprelayd secure-datadir` and invoked by the MSI as a deferred
+custom action sequenced after the service registration, since the ACE for the
+virtual account cannot be resolved before the service exists. It runs on
+repair and upgrade too. The well-known SIDs are constructed rather than looked
+up by name: `icacls ... /grant "Administrators:..."` fails on a localised
+Windows (`No mapping between account names and security IDs was done`), and
+`LookupAccountName` fails there for the same reason.
+
+The owner is reset to `BUILTIN\Administrators` along with the DACL. Without
+that, `icacls /inheritance:r` fails with *Access is denied*, so the first
+workaround anyone reaches for is `takeown` — which succeeds and takes the ACE
+for the service account with it, leaving the service unable to create its own
+log file. That looks like a second, unrelated fault; recovering from it took
+several rounds in the field and is what made the deployment expensive.
+
+The equivalent by hand, if it is ever needed without the binary:
+
+```powershell
+icacls "C:\ProgramData\SMTPRelayd" /inheritance:r
+icacls "C:\ProgramData\SMTPRelayd" /grant "*S-1-5-18:(OI)(CI)F" /T /C
+icacls "C:\ProgramData\SMTPRelayd" /grant "*S-1-5-32-544:(OI)(CI)F" /T /C
+icacls "C:\ProgramData\SMTPRelayd" /grant "NT SERVICE\smtprelayd:(OI)(CI)F" /T /C
+```
+
+`(OI)(CI)` matters and is easy to omit: without the inheritance flags the
+grant covers the directory itself but not files created in it later, so the
+service still cannot write its log despite appearing to own the directory.
+
+Not verified on hardware yet: the fix is written against the field-verified
+end state above, but no MSI has been built and installed from this revision.
+Phase 5 checklist item `icacls C:\ProgramData\SMTPRelayd` stays open until
+it has.
 
 ## Open questions
 
@@ -624,9 +682,10 @@ The selftest exception (8) remains deliberate and is not fixed.
 | 2026-08-11 | The volume cap carries a suppressed client's failures into the next hour's digest instead of dropping them | "Records them for the next hour" in the plan means the underlying event survives being capped; only the act of sending is suppressed, not the fact that a failure happened |
 | 2026-08-11 | A notification message's own delivery outcome updates a dedicated `smtprelayd_notification_failures_total` counter, never the triggering route's own delivered/bounced/deferred/auth-failure counters | Those describe the relay's client-facing traffic; folding postmaster mail into them would make a notify-route outage indistinguishable from a real production delivery problem on that route |
 | 2026-08-11 | Loop prevention is a persisted `spool.Envelope.Notification` bool, not an in-memory set of queue IDs the notifier created | An in-memory set is lost on restart while the notification message can still be sitting in the queue; a persisted flag survives exactly the case (crash or restart mid-retry) where losing the distinction would let a notification's own failure start a real loop |
+| 2026-08-11 | The data directory DACL is the installer's responsibility, not the daemon's | `CheckDataDirACL` refuses to start on an inherited DACL, which is right — `C:\ProgramData` grants `Users:(RX)` and the spool holds message bodies. Having the daemon repair the ACL itself would mean a service that widens or narrows its own permissions at startup, and would defeat the check. The MSI must produce a directory that already passes |
+| 2026-08-11 | The MSI writes the DACL by calling `smtprelayd secure-datadir`, not with WiX `util:PermissionEx` | `util:PermissionEx` does not protect the DACL against inheritance, which is the whole point of the check; and the ACL that `CheckDataDirACL` verifies and the ACL the installer writes are one contract, so they belong in one place, exactly as the SCM registration already does |
+| 2026-08-11 | `secure-datadir` is a subcommand, not something `install` does | It has to run on repair and upgrade, not only on first registration, and it is the only remediation an operator has when an ACL was lost — `CheckDataDirACL`'s error message now names it |
+| 2026-08-11 | The uninstaller leaves the data directory in place | The spool can still hold accepted, acknowledged, undelivered mail at uninstall time, plus the history database. Deleting it silently would lose mail the relay took responsibility for |
+| 2026-08-11 | Directory fsync is a build-tag no-op on Windows rather than an error the caller filters | `FlushFileBuffers` requires a handle opened with `GENERIC_WRITE`, which a directory handle cannot have, so the call can only ever fail there. Recognising its error class was the wrong shape of fix — it had already been attempted, against `ErrInvalid` when the real error is EACCES, and every enqueue on Windows failed for it. The durability it buys on Unix is provided by NTFS's own rename journalling |
+| 2026-08-11 | `os.Chmod` on the spool directories is skipped on Windows | Mode bits are not the access-control mechanism there — `os.Chmod` only toggles the read-only attribute — so the call enforced nothing while being able to fail on a directory whose DACL denies WRITE_ATTRIBUTES. The explicit DACL the installer sets and `CheckDataDirACL` verifies is what actually restricts the data directory |
 | 2026-08-11 | `scripts/check-banned-imports.sh` matches importer/banned pairs against a named allowlist instead of asserting the banned package is absent from the graph | `modernc.org/sqlite`, which the no-cgo rule forces, pulls `os/exec` in through `modernc.org/libc` on every GOOS, so the absence assertion could no longer hold. Allowing the package outright would have retired the rule; naming the single importer keeps `kardianos/service` — the regression the script exists for — a failure, and reports who imports what when it fires |
-| 2026-08-11 | The history store journals message metadata, never the message body | An archive of message content is a different feature with a different legal footprint (retention, access control, subject access requests); the journal answers "what came in, from where, how big, and what did the smarthost say about it" without ever holding the content itself |
-| 2026-08-11 | Journal values are read from the rewritten header block and the staged size, not from what the client announced | `MAIL FROM SIZE` is a claim and the pre-rewrite headers are not what was queued; a journal that records the announcement rather than the artefact is misleading in exactly the case someone is troubleshooting |
-| 2026-08-11 | Journal columns are added by `Store.migrate` and are nullable with no default | `CREATE TABLE IF NOT EXISTS` silently leaves an existing table alone, so an upgraded installation would otherwise keep the old column set forever. NULL for a pre-migration row says "unknown", which is true; a `DEFAULT 0` would say "a zero-byte message", which is not |
-| 2026-08-11 | `RecordMessage` takes a `MessageRecord` struct instead of a parameter list | With the journal fields it would be eleven consecutive string parameters; two transposed at a call site would still compile and would store a sender as a recipient list |
-| 2026-08-11 | The latest attempt's code, response and count are carried on the message row in list queries | The dashboard's queue, search and bounce views must show why a message is deferred without a per-row follow-up query. This is also how the long-standing empty "Last response" column on the bounce view was found: `FindBounces` never selected an attempt row at all |

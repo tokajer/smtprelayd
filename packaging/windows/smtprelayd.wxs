@@ -17,9 +17,16 @@
   in one place avoids the two drifting apart. The service is installed but
   never started automatically: it has no usable configuration until the
   operator edits smtprelayd.toml.
+
+  The data directory ACL is set the same way, by "smtprelayd.exe
+  secure-datadir", and for the same reason: config.CheckDataDirACL refuses to
+  start the service unless the DACL matches, so the side that writes it and
+  the side that verifies it are one piece of code. util:PermissionEx was used
+  here before and left the directory inheriting from %ProgramData%, which
+  carries BUILTIN\Users:(OI)(CI)(RX); it adds ACEs but does not set
+  PROTECTED_DACL_SECURITY_INFORMATION, so no install ever passed the check.
 -->
-<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi"
-     xmlns:util="http://schemas.microsoft.com/wix/UtilExtension">
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
 
   <Product Id="*"
            Name="smtprelayd"
@@ -57,25 +64,22 @@
               Source="$(var.ExampleConfigPath)" KeyPath="yes" />
       </Component>
 
-      <!-- No inherited access from %ProgramData%: only the service account
-           and local administrators may read the spool, history and any
-           secret referenced from smtprelayd.toml. See docs/EXPLOIT-SURFACE.md. -->
       <!-- Explicit GUID, not "*": the KeyPath of this component is the
            directory itself, for which WiX cannot derive a stable GUID.
-           Never regenerate it, or an upgrade will re-ACL a second folder. -->
-      <Component Id="DataFolderAcl" Guid="31B78A8A-3A73-417F-A500-5E8FEBFD9416" Win64="yes">
-        <CreateFolder>
-          <util:PermissionEx User="Administrators" GenericAll="yes" />
-          <util:PermissionEx User="NT SERVICE\smtprelayd" GenericAll="yes" />
-        </CreateFolder>
-        <RemoveFolder Id="RemoveDataFolder" On="uninstall" />
+           Never regenerate it, or an upgrade will create a second folder. -->
+      <!-- No RemoveFolder: the directory holds the spool, and a spool can
+           still hold undelivered mail plus the history database at uninstall
+           time. Removing it would discard mail the relay accepted and
+           acknowledged. The operator deletes it deliberately or not at all. -->
+      <Component Id="DataFolder" Guid="31B78A8A-3A73-417F-A500-5E8FEBFD9416" Win64="yes">
+        <CreateFolder />
       </Component>
     </DirectoryRef>
 
     <Feature Id="Complete" Title="smtprelayd" Level="1">
       <ComponentRef Id="ServiceBinary" />
       <ComponentRef Id="ExampleConfig" />
-      <ComponentRef Id="DataFolderAcl" />
+      <ComponentRef Id="DataFolder" />
     </Feature>
 
     <CustomAction Id="InstallServiceCA" FileKey="smtprelaydEXE" ExeCommand="install"
@@ -84,12 +88,19 @@
                   Execute="deferred" Impersonate="no" Return="ignore" />
     <CustomAction Id="UninstallServiceCA" FileKey="smtprelaydEXE" ExeCommand="uninstall"
                   Execute="deferred" Impersonate="no" Return="ignore" />
+    <CustomAction Id="SecureDataDirCA" FileKey="smtprelaydEXE" ExeCommand="secure-datadir"
+                  Execute="deferred" Impersonate="no" Return="check" />
 
     <InstallExecuteSequence>
       <!-- Only on a genuinely fresh install: never on repair (Installed is
            already set) and never on the old side of a major upgrade, so an
            in-place version bump does not stop and re-register the service. -->
       <Custom Action="InstallServiceCA" After="InstallFiles">NOT Installed AND NOT UPGRADINGPRODUCTCODE</Custom>
+      <!-- After InstallServiceCA, because the ACE for the NT SERVICE\smtprelayd
+           virtual account can only be resolved once the service exists. Runs on
+           repair and upgrade as well: an ACL widened by hand between versions
+           is exactly the case that must be repaired. -->
+      <Custom Action="SecureDataDirCA" After="InstallServiceCA">NOT REMOVE="ALL"</Custom>
       <Custom Action="StopServiceCA" Before="RemoveFiles">REMOVE="ALL" AND NOT UPGRADINGPRODUCTCODE</Custom>
       <Custom Action="UninstallServiceCA" After="StopServiceCA">REMOVE="ALL" AND NOT UPGRADINGPRODUCTCODE</Custom>
     </InstallExecuteSequence>

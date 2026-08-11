@@ -5,8 +5,14 @@
 
 package main
 
+import "fmt"
+
 // verifyDataDirSecurity is a no-op on Unix, where directory permissions are
 // checked by CheckDir instead.
 func verifyDataDirSecurity(dataDir string) error {
 	return nil
+}
+
+func secureDataDir(_ string) error {
+	return fmt.Errorf("secure-datadir is only implemented on Windows; on Linux the data directory is owned by the smtprelayd user with mode 0700, set by the package postinstall")
 }
