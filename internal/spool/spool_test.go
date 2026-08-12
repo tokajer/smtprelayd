@@ -336,3 +336,146 @@ func TestQueueDepthOldestQueuedTracksEarliestClaimable(t *testing.T) {
 		t.Fatalf("OldestQueued = %v, want %v", got, older)
 	}
 }
+
+// enqueueAndFail puts one message through the queue and into spool/failed,
+// which is where the quota used to lose sight of it.
+func enqueueAndFail(t *testing.T, s *Spool, body string) ID {
+	t.Helper()
+	env := Envelope{From: "a@example.at", To: []string{"b@example.net"}, Client: "c", Route: "r",
+		Received: time.Now().UTC()}
+	id, err := s.Enqueue(env, strings.NewReader(body), 0, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, ok := s.Claim(time.Now())
+	if !ok {
+		t.Fatal("nothing to claim")
+	}
+	if err := s.Fail(m, "550 nope"); err != nil {
+		t.Fatal(err)
+	}
+	return id
+}
+
+// Fail() used to drop the message from the only index spoolSize() summed, so a
+// client that produced nothing but permanent failures freed its own quota on
+// every message while continuing to fill the filesystem.
+func TestFailedMessagesStillCountTowardsTheQuota(t *testing.T) {
+	s, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := s.spoolSize(); got != 0 {
+		t.Fatalf("empty spool reports %d bytes", got)
+	}
+
+	enqueueAndFail(t, s, "Subject: x\r\n\r\n"+strings.Repeat("z", 4096)+"\r\n")
+
+	after := s.spoolSize()
+	if after == 0 {
+		t.Fatal("a failed message freed its quota while still occupying the disk")
+	}
+	if after < 4096 {
+		t.Fatalf("failed message accounted as %d bytes, want at least the body", after)
+	}
+}
+
+// The other half: the quota must be released when the files really do go, by
+// either of the two ways out of spool/failed.
+func TestQuotaIsReleasedWhenFailedFilesGo(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		out  func(*Spool, ID) error
+	}{
+		{"discard", func(s *Spool, id ID) error { return s.Discard(id) }},
+		{"requeue", func(s *Spool, id ID) error { return s.Requeue(id) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, err := Open(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			id := enqueueAndFail(t, s, "Subject: x\r\n\r\nbody\r\n")
+			if len(s.failedIndex) != 1 {
+				t.Fatalf("failed index holds %d entries", len(s.failedIndex))
+			}
+			if err := tc.out(s, id); err != nil {
+				t.Fatal(err)
+			}
+			if len(s.failedIndex) != 0 {
+				t.Fatalf("%s left %d entries in the failed index", tc.name, len(s.failedIndex))
+			}
+		})
+	}
+}
+
+// Counting alone would mean a full spool/failed permanently refuses new mail.
+// The sweep is what makes the quota recoverable without an operator.
+func TestSweepFailedHonoursRetention(t *testing.T) {
+	dir := t.TempDir()
+	s, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := enqueueAndFail(t, s, "Subject: x\r\n\r\nbody\r\n")
+
+	// Retention of zero keeps everything, which is the documented opt-out.
+	if removed, _ := s.SweepFailed(time.Now().Add(365 * 24 * time.Hour)); removed != 0 {
+		t.Fatalf("a zero retention swept %d messages", removed)
+	}
+
+	s.SetFailedRetention(48 * time.Hour)
+	if removed, _ := s.SweepFailed(time.Now().Add(24 * time.Hour)); removed != 0 {
+		t.Fatalf("swept %d messages before the retention elapsed", removed)
+	}
+
+	removed, freed := s.SweepFailed(time.Now().Add(72 * time.Hour))
+	if removed != 1 || freed == 0 {
+		t.Fatalf("SweepFailed removed %d freeing %d, want 1 and non-zero", removed, freed)
+	}
+	for _, ext := range []string{".json", ".eml"} {
+		if _, err := os.Stat(filepath.Join(dir, "spool", "failed", id.String()+ext)); !os.IsNotExist(err) {
+			t.Errorf("%s survived the sweep: %v", ext, err)
+		}
+	}
+	if got := s.spoolSize(); got != 0 {
+		t.Fatalf("spool still accounts %d bytes after the sweep", got)
+	}
+}
+
+// A restart must not lose sight of what is already in spool/failed, or the
+// quota would be wrong again for every message that failed before it.
+func TestFailedIndexSurvivesReopen(t *testing.T) {
+	dir := t.TempDir()
+	s, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	enqueueAndFail(t, s, "Subject: x\r\n\r\n"+strings.Repeat("z", 2048)+"\r\n")
+	before := s.spoolSize()
+
+	reopened, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := reopened.spoolSize(); got != before {
+		t.Fatalf("after reopen the spool accounts %d bytes, want %d", got, before)
+	}
+}
+
+// A negative spool_max_gb, or one large enough to wrap the gigabytes-to-bytes
+// multiplication, used to mean "no quota at all".
+func TestSetQuotaNeverWrapsIntoNoQuota(t *testing.T) {
+	s, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.SetQuota(1<<40, 80)
+	if s.maxQuotaBytes <= 0 {
+		t.Fatalf("an enormous quota became %d, i.e. no quota", s.maxQuotaBytes)
+	}
+	s.SetQuota(-1, 80)
+	if s.maxQuotaBytes != 0 {
+		t.Fatalf("a negative quota became %d, want 0 (no quota)", s.maxQuotaBytes)
+	}
+}

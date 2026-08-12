@@ -178,6 +178,7 @@ func serve(ctx context.Context, configPath string, console bool) error {
 		return err
 	}
 	sp.SetQuota(cfg.Limits.SpoolMaxGB, cfg.Limits.SpoolWarnPercent)
+	sp.SetFailedRetention(time.Duration(cfg.Queue.FailedRetentionHours) * time.Hour)
 
 	st, err := store.Open(cfg.Service.DataDir, log, cfg.History.RetentionDays, cfg.History.RetainSubjects)
 	if err != nil {

@@ -162,6 +162,19 @@ domains = ["intranet.example"]
 retry_schedule_min = [1, 5, 15, 30, 60, 120]
 max_lifetime_hours = 96
 
+# How long a permanently failed message keeps its files in spool/failed. They
+# count towards limits.spool_max_gb for as long as they are there, because they
+# occupy the filesystem the quota exists to protect -- so without a bound here,
+# a client that produces nothing but permanent failures fills the disk and the
+# quota never releases anything again.
+#
+# Only the spool copy is deleted. The history row, every delivery attempt and
+# the verbatim SMTP response survive under history.retention_days, so the
+# bounce view still shows what failed and why; what is lost is the ability to
+# requeue it. 0 keeps failed messages forever, which is what earlier versions
+# did with no way to say otherwise.
+failed_retention_hours = 168
+
 # ---------------------------------------------------------------------------
 # Bounces
 #
@@ -251,5 +264,8 @@ max_connections      = 200
 read_timeout_sec     = 60
 write_timeout_sec    = 60
 data_timeout_sec     = 300
+# Counts the live queue and spool/failed together. 0 means no quota; a
+# negative value is a startup error rather than a silent "unlimited", which is
+# what it used to become.
 spool_max_gb         = 10
 spool_warn_percent   = 80

@@ -157,6 +157,7 @@ func (s *Store) FindMessageByID(queueID string) (*Message, error) {
 	var receivedAtStr, expiresAtStr, createdAtStr string
 	var j journalScan
 
+	//#nosec G202 -- journalCols is a package constant column list, not input; the only bound value is queueID
 	row := s.db.QueryRow(`
 		SELECT queue_id, client, route, envelope_from, original_from, recipients, subject, listener, remote_addr, received_at, expires_at, tls_used, created_at,
 		       `+journalCols("")+`
@@ -249,6 +250,7 @@ func (s *Store) FindMessages(filter MessageFilter) ([]*Message, error) {
 		filter.Limit = 1000
 	}
 
+	//#nosec G202 -- every fragment appended below is a string literal and every value is bound; journalCols and messageSortColumns are fixed, code-side lists
 	query := `
 		SELECT m.queue_id, m.client, m.route, m.envelope_from, m.original_from, m.recipients, m.subject, m.listener, m.remote_addr, m.received_at, m.expires_at, m.tls_used, m.created_at,
 		       ` + journalCols("m.") + `, latest.class, latest.smtp_code, latest.smtp_response, agg.attempts
@@ -406,6 +408,7 @@ func (s *Store) FindBounces(filter BounceFilter) ([]*Message, error) {
 	}
 
 	// Find queue IDs that have a final attempt with class='permanent' or 'expired'.
+	//#nosec G202 -- as in FindMessages: literal fragments, bound values, code-side column list
 	query := `
 		SELECT DISTINCT m.queue_id, m.client, m.route, m.envelope_from, m.original_from, m.recipients, m.subject, m.listener, m.remote_addr, m.received_at, m.expires_at, m.tls_used, m.created_at,
 		       ` + journalCols("m.") + `, last.smtp_code, last.smtp_response, agg.attempts
@@ -417,7 +420,7 @@ func (s *Store) FindBounces(filter BounceFilter) ([]*Message, error) {
 			-- Tiebreak on id for the same reason as FindMessages: at_time
 			-- alone would duplicate a row whenever two attempts landed in
 			-- the same wall-clock second.
-			SELECT queue_id, smtp_code, smtp_response FROM attempts
+			SELECT queue_id, class, smtp_code, smtp_response FROM attempts
 			WHERE id IN (SELECT MAX(id) FROM attempts GROUP BY queue_id)
 		) last ON m.queue_id = last.queue_id
 		INNER JOIN (
@@ -456,7 +459,12 @@ func (s *Store) FindBounces(filter BounceFilter) ([]*Message, error) {
 		args = append(args, "%"+filter.Subject+"%")
 	}
 	if filter.Class != "" {
-		query += " AND a.class = ?"
+		// On last.class, not on the a subquery: a selects queue_id alone, so
+		// "AND a.class = ?" was a guaranteed SQL error and the dashboard's
+		// failure-class filter had never returned anything but a 500. The
+		// final attempt's class is also the one the bounce view displays,
+		// which is what FindBounceSummaries already filters on.
+		query += " AND last.class = ?"
 		args = append(args, filter.Class)
 	}
 

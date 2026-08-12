@@ -43,7 +43,7 @@ libraries that do not exist understated it in the one direction that matters.
 
 | Area | Choice | Rationale |
 |---|---|---|
-| Language | Go | Single static binary, trivial cross-compilation, no runtime dependency on Windows. `go.mod` declares `go 1.25.0`; CI and the release workflow still pin `GO_VERSION: "1.23"`, which is an inconsistency to resolve, not a second supported floor |
+| Language | Go | Single static binary, trivial cross-compilation, no runtime dependency on Windows. `go.mod` declares `go 1.25.0`, which `golang.org/x/sys` itself requires; CI and the release workflow pin the same version since 2026-08-12, so the pin describes the toolchain that actually builds |
 | SMTP server | First-party, `internal/listener` | Written against the protocol directly: the command loop, size and header limits, per-client matching and the data-phase failure behaviour are all security-relevant decisions this project makes differently from a general-purpose library |
 | SMTP client | First-party, `internal/delivery/smarthost`, over stdlib `net/smtp` | `net/smtp` covers the client side of the conversation; the TLS policy, `ca_pin` verification and the 4xx/5xx classification sit above it |
 | SASL | First-party, `internal/delivery/smarthost` | PLAIN, LOGIN and XOAUTH2 are a few dozen lines each against `net/smtp`'s `Auth` interface, including the 334 continuation path Microsoft 365 needs |
@@ -88,6 +88,14 @@ File-based, no database in the hot path.
 - States are directories: `incoming/`, `active/`, `deferred/`, `failed/`.
   A state transition is a rename, which makes crash recovery trivial: anything
   found in `active/` at startup is moved back to `incoming/`.
+- `failed/` is bounded, decided 2026-08-12. It counts towards
+  `limits.spool_max_gb` — a permanently failed message still occupies the
+  filesystem the quota exists to protect — and `queue.failed_retention_hours`
+  (default 168) sweeps it by age. Only the spool copy goes; the history row,
+  every attempt and the verbatim SMTP response survive under
+  `history.retention_days`. Before this, nothing ever left `failed/` and the
+  quota stopped counting a message the moment it went there, so a client
+  producing only permanent failures filled the disk unseen.
 - Queue ID: time-ordered, sortable, e.g. ULID. It is the correlation key across
   log lines, history rows and the dashboard.
 - Separate queue buckets per route so one stalled smarthost cannot block others.

@@ -393,3 +393,103 @@ func TestThemeModeIsCheckedAgainstAFixedSet(t *testing.T) {
 		t.Fatalf("unknown theme mode accepted: %v", err)
 	}
 }
+
+// Everything else interpolated into the Received: header has been proved free
+// of CR, LF and NUL by the code that produced it. The configured hostname goes
+// into that header and into the 220 banner, and had never been checked.
+func TestHostnameRejectsHeaderSplittingBytes(t *testing.T) {
+	for _, bad := range []string{
+		"relay.example\r\nX-Injected: yes",
+		"relay.example\nX-Injected: yes",
+		"relay.example\x00",
+	} {
+		body := strings.Replace(baseConfig,
+			`data_dir = "/tmp/smtprelayd-test"`,
+			`data_dir = "/tmp/smtprelayd-test"`+"\nhostname = "+fmt.Sprintf("%q", bad), 1)
+		if _, err := Load(write(t, body)); err == nil {
+			t.Errorf("hostname %q was accepted", bad)
+		} else if !strings.Contains(err.Error(), "service.hostname") {
+			t.Errorf("hostname %q rejected for the wrong reason: %v", bad, err)
+		}
+	}
+}
+
+// A truncated pin decodes cleanly and then fails every comparison at delivery
+// time, blaming the smarthost's certificate for what is a typo here.
+func TestCAPinMustBeAFullSHA256(t *testing.T) {
+	full := strings.Repeat("ab", 32)
+	for _, tc := range []struct {
+		pin  string
+		want bool
+	}{
+		{full, true},
+		{strings.ToUpper(full), true},
+		{strings.Repeat("ab:", 31) + "ab", true}, // colon-separated is accepted
+		{strings.Repeat("ab", 16), false},        // truncated to SHA-128 length
+		{strings.Repeat("ab", 48), false},        // SHA-384 by mistake
+		{"nothex" + strings.Repeat("a", 58), false},
+	} {
+		body := baseConfig + "ca_pin = " + fmt.Sprintf("%q", tc.pin) + "\n"
+		_, err := Load(write(t, body))
+		if tc.want && err != nil {
+			t.Errorf("ca_pin %q was rejected: %v", tc.pin, err)
+		}
+		if !tc.want && err == nil {
+			t.Errorf("ca_pin %q was accepted", tc.pin)
+		}
+	}
+}
+
+// rateLimiter.allow, connCounter.acquire and Spool.SetQuota all read a limit
+// of zero or less as "unlimited", so a mistyped minus sign switched the
+// control off instead of failing startup.
+func TestNegativeLimitsAreRejectedInsteadOfMeaningUnlimited(t *testing.T) {
+	cases := map[string]string{
+		"client.rate_limit_per_min": strings.Replace(baseConfig,
+			`route = "m365"`, "route = \"m365\"\nrate_limit_per_min = -1", 1),
+		"client.max_connections": strings.Replace(baseConfig,
+			`route = "m365"`, "route = \"m365\"\nmax_connections = -5", 1),
+		"route.rate_limit_per_min": baseConfig + "rate_limit_per_min = -30\n",
+		"limits.spool_max_gb":      baseConfig + "\n[limits]\nspool_max_gb = -1\n",
+		"limits.spool_max_gb overflow": baseConfig + "\n[limits]\nspool_max_gb = " +
+			fmt.Sprint(int64(1)<<40) + "\n",
+		"queue.failed_retention_hours": baseConfig + "\n[queue]\nfailed_retention_hours = -1\n",
+	}
+	for name, body := range cases {
+		if _, err := Load(write(t, body)); err == nil {
+			t.Errorf("%s: a negative or overflowing value was accepted", name)
+		}
+	}
+
+	// Zero must stay legal: it is the documented way to say "no limit".
+	for name, body := range map[string]string{
+		"rate_limit_per_min = 0":     baseConfig + "rate_limit_per_min = 0\n",
+		"failed_retention_hours = 0": baseConfig + "\n[queue]\nfailed_retention_hours = 0\n",
+		"spool_max_gb = 0":           baseConfig + "\n[limits]\nspool_max_gb = 0\n",
+	} {
+		if _, err := Load(write(t, body)); err != nil {
+			t.Errorf("%s was rejected: %v", name, err)
+		}
+	}
+}
+
+// bounce.sender and every notify entry reach a From:/To: line through
+// fmt.Fprintf, so a CR or LF in one splits the digest's header block.
+func TestBounceAddressesAreValidated(t *testing.T) {
+	const route = "\n[bounce]\nnotify_route = \"m365\"\ndigest_minutes = 15\nmax_per_hour = 12\n"
+	for name, section := range map[string]string{
+		"CRLF in sender":           route + "sender = \"postmaster@example.at\\r\\nBcc: x@evil.example\"\nnotify = [\"ops@example.at\"]\n",
+		"LF in a notify entry":     route + "sender = \"postmaster@example.at\"\nnotify = [\"ops@example.at\\nBcc: x@evil.example\"]\n",
+		"notify is not an address": route + "sender = \"postmaster@example.at\"\nnotify = [\"not-an-address\"]\n",
+		"sender is not an address": route + "sender = \"postmaster\"\nnotify = [\"ops@example.at\"]\n",
+	} {
+		if _, err := Load(write(t, baseConfig+section)); err == nil {
+			t.Errorf("%s was accepted", name)
+		}
+	}
+
+	good := route + "sender = \"postmaster@example.at\"\nnotify = [\"ops@example.at\"]\n"
+	if _, err := Load(write(t, baseConfig+good)); err != nil {
+		t.Fatalf("a valid bounce configuration was rejected: %v", err)
+	}
+}

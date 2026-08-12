@@ -6,7 +6,6 @@ package store
 import (
 	"context"
 	"database/sql"
-	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -275,10 +274,11 @@ func (s *Store) RecordMessage(rec MessageRecord) error {
 		rec.MessageID, rec.ContentType, rec.SizeBytes, rec.HeaderCount, rec.Helo,
 	)
 	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			// Duplicate queue ID — message was already recorded.
-			return nil
-		}
+		// No ErrNoRows branch here: an INSERT never returns it, and a
+		// duplicate queue ID surfaces as a UNIQUE constraint violation. The
+		// branch that claimed to handle "already recorded" therefore never
+		// ran, and swallowing a real write failure into a nil return is the
+		// wrong direction for a journal to fail in.
 		return fmt.Errorf("store: record message: %w", err)
 	}
 

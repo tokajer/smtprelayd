@@ -48,6 +48,9 @@ type Manager struct {
 	tokens map[string]smarthost.TokenSource
 	rate   *routeLimiter
 	wg     sync.WaitGroup
+
+	// lastFailedSweep is read and written only from Run's own goroutine.
+	lastFailedSweep time.Time
 }
 
 // New builds the delivery manager. Each route gets its own concurrency budget
@@ -160,12 +163,32 @@ func (m *Manager) Run(ctx context.Context) {
 			}(meta)
 		}
 
+		m.sweepFailed(time.Now())
+
 		select {
 		case <-ctx.Done():
 			m.wg.Wait()
 			return
 		case <-t.C:
 		}
+	}
+}
+
+// failedSweepInterval throttles the spool/failed retention sweep. The dispatch
+// loop is the only thing already ticking over the spool's lifecycle, so the
+// sweep hangs off it rather than adding a goroutine — but it walks a directory
+// index, and the retention it enforces is measured in days, so running it on
+// every poll would be pure waste.
+const failedSweepInterval = time.Hour
+
+func (m *Manager) sweepFailed(now time.Time) {
+	if now.Sub(m.lastFailedSweep) < failedSweepInterval {
+		return
+	}
+	m.lastFailedSweep = now
+	if removed, freed := m.spool.SweepFailed(now); removed > 0 {
+		m.log.Info("failed spool retention sweep",
+			"removed", removed, "freed_bytes", freed)
 	}
 }
 

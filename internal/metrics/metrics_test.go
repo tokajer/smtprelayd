@@ -229,3 +229,33 @@ func TestRequireTokenGuardsTheExposition(t *testing.T) {
 		})
 	}
 }
+
+// A loopback listener has no credential to check, so the Host header is the
+// only thing separating a local scrape from a browser that was told a name
+// resolving to 127.0.0.1.
+func TestRequireLoopbackHostGuardsTheExposition(t *testing.T) {
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	reached := false
+	h := requireLoopbackHost(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { reached = true }), log)
+
+	cases := map[string]int{
+		"127.0.0.1:9100":          http.StatusOK,
+		"localhost:9100":          http.StatusOK,
+		"[::1]:9100":              http.StatusOK,
+		"rebind.attacker.example": http.StatusMisdirectedRequest,
+		"metrics.internal:9100":   http.StatusMisdirectedRequest,
+	}
+	for host, want := range cases {
+		reached = false
+		req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+		req.Host = host
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if want == http.StatusOK && !reached {
+			t.Errorf("Host %q was refused with %d", host, rec.Code)
+		}
+		if want != http.StatusOK && (reached || rec.Code != want) {
+			t.Errorf("Host %q: reached=%v status=%d, want %d", host, reached, rec.Code, want)
+		}
+	}
+}

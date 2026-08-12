@@ -14,7 +14,59 @@ and the Windows service wrapper (normally phase 5) were pulled forward and
 validated. MSI installs and uninstalls; `install`/`uninstall`/`start`/`stop`
 work on Windows. Log rotation and Windows ACL verification at startup are
 complete.
-**Last session**: 2026-08-11 (seventeenth session) — Second full-tree security
+**Last session**: 2026-08-12 (eighteenth session) — **All eleven findings of the
+second security review closed**, requested as "alles umsetzen". Two needed a
+decision first and got one: `queue.failed_retention_hours` as a new key
+(finding 3, both halves — count *and* sweep, since counting alone turns a full
+`spool/failed` into a relay that refuses mail and sweeping alone leaves the
+quota lying between sweeps), and raising both workflows to Go 1.25 rather than
+lowering `go.mod` (finding 9 — `golang.org/x/sys` v0.47.0 itself declares
+`go 1.25.0`, and that is the module the Windows DACL check needs, so lowering
+would have forced a dependency downgrade in the wrong place).
+The full write-up per finding, with the reasoning and the verification, is in
+`docs/Findings.md`; only what a later session needs to know is repeated here.
+Two things worth carrying forward. **The smuggling fix is broader than the
+finding described**: `<LF>.<CRLF>` smuggles just as well as `<LF>.<LF>`, so
+`dotReader` tracks the *preceding* line's terminator as well as the dot line's
+own. The Postfix shape was taken — queue the message, acknowledge it, then
+close the session instead of returning the stream to the command loop —
+because refusing a bare-LF end-of-data would hang every message from exactly
+the legacy devices this relay exists for. **The Host-header fix covers the
+metrics endpoint too**, which the finding mentioned in passing: a loopback
+listener has no credential to check, so `Host` is the whole boundary there as
+well. It is applied only to a loopback bind; a public metrics listener is
+reached by its real name and authenticates with a token instead.
+Verified live against a running relay, and — for the smuggling fix — against a
+binary built from the pre-fix `HEAD` to prove the test can fail: the same
+script queued two messages before the fix, the second carrying
+`forged@evil.example` in its spooled envelope, and queues one after it. Also
+verified live: a bare-LF legacy device still delivers, a conforming CRLF
+client still sends two messages over one connection, DNS-rebinding `Host`
+values get 421 on both the dashboard and metrics while `/api/v1/*` is
+unchanged, `/bounces?class=` returns 200 for the first time, and a planted
+two-week-old failed message was swept at startup, freeing exactly the
+300589 bytes it occupied.
+**gosec now runs in CI and the tree is at zero findings**, which `CLAUDE.md`
+has required all along and nothing enforced. No rule is excluded and no
+directory skipped: fifteen `#nosec` annotations sit on the lines they apply
+to, each naming the property that makes it an exception, so a later change
+that breaks that property fails the build. One gosec finding was a real
+simplification rather than an exception (`baseBackoff << shift` in
+`internal/api/auth.go`). Note for whoever bumps it: gosec v2.21.4 does not
+build under Go 1.26; v2.28.0 is pinned.
+`gofmt`, `go vet` (both GOOS), `go test ./...`, `go test -race ./...`, all
+three cross-builds, `scripts/check-banned-imports.sh`, `govulncheck` v1.6.0
+and `gosec` v2.28.0 all clean.
+**Left open deliberately**: `internal/logging` still imports
+`github.com/natefinch/lumberjack v2.0.0+incompatible`. `go mod tidy` removed
+the dead v3 alpha but added `gopkg.in/natefinch/lumberjack.v2` and
+`gopkg.in/yaml.v2` as indirect, because tidy covers the tests of imported
+packages and lumberjack's own tests import both. Neither reaches the binary
+(checked with `go list -deps` per GOOS) and `make sbom` is binary-scoped, so
+nothing is actually affected. Moving to the canonical
+`gopkg.in/natefinch/lumberjack.v2` module would remove the pair outright —
+that is a dependency swap and wants its own decision.
+**Previous session**: 2026-08-11 (seventeenth session) — Second full-tree security
 review, no phase work and **no code changed**. Requested as "prüfe mir das
 ganze auf Schwachstellen und Sicherheit". Eleven findings, all open, written
 up in `docs/Findings.md` with a checklist so they can be worked one at a time;
@@ -137,12 +189,13 @@ configured value cannot name a location outside the data directory, not that
 the path is safe to open — a symlink inside the data directory is
 `CheckDir`/`CheckDataDirACL`'s job. The six findings now have a section of
 their own under "Known gaps"; they had never been recorded in this file.
-**Found and not fixed**: `go.mod` declares `go 1.25.0` (raised in `47fe229`
-with no note anywhere), while `.github/workflows/ci.yml` and `release.yml`
-pin `GO_VERSION: "1.23"`. The build only works because the default
-`GOTOOLCHAIN=auto` silently downloads a newer toolchain than the workflow
-pins, so the pinned version is not what CI actually runs. Needs a decision:
-lower `go.mod` or raise both workflows.
+**Found and not fixed then; fixed 2026-08-12** as finding 9 of the second
+review: `go.mod` declared `go 1.25.0` (raised in `47fe229` with no note
+anywhere), while `.github/workflows/ci.yml` and `release.yml` pinned
+`GO_VERSION: "1.23"`. The build only worked because the default
+`GOTOOLCHAIN=auto` silently downloaded a newer toolchain than the workflow
+pinned, so the pinned version was not what CI ran. Both workflows now pin
+1.25.
 
 **Previous session**: 2026-08-11 (fourteenth session) — Installer fix, no phase
 work. The MSI never produced a data directory that `CheckDataDirACL` accepts,
@@ -790,35 +843,24 @@ parameterised SQL (the one `ORDER BY` interpolation is an allowlist lookup),
 validated queue-ID path joins, fail-closed client matching, and the dotReader
 un-stuffing correctly paired with `net/smtp`'s re-stuffing `DotWriter`.
 
-## Open security findings (second review, 2026-08-11)
+## Known gaps from the 2026-08-11 security review, second pass
 
-A second full-tree review the same day produced **eleven findings, none of
-them fixed**. They live in `docs/Findings.md`, which carries the reproduction
-for each of the three that were reproduced rather than reasoned about, the
-proposed fix, and a checklist to tick off. Only the headline is repeated here
-so this file stays the handover document and not the work list:
+A second full-tree review on 2026-08-11 produced eleven findings. **All eleven
+were fixed on 2026-08-12** and the work is recorded in `docs/Findings.md`,
+which keeps each original finding verbatim with the fix, the reasoning and the
+verification above it. Nothing from that review is open.
 
-- **Medium** — a bare `<LF>.<LF>` ends DATA and the remainder is executed as
-  SMTP commands. Reachable by anyone who controls a message body on an
-  allowlisted host, which is an escalation from "controls body" to "controls
-  envelope". Not an open relay: rewriting and rate limiting still apply.
-- **Medium** — the dashboard checks no `Host` header, so DNS rebinding from a
-  page the operator visits reaches everything the loopback-only decision of
-  the first review assumed was protected. `/api/v1/*` is unaffected.
-- **Medium** — `limits.spool_max_gb` does not bound disk usage: `Fail()`
-  removes a message from the index `spoolSize()` sums, and nothing prunes
-  `spool/failed`.
-- **Low/Medium** — `bounce.sender` and every `bounce.notify` entry reach a
-  header through `fmt.Fprintf` unvalidated.
-- **Low** ×5 — `/bounces?class=` is a guaranteed 500; four unvalidated
-  numeric limits silently mean "unlimited"; `service.hostname` is unchecked
-  in `Received:`; `ca_pin` has no length check; CI pins a Go toolchain it
-  does not use and runs no gosec.
-- **Info** — a dead lumberjack v3 dependency, a dead `sql.ErrNoRows` branch,
-  and HTTP servers without a write or idle timeout.
+Two of the eleven changed something an operator can see, so they are named
+here rather than only in that file:
 
-Suggested order: the three Mediums first, with the `/bounces` fix taken along
-because it is one line and repairs a filter that has never worked.
+- `queue.failed_retention_hours` is a new configuration key, default 168
+  (7 days). `spool/failed` now counts towards `limits.spool_max_gb` and is
+  swept by age; only the spool copy goes, the history row survives under
+  `history.retention_days`.
+- The dashboard and a loopback metrics listener refuse a request whose `Host`
+  header is not loopback, with `421 Misdirected Request`. A reverse proxy
+  placed in front — the deployment the config error already points at — must
+  set `Host` to the configured address.
 
 ## Open defects
 
@@ -1055,3 +1097,11 @@ it has.
 | 2026-08-11 | The postinstall script restarts the service on an upgrade with `systemctl try-restart`, having never started it on a first install | `preremove.sh` correctly declines to stop the service on an upgrade, but nothing restarted it afterwards, so an operator who upgraded for a fix kept running the binary they had just replaced. `try-restart` acts only on a unit that is already running, so a service deliberately left stopped stays stopped and the "a package never starts this service" rule survives intact |
 | 2026-08-11 | The upgrade path restarts first and reports the outcome, rather than validating the configuration with `check` beforehand | A `${ENV_VAR}` secret resolves from the service's environment, supplied by a unit drop-in that a package script cannot see, so a pre-flight `check` would report "environment variable is unset" for a perfectly good configuration and refuse to restart on essentially every real installation. Attempting the restart and reporting a unit that does not come back is honest in both directions; a relay that is down and says so beats one silently running the old code |
 | 2026-08-11 | `postinstall.sh` reads both the rpm and the dpkg upgrade convention | rpm passes an instance count in `$1`, dpkg passes `configure` with the old version in `$2`. nfpm installs the same script as both, and `preremove.sh` already had to make this distinction — printing first-install instructions to someone who has run the relay for a year is the visible half of getting it wrong; not restarting is the half that matters |
+| 2026-08-12 | Only `<CRLF>.<CRLF>` ends the data phase; a bare-LF dot still delivers the message but then closes the session | Handing the stream back to the command loop after a non-conforming end-of-data turns "controls the message body" into "controls the envelope". Strict RFC enforcement would have hung every message from a bare-LF legacy device — this relay's actual users — until the data timeout, so the Postfix shape was taken instead: the message is queued and acknowledged, the injection never executes. Checking the dot line's own terminator is not enough, since `<LF>.<CRLF>` smuggles equally well, so the preceding line's terminator is tracked with it |
+| 2026-08-12 | The dashboard and a loopback metrics listener refuse a non-loopback `Host` header with 421 | A loopback bind keeps out everything except a browser, which resolves names on someone else's behalf; DNS rebinding therefore reaches the dashboard same-origin from a page the operator visits, which is the 2026-08-11 loopback-is-the-authentication decision undone. Not applied to a public metrics listener, which is reached by its real name and authenticates with a token, nor to `/api/v1/*`, which wants a bearer token a rebound page cannot obtain. 421 with the remedy named rather than 404, because the authenticating reverse proxy the config error points operators at forwards the original `Host` by default |
+| 2026-08-12 | `spool/failed` counts towards `limits.spool_max_gb` **and** is swept by the new `queue.failed_retention_hours` (default 168) | Either half alone is wrong in a different direction: counting without a sweep turns a full `spool/failed` into a relay that permanently refuses new mail, and a sweep without counting leaves the quota lying between sweeps. Before this, `Fail()` dropped a message from the only index `spoolSize()` summed, so a client producing nothing but permanent failures freed its own quota on every message while continuing to fill the disk |
+| 2026-08-12 | The failed-message sweep deletes the spool copy only, never the history row | What failed and what the smarthost said about it is the record an operator troubleshoots from, and it belongs to `history.retention_days`. Deleting the body bounds the disk; deleting the record would bound the wrong thing. The cost is that a swept message can no longer be requeued, which is what a retention is for |
+| 2026-08-12 | The failure timestamp is the metadata file's mtime, not a new persisted field | `Fail` writes the metadata immediately before renaming it into `spool/failed`, so the mtime already *is* the failure time. A new JSON field would have needed a migration and would still have been absent on every message that failed under an earlier version — exactly the population the first sweep has to handle |
+| 2026-08-12 | A negative value for any limit that reads zero as "unlimited" is a startup error | `rateLimiter.allow`, `connCounter.acquire` and `Spool.SetQuota` all treat a non-positive limit as no limit, so a mistyped minus sign switched the control off while reading as though it were configured — the same trap strict TOML decoding exists to close, one layer below where decoding can see it. Zero stays legal so "no limit" is still sayable, just not reachable by accident |
+| 2026-08-12 | Both workflows raised to Go 1.25 rather than lowering `go.mod` | `golang.org/x/sys` v0.47.0 declares `go 1.25.0` itself, and that is the module `internal/config/trust_windows.go` needs for the Windows DACL check, so lowering `go.mod` would have forced a dependency downgrade in precisely the wrong place. A pin below the `go` directive never lowered the toolchain anyway — `GOTOOLCHAIN=auto` downloaded a newer one — it only stopped describing what produced the release binaries |
+| 2026-08-12 | gosec runs with no excluded rule and no skipped directory; the fifteen exceptions are `#nosec` annotations at the line they apply to | An excluded rule keeps passing silently when a later change breaks the property that justified excluding it. An annotation at the line names that property — a validated queue ID, an `O_NOFOLLOW` open, a bound SQL value — and fails the build when the line moves out from under it. The one gosec finding that was not an exception was fixed as a simplification instead |

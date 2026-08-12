@@ -412,6 +412,7 @@ func (s *Server) handleRequeueAction(w http.ResponseWriter, r *http.Request) {
 		if aerr := s.store.RecordAudit("dashboard", r.RemoteAddr, "requeue", id.String(), ""); aerr != nil {
 			s.log.Warn("audit log write failed", "action", "requeue", "queue_id", id.String(), "error", aerr)
 		}
+		//#nosec G710 -- the destination is a fixed path plus a spool.ID that ParseID already validated; nothing from the request reaches it
 		http.Redirect(w, r, "/messages/"+id.String(), http.StatusSeeOther)
 	case errors.Is(err, spool.ErrNotFound):
 		http.Error(w, "message not found", http.StatusNotFound)

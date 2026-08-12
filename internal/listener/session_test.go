@@ -91,12 +91,54 @@ func TestReadStructuredLineRejectsBareCR(t *testing.T) {
 // plain-text body must not lose the whole message over a byte that cannot
 // split a header.
 func TestBodyKeepsBareCR(t *testing.T) {
-	d := &dotReader{br: bufio.NewReader(strings.NewReader("line\rone\r\n.\r\n"))}
+	d := newDotReader(bufio.NewReader(strings.NewReader("line\rone\r\n.\r\n")))
 	got, err := io.ReadAll(d)
 	if err != nil {
 		t.Fatalf("body with a bare CR was rejected: %v", err)
 	}
 	if string(got) != "line\rone\r\n" {
 		t.Fatalf("got %q, want the body carried through unchanged", got)
+	}
+	if d.smuggled {
+		t.Fatal("a conforming <CRLF>.<CRLF> was flagged as smuggled")
+	}
+}
+
+// A bare <LF>.<LF> must not hand the stream back to the command loop: that is
+// what turns control of a message body into control of the envelope. The body
+// is still yielded -- the message is accepted -- but smuggled is set so the
+// session closes instead of executing what follows.
+func TestDotReaderFlagsNonConformingEndOfData(t *testing.T) {
+	cases := []struct {
+		name, input, wantBody string
+		wantSmuggled          bool
+	}{
+		{"conforming", "body\r\n.\r\n", "body\r\n", false},
+		{"bare LF throughout", "body\n.\n", "body\r\n", true},
+		{"LF before a CRLF dot", "body\n.\r\n", "body\r\n", true},
+		{"CRLF before a bare LF dot", "body\r\n.\n", "body\r\n", true},
+		{"empty message", ".\r\n", "", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			br := bufio.NewReader(strings.NewReader(tc.input + "MAIL FROM:<x@y.de>\r\n"))
+			d := newDotReader(br)
+			got, err := io.ReadAll(d)
+			if err != nil {
+				t.Fatalf("read: %v", err)
+			}
+			if string(got) != tc.wantBody {
+				t.Fatalf("body %q, want %q", got, tc.wantBody)
+			}
+			if d.smuggled != tc.wantSmuggled {
+				t.Fatalf("smuggled = %v, want %v", d.smuggled, tc.wantSmuggled)
+			}
+			// Whatever follows the dot is still sitting in the reader either
+			// way; what changes is whether the caller goes back to it.
+			rest, err := readStructuredLine(br, maxLineOctet)
+			if err != nil || rest != "MAIL FROM:<x@y.de>" {
+				t.Fatalf("trailing input = %q, %v", rest, err)
+			}
+		})
 	}
 }

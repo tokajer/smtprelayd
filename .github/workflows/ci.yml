@@ -14,8 +14,13 @@ permissions:
   contents: read
 
 env:
-  GO_VERSION: "1.23"
+  # Must not fall behind the `go` directive in go.mod. When it did (1.23 here
+  # against 1.25.0 there) the default GOTOOLCHAIN=auto silently downloaded
+  # whatever 1.25.x the proxy served, so the pin described a toolchain that
+  # never ran and the binaries were produced by an unpinned one.
+  GO_VERSION: "1.25"
   GOVULNCHECK_VERSION: "v1.6.0"
+  GOSEC_VERSION: "v2.28.0"
 
 jobs:
   check:
@@ -42,6 +47,15 @@ jobs:
 
       - name: Vulnerability scan
         run: go run golang.org/x/vuln/cmd/govulncheck@${{ env.GOVULNCHECK_VERSION }} ./...
+
+      # CLAUDE.md's definition of done has always required gosec clean; until
+      # 2026-08-12 nothing ran it. No rule is excluded and no directory is
+      # skipped: the fifteen exceptions the tree needs are #nosec annotations
+      # at the line they apply to, each naming the property that makes it one,
+      # so a later change that breaks that property fails here instead of
+      # inheriting a blanket exemption.
+      - name: Static security analysis
+        run: go run github.com/securego/gosec/v2/cmd/gosec@${{ env.GOSEC_VERSION }} -severity=medium ./...
 
   build:
     name: Cross-compile

@@ -60,6 +60,29 @@ func requireToken(cfg *config.Config, next http.Handler, log *slog.Logger) http.
 	})
 }
 
+// requireLoopbackHost is the loopback listener's counterpart to requireToken:
+// where a public listener authenticates with a bearer token, a loopback one
+// authenticates by being unreachable — except from a browser, which resolves
+// names on the attacker's behalf. A page the operator visits can rebind a name
+// it controls to 127.0.0.1 and read the exposition, which carries route names
+// and queue depths.
+//
+// Applied only to a loopback listener. A public one is reached by its real
+// name or address, so requiring loopback in the Host header there would refuse
+// every legitimate scrape.
+func requireLoopbackHost(next http.Handler, log *slog.Logger) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !config.IsLoopbackHostHeader(r.Host) {
+			log.Warn("metrics request with a non-loopback Host header rejected",
+				"host", r.Host, "source", sourceAddr(r))
+			http.Error(w, "this endpoint only answers requests addressed to loopback",
+				http.StatusMisdirectedRequest)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
 func bearerToken(r *http.Request) string {
 	const prefix = "Bearer "
 	h := r.Header.Get("Authorization")
@@ -99,6 +122,8 @@ func Serve(ctx context.Context, cfg *config.Config, reg *Registry, log *slog.Log
 	}
 	if public {
 		handler = requireToken(cfg, handler, log)
+	} else {
+		handler = requireLoopbackHost(handler, log)
 	}
 
 	mux := http.NewServeMux()
@@ -108,6 +133,13 @@ func Serve(ctx context.Context, cfg *config.Config, reg *Registry, log *slog.Log
 		Addr:              addr,
 		Handler:           mux,
 		ReadHeaderTimeout: 5 * time.Second,
+		// Tighter than the dashboard's: the exposition is rendered from
+		// in-memory counters and one spool index walk, and the request body is
+		// always empty. Idle is long enough for a scraper's keep-alive to
+		// survive a one-minute poll interval.
+		ReadTimeout:  15 * time.Second,
+		WriteTimeout: 30 * time.Second,
+		IdleTimeout:  120 * time.Second,
 	}
 
 	errCh := make(chan error, 1)

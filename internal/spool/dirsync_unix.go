@@ -11,6 +11,7 @@ import "os"
 // Errors are propagated: on Unix a failed directory fsync means the rename
 // may not be durable, which is exactly the guarantee the spool sells.
 func syncDir(path string) error {
+	//#nosec G304 -- path is one of the three spool directories built in Open from service.data_dir, never from request input
 	d, err := os.Open(path)
 	if err != nil {
 		return err
@@ -22,5 +23,6 @@ func syncDir(path string) error {
 // ensureMode restricts a spool directory to its owner. The mode bits are the
 // enforcement mechanism here, so a failure is fatal.
 func ensureMode(path string) error {
+	//#nosec G302 -- a directory needs its execute bit; 0700 is the restrictive mode here, not a lax one
 	return os.Chmod(path, 0o700)
 }

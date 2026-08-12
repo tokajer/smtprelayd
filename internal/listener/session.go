@@ -349,7 +349,7 @@ func (s *session) doData() bool {
 		return false
 	}
 
-	dr := &dotReader{br: s.br}
+	dr := newDotReader(s.br)
 	hr := bufio.NewReader(dr)
 	headers, hops, err := scanHeaders(hr, s.srv.cfg.Limits)
 	if err != nil {
@@ -458,6 +458,16 @@ func (s *session) doData() bool {
 
 	s.reply(250, "2.0.0 OK queued as "+strings.Join(ids, " "))
 	s.resetTransaction()
+
+	// End of data on anything other than <CRLF>.<CRLF>. The message is
+	// acknowledged -- it is queued and a legacy device must not be told
+	// otherwise -- but the stream is not handed back to the command loop,
+	// because whatever follows the dot was chosen by whoever wrote the body.
+	if dr.smuggled {
+		s.log.Warn("data ended on a bare LF dot line, closing the session",
+			"queue_ids", strings.Join(ids, " "))
+		return false
+	}
 	return true
 }
 
@@ -601,29 +611,36 @@ func splitCommand(line string) (verb, arg string) {
 	return strings.ToUpper(line), ""
 }
 
-// readLineLimited reads one CRLF-terminated line, refusing to buffer more
-// than max octets so that a client cannot exhaust memory with one long line.
-func readLineLimited(br *bufio.Reader, max int) (string, error) {
+// readLineLimited reads one line, refusing to buffer more than max octets so
+// that a client cannot exhaust memory with one long line. A bare LF is
+// accepted as a terminator because legacy devices emit them, but crlf reports
+// which terminator was actually seen: the end-of-data dot is the one place
+// where the difference decides whether the remainder of the stream is a
+// message body or an SMTP command, so that distinction must survive this far.
+func readLineLimited(br *bufio.Reader, max int) (line string, crlf bool, err error) {
 	var sb strings.Builder
 	for {
 		chunk, err := br.ReadSlice('\n')
 		if sb.Len()+len(chunk) > max {
-			return "", errLineTooLong
+			return "", false, errLineTooLong
 		}
 		sb.Write(chunk)
 		if err == bufio.ErrBufferFull {
 			continue
 		}
 		if err != nil {
-			return "", err
+			return "", false, err
 		}
 		break
 	}
-	s := strings.TrimSuffix(strings.TrimSuffix(sb.String(), "\n"), "\r")
-	if strings.IndexByte(s, 0) >= 0 {
-		return "", errNulByte
+	s := strings.TrimSuffix(sb.String(), "\n")
+	if strings.HasSuffix(s, "\r") {
+		s, crlf = strings.TrimSuffix(s, "\r"), true
 	}
-	return s, nil
+	if strings.IndexByte(s, 0) >= 0 {
+		return "", false, errNulByte
+	}
+	return s, crlf, nil
 }
 
 // readStructuredLine reads a line that will be interpreted rather than
@@ -639,7 +656,7 @@ func readLineLimited(br *bufio.Reader, max int) (string, error) {
 // would lose the whole message for a byte that only ever reaches the
 // smarthost as content.
 func readStructuredLine(br *bufio.Reader, max int) (string, error) {
-	s, err := readLineLimited(br, max)
+	s, _, err := readLineLimited(br, max)
 	if err != nil {
 		return "", err
 	}
@@ -651,10 +668,33 @@ func readStructuredLine(br *bufio.Reader, max int) (string, error) {
 
 // dotReader yields the message body with transparency dots removed and the
 // 1000 octet line limit enforced.
+//
+// RFC 5321 ends DATA on <CRLF>.<CRLF>, and only that sequence may hand the
+// stream back to the command loop. Accepting a bare <LF>.<LF> there turns
+// "controls the message body" into "controls the envelope": whatever follows
+// the dot is executed as SMTP commands, so a contact form or an ERP system on
+// an allowlisted host could inject its own MAIL FROM and RCPT TO. Checking
+// only the dot line's own terminator is not enough — <LF>.<CRLF> smuggles
+// just as well — so the preceding line's terminator is tracked too.
+//
+// Legacy devices that speak bare LF throughout are exactly this relay's
+// users, so their end-of-data is still honoured rather than left to time out.
+// It sets smuggled instead, and the caller closes the session after
+// acknowledging the message: the message is delivered, the injection is not.
 type dotReader struct {
 	br   *bufio.Reader
 	rest []byte
 	done bool
+
+	// prevCRLF is the previous body line's terminator. It starts true so that
+	// an empty message (the dot as the very first line) is judged on the dot
+	// line alone; the DATA command that opened the phase is not a body line.
+	prevCRLF bool
+	smuggled bool
+}
+
+func newDotReader(br *bufio.Reader) *dotReader {
+	return &dotReader{br: br, prevCRLF: true}
 }
 
 func (d *dotReader) Read(p []byte) (int, error) {
@@ -662,15 +702,17 @@ func (d *dotReader) Read(p []byte) (int, error) {
 		if d.done {
 			return 0, io.EOF
 		}
-		line, err := readLineLimited(d.br, maxLineOctet)
+		line, crlf, err := readLineLimited(d.br, maxLineOctet)
 		if err != nil {
 			d.done = true
 			return 0, err
 		}
 		if line == "." {
 			d.done = true
+			d.smuggled = !crlf || !d.prevCRLF
 			return 0, io.EOF
 		}
+		d.prevCRLF = crlf
 		if strings.HasPrefix(line, ".") {
 			line = line[1:]
 		}

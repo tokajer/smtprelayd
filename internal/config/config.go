@@ -127,6 +127,14 @@ type Credentials struct {
 type Queue struct {
 	RetryScheduleMin []int `toml:"retry_schedule_min"`
 	MaxLifetimeHours int   `toml:"max_lifetime_hours"`
+
+	// FailedRetentionHours bounds how long a permanently failed message's
+	// spool files are kept. Without it nothing ever left spool/failed, so a
+	// client producing permanent failures filled the filesystem. Zero keeps
+	// them forever, which is the old behaviour, now chosen rather than
+	// inherited. The history rows are governed by history.retention_days and
+	// are not affected by this.
+	FailedRetentionHours int `toml:"failed_retention_hours"`
 }
 
 type Bounce struct {
@@ -282,6 +290,7 @@ func (s *Secret) resolve(field string) error {
 		if err := checkSecretFile(path); err != nil {
 			return fmt.Errorf("%s: %w", field, err)
 		}
+		//#nosec G304 -- an operator-written file: reference, and checkSecretFile above has already verified its ownership, mode and containing directory
 		b, err := os.ReadFile(path)
 		if err != nil {
 			return fmt.Errorf("%s: %w", field, err)
@@ -302,7 +311,10 @@ func Defaults() *Config {
 	return &Config{
 		Service: Service{LogLevel: "info"},
 		Log:     Log{File: "smtprelayd.log", MaxSizeMB: 50, MaxBackups: 10, MaxAgeDays: 90},
-		Queue:   Queue{RetryScheduleMin: []int{1, 5, 15, 30, 60, 120}, MaxLifetimeHours: 96},
+		Queue: Queue{
+			RetryScheduleMin: []int{1, 5, 15, 30, 60, 120}, MaxLifetimeHours: 96,
+			FailedRetentionHours: 168,
+		},
 		Bounce:  Bounce{DigestMinutes: 15, MaxPerHour: 12},
 		Web:     Web{Address: "127.0.0.1:8025", Theme: Theme{Mode: "auto"}},
 		Metrics: Metrics{Address: "127.0.0.1:9025", Path: "/metrics"},

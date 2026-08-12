@@ -33,7 +33,40 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /routes", s.handleRoutes)
 	mux.HandleFunc("GET /config", s.handleConfig)
 	mux.HandleFunc("GET /static/style.css", s.handleStyle)
-	return securityHeaders(mux)
+	return s.requireLoopbackHost(securityHeaders(mux))
+}
+
+// requireLoopbackHost rejects a request whose Host header names anything but
+// the local machine.
+//
+// config.Validate refuses a non-loopback web.address, which makes loopback the
+// dashboard's authentication. A browser, however, sits inside that boundary: a
+// page the operator visits can point a name it controls at 127.0.0.1 and then
+// talk to the dashboard same-origin. That yields /queue, /search and /config,
+// and the CSRF token can be lifted from a page and used to drive requeue and
+// delete -- the token stops another origin from forging a request, not one
+// that has legitimately read the page.
+//
+// The bind address is the server's own; the Host header is the client's claim.
+// Only a request that addressed the loopback interface by name or literal is
+// served, which a rebound name cannot do.
+//
+// The refusal names its own remedy rather than returning a bare 404, because
+// the deployment config.Validate points operators at -- a reverse proxy that
+// authenticates -- forwards the original Host by default and would otherwise
+// fail here with nothing to go on.
+func (s *Server) requireLoopbackHost(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !config.IsLoopbackHostHeader(r.Host) {
+			s.log.Warn("dashboard request with a non-loopback Host header rejected",
+				"host", r.Host, "source", r.RemoteAddr, "path", r.URL.Path)
+			http.Error(w, "the dashboard only answers requests addressed to loopback; "+
+				"a reverse proxy in front of it must set the Host header to the "+
+				"configured web.address", http.StatusMisdirectedRequest)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 func securityHeaders(next http.Handler) http.Handler {
@@ -57,6 +90,13 @@ func Serve(ctx context.Context, cfg *config.Config, handler http.Handler, log *s
 		Addr:              cfg.Web.Address,
 		Handler:           handler,
 		ReadHeaderTimeout: 5 * time.Second,
+		// A slow or vanished reader could otherwise hold a connection and its
+		// handler goroutine indefinitely. The write budget is generous because
+		// a search across a large history renders under it, not because a
+		// dashboard page should ever take that long.
+		ReadTimeout:  30 * time.Second,
+		WriteTimeout: 60 * time.Second,
+		IdleTimeout:  120 * time.Second,
 	}
 
 	errCh := make(chan error, 1)

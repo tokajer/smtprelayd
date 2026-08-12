@@ -115,9 +115,10 @@ func tlsConfig(cfg *config.Config) (*tls.Config, error) {
 	if len(want) == 0 {
 		return nil, fmt.Errorf("no certificate found in %s", cfg.TLS.CertFile)
 	}
+	//#nosec G123 -- see InsecureSkipVerify below: this dials the relay's own listener with a fresh Config and no session cache, so no session exists to resume around the pin
 	return &tls.Config{
 		MinVersion:         tls.VersionTLS12,
-		InsecureSkipVerify: true, //nolint:gosec // replaced by the exact pin below
+		InsecureSkipVerify: true, //#nosec G402,G123 -- replaced by the exact pin in VerifyPeerCertificate below; this probe dials the relay's own listener with no session cache, so there is no resumption path around the pin
 		VerifyPeerCertificate: func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
 			for _, got := range rawCerts {
 				for _, w := range want {

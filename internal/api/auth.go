@@ -116,7 +116,7 @@ func (l *failLimiter) recordFailure(source string, now time.Time) {
 		if shift > 8 {
 			shift = 8 // caps the exponent well before the shift itself could overflow
 		}
-		backoff := baseBackoff * time.Duration(uint(1)<<uint(shift))
+		backoff := baseBackoff << shift
 		if backoff > maxBackoff {
 			backoff = maxBackoff
 		}

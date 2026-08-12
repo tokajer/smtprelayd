@@ -94,7 +94,24 @@ attacker-influenced values and writes them into a message.
   a control that exists: no MIME parsing exists at all, so there is no nesting
   to bound and nothing that could recurse on it.
 - The relay adds its own `Received` header and strips any client-supplied
-  header that would misrepresent its origin.
+  header that would misrepresent its origin. Every value interpolated into it,
+  including the configured `service.hostname`, is proved free of CR, LF and
+  NUL before it gets there.
+- **Only `<CRLF>.<CRLF>` may end the data phase and hand the stream back to
+  the command loop.** Accepting a bare `<LF>.<LF>` there is SMTP smuggling: it
+  turns "controls the message body" into "controls the envelope", so a contact
+  form or an ERP system on an allowlisted host could inject its own `MAIL
+  FROM` and `RCPT TO`. Checking the dot line's own terminator is not enough —
+  `<LF>.<CRLF>` smuggles just as well — so the preceding line's terminator is
+  checked with it.
+  Legacy devices that speak bare LF throughout are this relay's users, so
+  their end-of-data is still honoured rather than left to time out: the
+  message is queued and acknowledged, and then the session is closed instead
+  of being returned to the command loop. The message is delivered; the
+  injection is not.
+  The reverse direction needs no control: the data reader normalises every
+  line to CRLF on the way into the spool, so this relay can never be the
+  sending side of a smuggling chain.
 
 ## 5. Transport security
 
@@ -133,6 +150,22 @@ attacker-influenced values and writes them into a message.
   administrators.
 - Spool files 0600, directories 0700. Permissions are verified at startup and
   a mismatch is a startup failure.
+- **`limits.spool_max_gb` bounds the whole spool, `spool/failed` included.**
+  Counting only the live queue meant that a permanently failing message freed
+  its quota the moment it was moved aside, while still occupying the disk —
+  so a client that produced nothing but permanent failures filled the
+  filesystem and the quota never saw it. `queue.failed_retention_hours` then
+  bounds how long those files are kept, because counting alone would turn a
+  full `spool/failed` into a relay that permanently refuses new mail. Only the
+  spool copy is swept; the history row and every attempt survive under
+  `history.retention_days`.
+- A limit of zero means "unlimited" throughout, which makes a mistyped minus
+  sign a way to switch a control off silently. Negative values for
+  `client.rate_limit_per_min`, `client.max_connections`,
+  `route.rate_limit_per_min`, `limits.spool_max_gb` and
+  `queue.failed_retention_hours` are therefore startup errors, as is a
+  `spool_max_gb` large enough to overflow the gigabytes-to-bytes conversion
+  back into "no quota".
 - The history database and the log file are 0600 as well. Both are created by
   code that does not let the caller choose a mode — the SQLite driver and
   lumberjack, which default to 0644 — so `fsmode.RestrictFile` restricts them
@@ -169,6 +202,16 @@ attacker-influenced values and writes them into a message.
   certificate and no credential. Remote access goes through an SSH tunnel or
   an authenticating reverse proxy. A login that verifies a pasted token
   against the stored digests is possible and is recorded as future work.
+- **A loopback bind is not by itself the boundary; the `Host` header completes
+  it.** A browser sits inside the loopback boundary and resolves names on
+  someone else's behalf, so a page the operator visits can point a name it
+  controls at 127.0.0.1 and then talk to the dashboard same-origin — DNS
+  rebinding. Both the dashboard and a loopback metrics listener therefore
+  refuse any request whose `Host` is not `127.0.0.1`, `[::1]` or `localhost`,
+  with or without the configured port, answering `421 Misdirected Request`. A
+  reverse proxy placed in front must set `Host` to the configured address.
+  The `/api/v1/*` endpoints need no such check: they want a bearer token,
+  which a rebound page cannot obtain.
 - **The metrics endpoint may bind beyond loopback, but only authenticated and
   only over TLS.** Unlike the dashboard, a monitoring system can present a
   credential, so this is a token check rather than a refusal: a read-scope
@@ -200,7 +243,14 @@ attacker-influenced values and writes them into a message.
 - `go.sum` committed, builds run with `-mod=readonly` and module verification
   enabled.
 - CI runs `govulncheck` and `gosec` on every push and fails the build on
-  findings.
+  findings. `gosec` runs with no excluded rule and no skipped directory: the
+  exceptions the tree needs are `#nosec` annotations on the line they apply
+  to, each naming the property that makes it one, so a change that breaks that
+  property fails the build instead of inheriting a blanket exemption.
+- The Go toolchain pinned in the workflows must not fall behind the `go`
+  directive in `go.mod`. A lower pin does not lower the toolchain — the
+  default `GOTOOLCHAIN=auto` downloads a newer one — it only stops describing
+  what actually produced the release binaries.
 - Release binaries are built reproducibly with trimmed paths, checksummed, and
   signed. Windows binaries additionally carry an Authenticode signature.
 - An SBOM is produced per release.

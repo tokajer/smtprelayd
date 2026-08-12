@@ -652,3 +652,69 @@ func TestDatabaseFilesAreNotWorldReadable(t *testing.T) {
 		}
 	}
 }
+
+// The class filter behind the dashboard's failure-class dropdown referenced
+// a.class, a column the `a` subquery never selected, so every filtered request
+// was a SQL error and a 500. Nothing covered it, which is why it survived.
+func TestFindBouncesFiltersByClass(t *testing.T) {
+	s := testStore(t)
+	now := time.Now()
+	expires := now.Add(96 * time.Hour)
+
+	for i, tc := range []struct{ id, class string }{
+		{"PERM-1", "permanent"},
+		{"PERM-2", "permanent"},
+		{"EXPIRED-1", "expired"},
+		{"DELIVERED-1", "delivered"},
+	} {
+		_ = s.RecordMessage(testRecord(tc.id, now.Add(-time.Duration(i)*time.Hour), expires))
+		_ = s.RecordAttempt(tc.id, 1, 550, "Error", tc.class, nil)
+	}
+
+	for class, want := range map[string]int{
+		"permanent": 2,
+		"expired":   1,
+		"":          3, // no filter: every permanent and expired message
+	} {
+		got, err := s.FindBounces(BounceFilter{Class: class, Limit: 100})
+		if err != nil {
+			t.Fatalf("class=%q returned an error instead of rows: %v", class, err)
+		}
+		if len(got) != want {
+			t.Errorf("class=%q returned %d bounces, want %d", class, len(got), want)
+		}
+	}
+
+	// A message whose final attempt is not a failure must not appear under any
+	// class, including its own.
+	got, err := s.FindBounces(BounceFilter{Class: "delivered", Limit: 100})
+	if err != nil {
+		t.Fatalf("class=delivered: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("a delivered message appeared in the bounce view: %d rows", len(got))
+	}
+}
+
+// The class shown is the final attempt's, so a message that failed temporarily
+// before failing permanently must be found under "permanent", not "temporary".
+func TestFindBouncesClassIsTheFinalAttempt(t *testing.T) {
+	s := testStore(t)
+	now := time.Now()
+	_ = s.RecordMessage(testRecord("RETRIED", now, now.Add(96*time.Hour)))
+	_ = s.RecordAttempt("RETRIED", 1, 451, "try later", "temporary", nil)
+	_ = s.RecordAttempt("RETRIED", 2, 550, "no such user", "permanent", nil)
+
+	got, err := s.FindBounces(BounceFilter{Class: "permanent", Limit: 100})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("class=permanent returned %d rows, want 1", len(got))
+	}
+	if got, err := s.FindBounces(BounceFilter{Class: "temporary", Limit: 100}); err != nil {
+		t.Fatal(err)
+	} else if len(got) != 0 {
+		t.Errorf("an earlier temporary attempt matched the class filter: %d rows", len(got))
+	}
+}

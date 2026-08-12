@@ -102,6 +102,7 @@ func (nopCloser) Close() error { return nil }
 // else opens it. The log carries every queue ID, sender and recipient the
 // relay handled, so it is not a file other local accounts may read.
 func createRestricted(path string) error {
+	//#nosec G304 -- path comes from config.LogPath, which proves lexically that log.file cannot name a location outside service.data_dir
 	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
 	if err != nil {
 		return err

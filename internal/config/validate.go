@@ -4,6 +4,7 @@
 package config
 
 import (
+	"crypto/sha256"
 	"crypto/tls"
 	"encoding/hex"
 	"fmt"
@@ -20,7 +21,7 @@ import (
 const DefaultScope = "https://outlook.office365.com/.default"
 
 // secretExpiresLayout is the date format of oauth2.secret_expires.
-const secretExpiresLayout = "2006-01-02"
+const secretExpiresLayout = "2006-01-02" //#nosec G101 -- a date layout, not a credential
 
 // tenantID bounds what may be interpolated into the token endpoint URL. A
 // tenant is a GUID or a domain name; anything that could add or traverse a
@@ -29,6 +30,11 @@ var tenantID = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9.-]{0,127}$`)
 
 // ValidTenantID reports whether s is safe to place in the token endpoint path.
 func ValidTenantID(s string) bool { return tenantID.MatchString(s) }
+
+// maxSpoolGB is an exabyte, chosen only so that the gigabytes-to-bytes
+// multiplication in Spool.SetQuota cannot overflow int64 and land back on
+// "no quota". No filesystem this reaches is anywhere near it.
+const maxSpoolGB = 1 << 30
 
 // Validate enforces every rule from docs/SECURITY.md that can be decided
 // without touching the network. Ambiguity is an error, never a warning.
@@ -49,6 +55,13 @@ func (c *Config) Validate() error {
 		} else {
 			c.Service.Hostname = h
 		}
+	}
+	// The hostname is interpolated into the Received: header and into the 220
+	// banner. Every other value that reaches that header has been proved free
+	// of CR, LF and NUL by the code that produced it; this one comes straight
+	// from the configuration file and had not been.
+	if strings.ContainsAny(c.Service.Hostname, "\r\n\x00") {
+		add("service.hostname must not contain CR, LF or NUL: it is written into the Received header")
 	}
 
 	// The log file is the one configuration string that becomes a path by
@@ -205,8 +218,14 @@ func (c *Config) Validate() error {
 		default:
 			add("%s: rewrite.reply_to must be preserve, drop or fixed:<address>", where)
 		}
-		if cl.MaxMessageMB < 0 || cl.MaxRecipients < 0 {
-			add("%s: limits must not be negative", where)
+		// rateLimiter.allow and connCounter.acquire both read a limit of zero
+		// or less as "unlimited", so a mistyped minus sign switches the
+		// control off instead of failing startup -- the same "looks
+		// configured but does nothing" shape strict TOML decoding exists to
+		// prevent, one layer below where decoding can see it.
+		if cl.MaxMessageMB < 0 || cl.MaxRecipients < 0 || cl.RateLimitPerMin < 0 || cl.MaxConnections < 0 {
+			add("%s: max_message_mb, max_recipients, rate_limit_per_min and max_connections must not be negative "+
+				"(0 means unlimited)", where)
 		}
 	}
 
@@ -309,12 +328,24 @@ func (c *Config) Validate() error {
 			add("%s: auth must be none, plain, login or xoauth2", where)
 		}
 		if r.CAPin != "" {
-			if _, err := hex.DecodeString(strings.ReplaceAll(r.CAPin, ":", "")); err != nil {
+			// A truncated pin decodes cleanly and then never matches the
+			// full-length comparison in smarthost, so the route fails closed
+			// -- but at delivery time, with an error blaming the smarthost's
+			// certificate for what is a typo in the configuration.
+			b, err := hex.DecodeString(strings.ReplaceAll(r.CAPin, ":", ""))
+			switch {
+			case err != nil:
 				add("%s: ca_pin must be a hex SHA-256 fingerprint", where)
+			case len(b) != sha256.Size:
+				add("%s: ca_pin must be a SHA-256 fingerprint of %d hex characters, got %d",
+					where, sha256.Size*2, len(b)*2)
 			}
 		}
 		if r.MaxConcurrent <= 0 {
 			c.Routes[i].MaxConcurrent = 4
+		}
+		if r.RateLimitPerMin < 0 {
+			add("%s: rate_limit_per_min must not be negative (0 means unpaced)", where)
 		}
 
 		// Recipient domains take precedence over the route named by the
@@ -383,6 +414,9 @@ func (c *Config) Validate() error {
 	}
 	if c.Queue.MaxLifetimeHours <= 0 {
 		add("queue.max_lifetime_hours must be positive")
+	}
+	if c.Queue.FailedRetentionHours < 0 {
+		add("queue.failed_retention_hours must not be negative (0 keeps failed messages forever)")
 	}
 
 	if c.Web.Enabled {
@@ -477,10 +511,26 @@ func (c *Config) Validate() error {
 		if cl.Bounce.Sender != "" || cl.Bounce.NotifyRoute != "" || cl.Bounce.DigestMinutes != 0 || cl.Bounce.MaxPerHour != 0 {
 			add("client %q: bounce.sender, bounce.notify_route, bounce.digest_minutes and bounce.max_per_hour are global-only; only bounce.notify may be set per client", cl.Name)
 		}
+		// These reach a From: and To: line through fmt.Fprintf, so a CR or LF
+		// in one splits the digest's header block. Operator-controlled rather
+		// than remote, but it is still a header built by concatenation from an
+		// unvalidated string, which CLAUDE.md bans outright.
+		for j, n := range cl.Bounce.Notify {
+			if !ValidAddress(n) {
+				add("client %q: bounce.notify[%d] %q is not a valid email address", cl.Name, j, n)
+			}
+		}
+	}
+	for j, n := range c.Bounce.Notify {
+		if !ValidAddress(n) {
+			add("bounce.notify[%d] %q is not a valid email address", j, n)
+		}
 	}
 	if len(c.Bounce.Notify) > 0 || clientNotifies {
 		if c.Bounce.Sender == "" {
 			add("bounce.sender is required when notifications are enabled")
+		} else if !ValidAddress(c.Bounce.Sender) {
+			add("bounce.sender %q is not a valid email address", c.Bounce.Sender)
 		}
 		if c.Bounce.DigestMinutes <= 0 {
 			add("bounce.digest_minutes must be positive when notifications are enabled")
@@ -506,6 +556,20 @@ func (c *Config) Validate() error {
 	}
 	if c.Limits.MaxHeaderBytes <= 0 {
 		add("limits.max_header_bytes must be positive")
+	}
+	// Spool.SetQuota reads anything at or below zero as "no quota", and a
+	// value large enough to overflow int64 gigabytes-to-bytes used to mean the
+	// same. Both are rejected here so the only way to have no quota is to say
+	// so.
+	switch {
+	case c.Limits.SpoolMaxGB < 0:
+		add("limits.spool_max_gb must not be negative (0 means no quota)")
+	case c.Limits.SpoolMaxGB > maxSpoolGB:
+		add("limits.spool_max_gb %d is beyond any real filesystem; the maximum is %d",
+			c.Limits.SpoolMaxGB, maxSpoolGB)
+	}
+	if c.Limits.SpoolWarnPercent < 0 || c.Limits.SpoolWarnPercent > 100 {
+		add("limits.spool_warn_percent must be between 0 and 100")
 	}
 	for _, cl := range c.Clients {
 		if cl.MaxMessageMB > c.Limits.MaxMessageMB {
@@ -573,6 +637,26 @@ func printableASCII(s string) bool {
 // that this package makes at validation time, and two spellings of "is this
 // loopback" is one more than the number that can be right.
 func IsLoopbackHost(host string) bool { return isLoopbackHost(host) }
+
+// IsLoopbackHostHeader reports whether an HTTP Host header names the local
+// machine. It exists because "the listener is bound to loopback" and "this
+// request was addressed to loopback" are different statements: a browser
+// resolves a name the page controls, so a DNS rebind reaches a loopback
+// listener with an attacker's name in the Host header, from inside the
+// boundary the loopback bind was supposed to be.
+//
+// The header may carry a port or not, and an IPv6 literal arrives in
+// brackets, so both shapes are reduced to a bare host before the same
+// loopback test the validator uses.
+func IsLoopbackHostHeader(hostHeader string) bool {
+	h := hostHeader
+	if host, _, err := net.SplitHostPort(h); err == nil {
+		h = host
+	} else {
+		h = strings.TrimSuffix(strings.TrimPrefix(h, "["), "]")
+	}
+	return isLoopbackHost(h)
+}
 
 func isLoopbackHost(host string) bool {
 	if host == "" {

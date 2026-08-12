@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"sort"
@@ -74,22 +75,42 @@ type Spool struct {
 	queue  string
 	failed string
 
-	mu               sync.Mutex
-	index            map[ID]*Meta
-	leased           map[ID]bool
+	mu     sync.Mutex
+	index  map[ID]*Meta
+	leased map[ID]bool
+
+	// failed mirrors spool/failed. A permanently failed message leaves the
+	// live index but not the disk, so a quota that summed only index would
+	// let a client which reliably fails free its own quota while continuing
+	// to occupy the filesystem. Kept as a separate map rather than folded
+	// into index because nothing may ever claim, lease or deliver these.
+	failedIndex map[ID]failedEntry
+
 	maxQuotaBytes    int64
 	warnQuotaPercent int
+	failedTTL        time.Duration
+}
+
+// failedEntry is the little that is needed about a message in spool/failed:
+// what it costs on disk, and when it landed there. The timestamp is the
+// metadata file's modification time, which Fail sets by writing the file
+// immediately before the rename -- so it needs no new persisted field and is
+// correct for messages that failed under an earlier version.
+type failedEntry struct {
+	size int64
+	at   time.Time
 }
 
 // Open prepares the spool directories and recovers any prior state.
 func Open(dataDir string) (*Spool, error) {
 	s := &Spool{
-		root:   dataDir,
-		tmp:    filepath.Join(dataDir, "spool", "tmp"),
-		queue:  filepath.Join(dataDir, "spool", "queue"),
-		failed: filepath.Join(dataDir, "spool", "failed"),
-		index:  map[ID]*Meta{},
-		leased: map[ID]bool{},
+		root:        dataDir,
+		tmp:         filepath.Join(dataDir, "spool", "tmp"),
+		queue:       filepath.Join(dataDir, "spool", "queue"),
+		failed:      filepath.Join(dataDir, "spool", "failed"),
+		index:       map[ID]*Meta{},
+		leased:      map[ID]bool{},
+		failedIndex: map[ID]failedEntry{},
 	}
 	for _, d := range []string{s.tmp, s.queue, s.failed} {
 		if err := os.MkdirAll(d, 0o700); err != nil {
@@ -155,6 +176,42 @@ func (s *Spool) recover() error {
 			_ = os.Remove(filepath.Join(s.queue, name))
 		}
 	}
+
+	return s.indexFailed()
+}
+
+// indexFailed accounts for what is already sitting in spool/failed at startup.
+// Unlike the queue sweep above, nothing here is removed or repaired: these
+// messages are kept deliberately, and the operator's requeue action is the
+// only thing that should resurrect one. This only makes them visible to the
+// quota and to the retention sweep.
+func (s *Spool) indexFailed() error {
+	entries, err := os.ReadDir(s.failed)
+	if err != nil {
+		return err
+	}
+	for _, e := range entries {
+		name := e.Name()
+		if !strings.HasSuffix(name, ".json") {
+			continue
+		}
+		id, err := ParseID(strings.TrimSuffix(name, ".json"))
+		if err != nil {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil {
+			continue
+		}
+		size := int64(0)
+		if fi, err := os.Stat(filepath.Join(s.failed, id.String()+".eml")); err == nil {
+			size = fi.Size()
+		}
+		// The body's own size, not Envelope.Size: what the quota is about is
+		// what the filesystem is holding, and the two differ by the per-copy
+		// Received header Commit prepends.
+		s.failedIndex[id] = failedEntry{size: size + info.Size(), at: info.ModTime()}
+	}
 	return nil
 }
 
@@ -190,6 +247,7 @@ func (s *Spool) Stage(body io.Reader, maxBytes int64) (*Staged, error) {
 		return nil, err
 	}
 	path := filepath.Join(s.tmp, id.String()+".staged")
+	//#nosec G304 -- path is s.tmp joined with a freshly generated, validated ID; O_NOFOLLOW and O_EXCL close the symlink and pre-creation races
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY|noFollow, 0o600)
 	if err != nil {
 		return nil, err
@@ -243,6 +301,7 @@ func (s *Spool) Commit(st *Staged, env Envelope, lifetime time.Duration, prefix 
 	defer src.Close()
 
 	tmpData := filepath.Join(s.tmp, id.String()+".eml")
+	//#nosec G304 -- tmpData is s.tmp joined with a validated ID; see Stage for the O_NOFOLLOW/O_EXCL reasoning
 	dst, err := os.OpenFile(tmpData, os.O_CREATE|os.O_EXCL|os.O_WRONLY|noFollow, 0o600)
 	if err != nil {
 		return "", err
@@ -320,6 +379,7 @@ func (s *Spool) writeMeta(m *Meta) error {
 		return err
 	}
 	tmp := filepath.Join(s.tmp, m.ID.String()+".json")
+	//#nosec G304 -- tmp is s.tmp joined with a validated ID; see Stage for the O_NOFOLLOW/O_EXCL reasoning
 	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_EXCL|os.O_WRONLY|noFollow, 0o600)
 	if err != nil {
 		return err
@@ -452,14 +512,70 @@ func (s *Spool) Fail(m *Meta, reason string) error {
 	delete(s.leased, m.ID)
 	s.mu.Unlock()
 
+	var onDisk int64
 	for _, ext := range []string{".json", ".eml"} {
 		src := filepath.Join(s.queue, m.ID.String()+ext)
 		dst := filepath.Join(s.failed, m.ID.String()+ext)
+		if fi, err := os.Stat(src); err == nil {
+			onDisk += fi.Size()
+		}
 		if err := os.Rename(src, dst); err != nil && !os.IsNotExist(err) {
 			return err
 		}
 	}
+	// Still counted against the quota, from the other index. The message left
+	// the queue; it did not leave the disk.
+	s.mu.Lock()
+	s.failedIndex[m.ID] = failedEntry{size: onDisk, at: time.Now()}
+	s.mu.Unlock()
+
 	return syncDir(s.failed)
+}
+
+// SweepFailed deletes messages that have been sitting in spool/failed for
+// longer than the configured retention, freeing both the disk and the quota
+// they hold. Their history rows are untouched: what a failure was and what the
+// smarthost said about it outlives the copy of the message itself, and
+// history.retention_days governs that separately.
+//
+// Returns the number of messages removed and the bytes freed. A retention of
+// zero disables the sweep, which keeps every failure forever -- the behaviour
+// before this existed, still reachable deliberately rather than by omission.
+func (s *Spool) SweepFailed(now time.Time) (removed int, freed int64) {
+	s.mu.Lock()
+	ttl := s.failedTTL
+	if ttl <= 0 {
+		s.mu.Unlock()
+		return 0, 0
+	}
+	var expired []ID
+	for id, e := range s.failedIndex {
+		if now.Sub(e.at) > ttl {
+			expired = append(expired, id)
+		}
+	}
+	s.mu.Unlock()
+
+	for _, id := range expired {
+		for _, ext := range []string{".json", ".eml"} {
+			if err := removeRetry(filepath.Join(s.failed, id.String()+ext)); err != nil && !os.IsNotExist(err) {
+				// Leave it indexed so the next sweep tries again rather than
+				// losing track of bytes that are still on the disk.
+				continue
+			}
+		}
+		s.mu.Lock()
+		if e, still := s.failedIndex[id]; still {
+			delete(s.failedIndex, id)
+			removed++
+			freed += e.size
+		}
+		s.mu.Unlock()
+	}
+	if removed > 0 {
+		_ = syncDir(s.failed)
+	}
+	return removed, freed
 }
 
 // Len reports the number of queued messages, used by metrics and the
@@ -535,6 +651,7 @@ func (s *Spool) Requeue(id ID) error {
 	}
 
 	failedMeta := filepath.Join(s.failed, id.String()+".json")
+	//#nosec G304 -- failedMeta is s.failed joined with an ID the caller has already put through ParseID
 	b, err := os.ReadFile(failedMeta)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -568,6 +685,7 @@ func (s *Spool) Requeue(id ID) error {
 		return err
 	}
 	s.index[id] = &m
+	delete(s.failedIndex, id)
 	return nil
 }
 
@@ -585,6 +703,7 @@ func (s *Spool) Discard(id ID) error {
 		return ErrBusy
 	}
 	delete(s.index, id)
+	delete(s.failedIndex, id)
 	s.mu.Unlock()
 
 	removed := false
@@ -606,7 +725,12 @@ func (s *Spool) Discard(id ID) error {
 	return syncDir(s.failed)
 }
 
-// spoolSize returns the total size in bytes of all queued messages.
+// spoolSize returns the total size in bytes the spool occupies: queued
+// messages plus the permanently failed ones kept in spool/failed. Failed
+// messages are counted because they are still on the filesystem the quota
+// exists to protect -- summing only the live index let a client that produced
+// nothing but permanent failures fill the disk without the quota ever seeing
+// it.
 func (s *Spool) spoolSize() int64 {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -614,15 +738,40 @@ func (s *Spool) spoolSize() int64 {
 	for _, m := range s.index {
 		total += m.Envelope.Size
 	}
+	for _, e := range s.failedIndex {
+		total += e.size
+	}
 	return total
 }
 
-// SetQuota configures the maximum spool size and warning threshold.
+// SetQuota configures the maximum spool size and warning threshold. A maxGB of
+// zero or less means no quota; the caller is expected to have rejected a
+// negative value at configuration load time, and the multiplication is done in
+// int64 so that a large value cannot wrap into one.
 func (s *Spool) SetQuota(maxGB int, warnPercent int) {
+	const gib = 1024 * 1024 * 1024
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.maxQuotaBytes = int64(maxGB) * 1024 * 1024 * 1024
 	s.warnQuotaPercent = warnPercent
+	switch {
+	case maxGB <= 0:
+		s.maxQuotaBytes = 0
+	case maxGB > math.MaxInt64/gib:
+		// config.Validate rejects a value this large. Clamping rather than
+		// letting the multiplication wrap means one that reached here anyway
+		// still enforces something, instead of turning into no quota at all.
+		s.maxQuotaBytes = math.MaxInt64
+	default:
+		s.maxQuotaBytes = int64(maxGB) * gib
+	}
+}
+
+// SetFailedRetention configures how long spool/failed keeps a permanently
+// failed message's files. Zero disables the sweep.
+func (s *Spool) SetFailedRetention(d time.Duration) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.failedTTL = d
 }
 
 // syncDir and ensureMode are platform-specific; see dirsync_unix.go and
