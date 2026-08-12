@@ -11,11 +11,17 @@ full**.
 4a–4d remain complete from earlier sessions. Phase 3 (client policy, sender
 rewriting, recipient routing) remains complete and compiles clean. Packaging
 and the Windows service wrapper (normally phase 5) were pulled forward and
-validated. MSI installs and uninstalls; `install`/`uninstall`/`start`/`stop`
-work on Windows. Log rotation and Windows ACL verification at startup are
-complete.
+validated. The MSI's **first-install path is verified on hardware**
+(2026-08-12): install → configure → `check` → start → stop, with the service
+running as `NT SERVICE\smtprelayd`. Its upgrade and uninstall paths are not
+verified — this line claimed they were until 2026-08-12. Log rotation and
+Windows ACL verification at startup are complete.
 **Last session**: 2026-08-12 (eighteenth session) — **All eleven findings of the
-second security review closed**, requested as "alles umsetzen". Two needed a
+second security review closed**, and separately the **Windows MSI was installed
+on hardware and works**, which closes the 2026-08-11 installer defect that had
+made every fresh Windows install unstartable. Details of the MSI run are under
+Open defects and in `docs/PHASE5-CHECKLIST.md`; the rest of this entry is the
+security work, requested as "alles umsetzen". Two findings needed a
 decision first and got one: `queue.failed_retention_hours` as a new key
 (finding 3, both halves — count *and* sweep, since counting alone turns a full
 `spool/failed` into a relay that refuses mail and sweeping alone leaves the
@@ -543,8 +549,18 @@ surviving data directory. Two things were found and fixed along the way: the
 missing restart on upgrade (see Open defects) and the misleading first-install
 text on an upgrade. One open decision: the relay's own startup line goes to
 the log file, never to journald, while `MEMORY.md` section 10 claims both.
-Still open for phase 5: the same sequence for the `.deb` on Debian/Ubuntu, and
-the Windows MSI on hardware.
+The **Windows MSI was installed on hardware on 2026-08-12** and the
+first-install path works end to end — install, service registered as
+`NT SERVICE\smtprelayd` and not running, configure, `check`, start, log line,
+stop. That closes the 2026-08-11 installer defect, which had made every fresh
+Windows install unstartable, and it is the last thing that was blocking a
+release.
+Still open for phase 5, none of it blocking: the `.deb` sequence on
+Debian/Ubuntu (verified on nothing so far, unlike the `.rpm`), and on Windows
+the upgrade cycle, the uninstall path and a non-admin install being refused.
+The Windows upgrade is the one worth doing first — its Linux equivalent found
+a real defect, and the MSI's `secure-datadir` custom action is sequenced to
+run on upgrade and repair without anything having exercised it.
 
 ## Phases
 
@@ -687,7 +703,11 @@ Unchanged, plus:
 - [x] `.msi` via WiX (`packaging/windows/smtprelayd.wxs`), ACLs
       `%ProgramData%\SMTPRelayd` to Administrators + the virtual service
       account only, no inherited access; registers but does not start the
-      service — **tested on real Windows machine, install/uninstall/start/stop all work**
+      service — **first install verified on real Windows hardware 2026-08-12**:
+      install, files in place, service registered as `NT SERVICE\smtprelayd`
+      and not running, configure, `check`, start, log line, stop. Uninstall and
+      the upgrade path are **not** verified; this line claimed both until
+      2026-08-12 and never had evidence for either
 - [x] `.github/workflows/release.yml`: builds, tests, SBOM, all three package
       formats, SHA-256 checksums, build provenance attestation, `gh release
       create` — no third-party release action
@@ -696,7 +716,12 @@ Unchanged, plus:
       NT SERVICE\smtprelayd, protected from inheritance); whitelisted exception
       for unsafe.Pointer usage in trust_windows.go for LocalFree API call
 - [x] Real end-to-end test of install → configure → start → stop on Windows
-- [ ] Upgrade cycle test and Linux install → configure → start → stop cycle
+      (2026-08-12, from an MSI built after the `secure-datadir` fix)
+- [ ] Windows upgrade cycle (version B's MSI over a running version A), the
+      uninstall path, and a non-admin install being refused rather than
+      silently degraded
+- [ ] Linux `.deb` install → configure → start → stop cycle on Debian/Ubuntu
+      (the `.rpm` path is fully verified on Fedora, the `.deb` on nothing)
 - [x] CI workflow that runs on every push/PR (`.github/workflows/ci.yml`):
       gofmt, vet, `go test -race`, the banned-import check and govulncheck,
       plus a cross-compile job for all three targets
@@ -967,10 +992,21 @@ icacls "C:\ProgramData\SMTPRelayd" /grant "NT SERVICE\smtprelayd:(OI)(CI)F" /T /
 grant covers the directory itself but not files created in it later, so the
 service still cannot write its log despite appearing to own the directory.
 
-Not verified on hardware yet: the fix is written against the field-verified
-end state above, but no MSI has been built and installed from this revision.
-Phase 5 checklist item `icacls C:\ProgramData\SMTPRelayd` stays open until
-it has.
+**Verified on hardware 2026-08-12.** An MSI built after this fix installs and
+the service reaches RUNNING, which is the proof that matters: `CheckDataDirACL`
+aborts startup on a DACL still inheriting from `%ProgramData%`, so a service
+that starts is a directory that passed. Before the fix, no fresh install ever
+did. Also confirmed on that machine: the service runs as
+`NT SERVICE\smtprelayd`, not Local System.
+
+What the start does *not* prove is that nothing else was granted alongside the
+two expected ACEs — the check verifies the DACL is protected and carries the
+service account, not that it is minimal. Reading the `icacls` output once is
+still worth doing next time someone is at that machine.
+
+The `secure-datadir` custom action is sequenced to run on repair and upgrade
+as well, and neither has been exercised. That is the open half of this defect,
+tracked in the phase 5 checklist rather than here.
 
 ## Open questions
 

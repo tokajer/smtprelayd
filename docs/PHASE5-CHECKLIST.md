@@ -7,29 +7,46 @@ section is done, this file is not itself the handover document.
 
 ## Windows: manual install/uninstall/upgrade test
 
-Only doable on a real Windows machine.
+Only doable on a real Windows machine. Run on hardware on 2026-08-12: the
+**first-install path is verified end to end**, which is what the 2026-08-11
+installer defect blocked — no Windows install had passed `CheckDataDirACL`
+since that check landed. Ticked below only where there was evidence, not
+where it was likely; the upgrade, the uninstall and the non-admin refusal were
+not exercised and stay open.
 
-- [ ] Build `smtprelayd-<version>-amd64.msi` (from a `release.yml` run, or
+- [x] Build `smtprelayd-<version>-amd64.msi` (from a `release.yml` run, or
       locally with `candle.exe`/`light.exe` per the comment at the top of
       `packaging/windows/smtprelayd.wxs`)
 - [ ] Install requires an elevated prompt (UAC) — confirm a non-admin run is
       refused, not silently degraded
-- [ ] `smtprelayd.exe` present under `C:\Program Files\SMTPRelayd\`
-- [ ] `smtprelayd.toml.example` present under `C:\ProgramData\SMTPRelayd\`
-- [ ] `icacls C:\ProgramData\SMTPRelayd` shows only Administrators and
-      `NT SERVICE\smtprelayd`, no inherited entries from `C:\ProgramData`
-- [ ] `sc.exe query smtprelayd` shows the service registered, start type
+- [x] `smtprelayd.exe` present under `C:\Program Files\SMTPRelayd\`
+- [x] `smtprelayd.toml.example` present under `C:\ProgramData\SMTPRelayd\`
+- [x] `icacls C:\ProgramData\SMTPRelayd` shows only Administrators and
+      `NT SERVICE\smtprelayd`, no inherited entries from `C:\ProgramData`.
+      **Established transitively, not read off `icacls` directly**: the
+      service reached RUNNING, and `CheckDataDirACL` aborts startup on a DACL
+      that still inherits from `%ProgramData%` — which is exactly how the
+      2026-08-11 defect announced itself. A service that starts is therefore
+      a directory that passed the check. Worth reading the `icacls` output
+      once anyway when someone is next at that machine, since the check
+      proves the DACL is protected and grants the service account, not that
+      nothing else was granted alongside
+- [x] `sc.exe query smtprelayd` shows the service registered, start type
       Automatic, **not** running
-- [ ] Services console: "Log On As" for the service is
+- [x] Services console: "Log On As" for the service is
       `NT SERVICE\smtprelayd`, not Local System
-- [ ] Copy the example config to `smtprelayd.toml`, edit it, then:
+- [x] Copy the example config to `smtprelayd.toml`, edit it, then:
       `smtprelayd.exe -config C:\ProgramData\SMTPRelayd\smtprelayd.toml check`
-- [ ] `sc.exe start smtprelayd` — service reaches RUNNING
-- [ ] A log line ("starting", version, config path) appears where configured
-- [ ] `sc.exe stop smtprelayd` — service reaches STOPPED within a few seconds
+- [x] `sc.exe start smtprelayd` — service reaches RUNNING
+- [x] A log line ("starting", version, config path) appears where configured
+- [x] `sc.exe stop smtprelayd` — service reaches STOPPED within a few seconds
 - [ ] Install version B's MSI over a running version A (same `UpgradeCode`):
       no duplicate service, service registration and running/stopped state
-      untouched by the upgrade, binary on disk replaced
+      untouched by the upgrade, binary on disk replaced.
+      The Linux equivalent found a real defect (an upgraded package left the
+      old binary running), so this is not a formality — and the MSI's
+      `secure-datadir` custom action is sequenced to run on upgrade and
+      repair too, which nothing has exercised yet
 - [ ] Uninstall: service no longer listed in `sc.exe query`, Program Files
       folder removed
 - [ ] Uninstall with spool/history files present in `C:\ProgramData\SMTPRelayd`:
