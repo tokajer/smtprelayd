@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 )
@@ -716,5 +717,34 @@ func TestFindBouncesClassIsTheFinalAttempt(t *testing.T) {
 		t.Fatal(err)
 	} else if len(got) != 0 {
 		t.Errorf("an earlier temporary attempt matched the class filter: %d rows", len(got))
+	}
+}
+
+// The DSN carried `_journal_mode=WAL` for months while the database ran in
+// rollback-journal mode, because modernc's driver reads only `_pragma=`. That
+// is the failure this test exists for: not "is WAL a good idea" but "did the
+// setting take effect at all". Asserting the mode from the database itself is
+// the only way to tell the two apart.
+func TestJournalModeIsActuallyWAL(t *testing.T) {
+	s := testStore(t)
+	var mode string
+	if err := s.db.QueryRow(`PRAGMA journal_mode`).Scan(&mode); err != nil {
+		t.Fatalf("reading journal_mode: %v", err)
+	}
+	if !strings.EqualFold(mode, "wal") {
+		t.Fatalf("journal_mode is %q, want wal — the DSN pragma did not take effect", mode)
+	}
+}
+
+// Foreign keys are the other setting that only works because it is spelled as
+// a pragma, and the retention cascade silently stops working without it.
+func TestForeignKeysAreOn(t *testing.T) {
+	s := testStore(t)
+	var on int
+	if err := s.db.QueryRow(`PRAGMA foreign_keys`).Scan(&on); err != nil {
+		t.Fatalf("reading foreign_keys: %v", err)
+	}
+	if on != 1 {
+		t.Fatal("foreign_keys is off; ON DELETE CASCADE would be a no-op")
 	}
 }

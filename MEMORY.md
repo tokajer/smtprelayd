@@ -52,7 +52,7 @@ libraries that do not exist understated it in the one direction that matters.
 | Service wrapper | `github.com/kardianos/service`, Windows-only | Its systemd backend shells out to `systemctl` via `os/exec`, which section 9 bans; imported only from a `_windows.go` file so that backend is never compiled in. Linux runs under the packaged systemd unit directly, no self-registration code needed |
 | Config | TOML via `github.com/BurntSushi/toml` | Comments allowed, readable for operators |
 | History store | `modernc.org/sqlite` | **Pure Go**, no cgo, keeps Windows builds trivial. Its `modernc.org/libc` runtime imports `os/exec` on every GOOS for the C `system()`/`popen()` shims; the SQLite amalgamation never calls either (`system()` belongs to the sqlite3 CLI, not the library), so the code is linked but unreachable. Recorded decision, 2026-08-11: this is the **only** accepted `os/exec` importer, named explicitly in `scripts/check-banned-imports.sh` |
-| Logging | stdlib `log/slog` (JSON) + `github.com/natefinch/lumberjack` | Structured, rotating, no external agent. The import path is the v1 module, not the `gopkg.in/...v2` path this row named until 2026-08-11 |
+| Logging | stdlib `log/slog` (JSON) + `gopkg.in/natefinch/lumberjack.v2` | Structured, rotating, no external agent. The import path settled on 2026-08-12 and the history is worth keeping straight: this row named the `gopkg.in/...v2` path while the code imported `github.com/natefinch/lumberjack v2.0.0+incompatible`, so on 2026-08-11 the row was corrected to describe the tree. The code then moved to the path the row had originally named — not a reversal but the other half of the same fix: the `gopkg.in` module is the properly versioned one with its own `go.mod`, and `+incompatible` dragged two test-only modules into the graph that nothing needed. The API is field-identical, so the change is one import line |
 | Dashboard | Go `html/template` + CSS, embedded via `embed.FS` | No Node build step, ships inside the binary. The 2026-08-07 decision was `html/template` plus htmx; phase 4c needed no client-side behaviour, so htmx was never added and the dashboard carries no JavaScript at all. Adding it later is still open, and the CSP would have to allow it. Its appearance is themeable from `[web.theme]` (2026-08-11): CSS custom properties, one generated override block appended to the stylesheet, hex colours only — see `docs/EXPLOIT-SURFACE.md` section 8. Light and dark come from `prefers-color-scheme` and a `data-theme` attribute, still without JavaScript |
 | TLS | stdlib `crypto/tls` | No OpenSSL linkage |
 
@@ -313,7 +313,16 @@ The load-bearing principles:
 - Windows: installs as a service via the SCM, data under
   `%ProgramData%\SMTPRelayd`, additional logging to the Windows Event Log.
 - Linux: systemd unit, data under `/var/lib/smtprelayd`, config in
-  `/etc/smtprelayd`, logging to journald plus file.
+  `/etc/smtprelayd`. Logging goes to a rotated file under the data directory,
+  not to journald — corrected 2026-08-12, this line claimed both and the
+  packaged unit never passed `-console`. What does reach journald is every
+  startup failure, because those are written to stderr before the file logger
+  exists, so a unit that will not come up is diagnosable with `journalctl`
+  alone. `-console` in the unit mirrors the full log into journald and is
+  documented there as an option rather than made the default: journald rate
+  limits and drops the excess, which would make the copy an operator reaches
+  for first the incomplete one during exactly the mail burst worth reading
+  about.
 - Never store state next to the binary.
 - Configuration reload without restart: SIGHUP on Linux, a service control code
   or a dashboard action on Windows. Listener socket changes require a restart

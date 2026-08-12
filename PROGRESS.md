@@ -63,15 +63,30 @@ build under Go 1.26; v2.28.0 is pinned.
 `gofmt`, `go vet` (both GOOS), `go test ./...`, `go test -race ./...`, all
 three cross-builds, `scripts/check-banned-imports.sh`, `govulncheck` v1.6.0
 and `gosec` v2.28.0 all clean.
-**Left open deliberately**: `internal/logging` still imports
-`github.com/natefinch/lumberjack v2.0.0+incompatible`. `go mod tidy` removed
-the dead v3 alpha but added `gopkg.in/natefinch/lumberjack.v2` and
-`gopkg.in/yaml.v2` as indirect, because tidy covers the tests of imported
-packages and lumberjack's own tests import both. Neither reaches the binary
-(checked with `go list -deps` per GOOS) and `make sbom` is binary-scoped, so
-nothing is actually affected. Moving to the canonical
-`gopkg.in/natefinch/lumberjack.v2` module would remove the pair outright —
-that is a dependency swap and wants its own decision.
+**Same session, three deferred decisions taken**, all small, none blocking:
+- **Logging stays file-only on Linux**; `MEMORY.md` section 10 claimed
+  "journald plus file" and was wrong. `-console` is now documented in the
+  packaged unit as the way to mirror into journald, deliberately not the
+  default: journald rate limits (1000 messages per 30 s) and drops the excess,
+  so under a mail burst the copy an operator reads first would be the
+  incomplete one. Startup failures reach journald regardless — they are
+  written to stderr before the file logger exists.
+- **WAL is on**, via `_pragma=journal_mode(WAL)`, the spelling modernc's
+  driver actually reads. A test reads `PRAGMA journal_mode` back from the
+  database, and was confirmed to fail against the old DSN spelling before
+  being trusted. Verified live: `history.db-wal` and `history.db-shm` now
+  appear, both 0600 — the sidecar permission handling in `Store.Open` had been
+  written speculatively and had never once run.
+- **`internal/logging` moved to `gopkg.in/natefinch/lumberjack.v2` v2.2.1**
+  from `github.com/natefinch/lumberjack v2.0.0+incompatible`. The API is
+  field-identical, so it is one import line; the win is a properly versioned
+  module with its own `go.mod` and the removal of three entries from the graph
+  (`+incompatible` plus the two test-only indirects the previous tidy pulled
+  in). `internal/logging` had no tests at all, which is how the module could
+  have been swapped for a stub and still passed CI — it now has four, covering
+  0600 on creation, restricting a pre-existing 0644 file, that rotation
+  actually produces a backup file, and that secret redaction survives the
+  writer setup.
 **Previous session**: 2026-08-11 (seventeenth session) — Second full-tree security
 review, no phase work and **no code changed**. Requested as "prüfe mir das
 ganze auf Schwachstellen und Sicherheit". Eleven findings, all open, written
@@ -547,8 +562,12 @@ upgrade that restarts the running service into the new binary, `dnf remove`
 that keeps the data and the service account, and a reinstall onto the
 surviving data directory. Two things were found and fixed along the way: the
 missing restart on upgrade (see Open defects) and the misleading first-install
-text on an upgrade. One open decision: the relay's own startup line goes to
-the log file, never to journald, while `MEMORY.md` section 10 claims both.
+text on an upgrade. That left one open decision, **answered 2026-08-12**: the relay's own
+startup line goes to the log file and never to journald, while `MEMORY.md`
+section 10 claimed both. The documentation was wrong, not the unit — the file
+stays authoritative and `-console` is documented in the unit as the way to
+mirror into journald, deliberately not enabled by default because journald
+rate limits and drops the excess.
 The **Windows MSI was installed on hardware on 2026-08-12** and the
 first-install path works end to end — install, service registered as
 `NT SERVICE\smtprelayd` and not running, configure, `check`, start, log line,
@@ -853,14 +872,16 @@ below date from that review.
    comment on `receivedHeader` now says CR/LF/NUL rather than "control
    character", which is what is actually verified.
 
-**Found while fixing 4, not part of the review**: `Store.Open`'s DSN carries
-`_journal_mode=WAL`, but modernc's driver only reads `_pragma=`, so the
-history database has always run in the default rollback-journal mode. Verified
-against a live instance: `PRAGMA journal_mode` returns `delete`. Left as it
-is and noted in the code — switching to WAL changes on-disk and crash
-behaviour and is not a change to make as a side effect of a permissions fix.
-It is the same "looks configured but does nothing" class the strict TOML
-decoding exists to prevent, one layer below where that decoding can see.
+**Found while fixing 4, not part of the review; resolved 2026-08-12**:
+`Store.Open`'s DSN carried `_journal_mode=WAL`, but modernc's driver only
+reads `_pragma=`, so the history database had always run in the default
+rollback-journal mode. It was the same "looks configured but does nothing"
+class the strict TOML decoding exists to prevent, one layer below where that
+decoding can see. WAL is now actually on, via `_pragma=journal_mode(WAL)`, and
+a test reads `PRAGMA journal_mode` back from the database rather than trusting
+the DSN — the point being that the old spelling compiled, connected and did
+nothing, so only the database itself can say which of the two is in effect.
+Confirmed the test fails against the old spelling before trusting it.
 
 Confirmed solid in that review and not worth re-auditing: `ca_pin` on
 `VerifyConnection`/`VerifiedChains`, the `authms365` token endpoint, fully
@@ -1025,10 +1046,13 @@ tracked in the phase 5 checklist rather than here.
   is now loopback-only, so the API is too until that login exists. The API
   itself is token-authenticated and would be safe to expose; the dashboard on
   the same listener is what is not.
-- Should the history database be switched to WAL journal mode? `Store.Open`'s DSN says
-  `_journal_mode=WAL` but modernc's driver ignores it, so the history database
-  has always used the rollback journal. Changing it alters crash behaviour, so
-  it wants a decision rather than a quiet fix.
+- ~~Should the history database be switched to WAL journal mode?~~
+  **Answered 2026-08-12**: yes, and it is on. Readers no longer block the
+  writer, which matters because the dashboard and the API query this database
+  while the listener and the delivery manager record into it. The cost is that
+  the `-wal` sidecar carries committed rows the `.db` alone does not, so a
+  backup copying only the main file loses the most recent ones — acceptable
+  for a metadata journal, and it would not be for the spool.
 - A Postfix `main.cf` importer (`smtprelayd import-postfix`) was raised as a
   migration path. Scoped as a one-shot converter with an explicit report of
   what could not be translated, never a runtime parser. Not yet planned into a
@@ -1141,3 +1165,8 @@ tracked in the phase 5 checklist rather than here.
 | 2026-08-12 | A negative value for any limit that reads zero as "unlimited" is a startup error | `rateLimiter.allow`, `connCounter.acquire` and `Spool.SetQuota` all treat a non-positive limit as no limit, so a mistyped minus sign switched the control off while reading as though it were configured — the same trap strict TOML decoding exists to close, one layer below where decoding can see it. Zero stays legal so "no limit" is still sayable, just not reachable by accident |
 | 2026-08-12 | Both workflows raised to Go 1.25 rather than lowering `go.mod` | `golang.org/x/sys` v0.47.0 declares `go 1.25.0` itself, and that is the module `internal/config/trust_windows.go` needs for the Windows DACL check, so lowering `go.mod` would have forced a dependency downgrade in precisely the wrong place. A pin below the `go` directive never lowered the toolchain anyway — `GOTOOLCHAIN=auto` downloaded a newer one — it only stopped describing what produced the release binaries |
 | 2026-08-12 | gosec runs with no excluded rule and no skipped directory; the fifteen exceptions are `#nosec` annotations at the line they apply to | An excluded rule keeps passing silently when a later change breaks the property that justified excluding it. An annotation at the line names that property — a validated queue ID, an `O_NOFOLLOW` open, a bound SQL value — and fails the build when the line moves out from under it. The one gosec finding that was not an exception was fixed as a simplification instead |
+| 2026-08-12 | Linux logs to the rotated file only; `-console` is documented in the unit rather than enabled | `MEMORY.md` section 10 claimed "journald plus file" and the packaged unit never passed `-console`, so the documentation was the thing that was wrong. Mirroring into journald was rejected as a default because journald rate limits and *drops* the excess — under a mail burst the copy an operator reaches for first would be the incomplete one, and a relay's log is an audit trail. Startup failures reach journald anyway, on stderr before the file logger exists, so a unit that will not come up is still diagnosable with `journalctl` alone |
+| 2026-08-12 | The history database runs in WAL journal mode, spelled `_pragma=journal_mode(WAL)` | Readers do not block the writer under WAL, and reading while writing is this database's normal state: the dashboard and API query it while the listener and delivery manager record into it. The cost is a `-wal` sidecar holding committed rows the `.db` alone does not, so a backup copying only the main file loses the most recent — acceptable for a metadata journal and not for the spool, which is where mail the relay took responsibility for actually lives |
+| 2026-08-12 | The journal mode is asserted by reading `PRAGMA journal_mode` back from the database, not by inspecting the DSN | The DSN said `_journal_mode=WAL` for months while the database ran in rollback mode, because modernc's driver reads only `_pragma=`. That spelling compiled, connected and did nothing, so only the database itself can distinguish the two. The test was confirmed to fail against the old spelling before being trusted |
+| 2026-08-12 | `internal/logging` imports `gopkg.in/natefinch/lumberjack.v2`, not `github.com/natefinch/lumberjack v2.0.0+incompatible` | Same library, field-identical API, one import line. The `gopkg.in` path is the properly versioned module with its own `go.mod`; `+incompatible` also dragged two test-only modules into the graph, since `go mod tidy` covers the tests of imported packages. Net three entries removed from `go.mod` |
+| 2026-08-12 | `internal/logging` got its first tests as part of that swap | The package had none, so the rotation dependency could have been replaced with a stub and CI would still have passed. The four now cover what the package is actually responsible for: 0600 on creation, restricting a file an earlier version left 0644, rotation producing a real backup file, and secret redaction surviving the writer setup |

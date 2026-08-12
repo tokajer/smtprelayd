@@ -14,6 +14,13 @@ StartLimitBurst=5
 [Service]
 # Type=exec, not Type=notify: the binary does not send sd_notify(READY=1) yet.
 Type=exec
+# The rotated file under service.data_dir is the authoritative log; append
+# -console here to mirror every line into journald as well. Deliberately not
+# the default: journald rate limits (RateLimitBurst, 1000 messages per 30 s by
+# default) and drops what exceeds it, so under a mail burst the copy an
+# operator is most likely to read would be the incomplete one. Startup
+# failures reach journald regardless — they happen on stderr before the file
+# logger exists.
 ExecStart=/usr/sbin/smtprelayd -config /etc/smtprelayd/smtprelayd.toml run
 User=smtprelayd
 Group=smtprelayd

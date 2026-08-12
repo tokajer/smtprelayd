@@ -172,7 +172,7 @@ Direct third-party dependencies, all pure Go and compatible with the GPL:
 |---|---|---|
 | `github.com/BurntSushi/toml` | Configuration file parsing | MIT |
 | `modernc.org/sqlite` | History store, no cgo | BSD-3-Clause |
-| `github.com/natefinch/lumberjack` | Log rotation | MIT |
+| `gopkg.in/natefinch/lumberjack.v2` | Log rotation | MIT |
 | `github.com/kardianos/service` | Windows service registration (Windows-only build tag; its Linux backend, which shells out via `os/exec`, is never compiled in) | zlib |
 
 ## If you like my work you can

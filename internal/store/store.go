@@ -41,12 +41,22 @@ func Open(dataDir string, log *slog.Logger, retentionDays int, retainSubjects bo
 	}
 
 	dbPath := filepath.Join(spoolDir, "history.db")
-	// Note, 2026-08-11: `_journal_mode=WAL` does nothing. modernc's driver
-	// only reads `_pragma=`, so the database has always run in the default
-	// rollback-journal mode despite this parameter. Left as it is pending a
-	// decision — switching to WAL changes on-disk behaviour and is not a
-	// change to make as a side effect of a permissions fix.
-	connStr := "file:" + dbPath + "?cache=shared&mode=rwc&_journal_mode=WAL&_pragma=foreign_keys(1)"
+	// WAL, decided 2026-08-12. Until then the DSN carried
+	// `_journal_mode=WAL`, which modernc's driver ignores — it reads only
+	// `_pragma=` — so the database had always run in the default
+	// rollback-journal mode while appearing to be configured otherwise.
+	//
+	// WAL rather than the rollback journal because readers do not block the
+	// writer under it, and reading while writing is this database's normal
+	// state: the dashboard and the API query it while the listener and the
+	// delivery manager record into it. The cost is that the `-wal` sidecar
+	// carries committed transactions the `.db` alone does not, so a backup
+	// that copies only the main file loses the most recent rows. That is
+	// acceptable here and nowhere else in the tree: the spool is what holds
+	// mail the relay took responsibility for, and this database is a metadata
+	// journal about it.
+	connStr := "file:" + dbPath + "?cache=shared&mode=rwc" +
+		"&_pragma=foreign_keys(1)&_pragma=journal_mode(WAL)"
 	db, err := sql.Open("sqlite", connStr)
 	if err != nil {
 		return nil, fmt.Errorf("store: open database: %w", err)
