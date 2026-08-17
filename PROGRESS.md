@@ -13,10 +13,37 @@ rewriting, recipient routing) remains complete and compiles clean. Packaging
 and the Windows service wrapper (normally phase 5) were pulled forward and
 validated. The MSI's **first-install path is verified on hardware**
 (2026-08-12): install → configure → `check` → start → stop, with the service
-running as `NT SERVICE\smtprelayd`. Its upgrade and uninstall paths are not
-verified — this line claimed they were until 2026-08-12. Log rotation and
-Windows ACL verification at startup are complete.
-**Last session**: 2026-08-12 (eighteenth session) — **All eleven findings of the
+running as `NT SERVICE\smtprelayd`. Its upgrade path had a defect fixed in the
+nineteenth session (below) but **not yet verified on hardware**; uninstall
+remains unverified too. Log rotation and Windows ACL verification at startup
+are complete.
+**Last session**: 2026-08-17 (nineteenth session) — Two field-triggered fixes,
+no phase work. First: "auf windows bricht das drüber installieren mit einem
+Fehler ab" — the MSI's `StopServiceCA` was conditioned on `REMOVE="ALL" AND
+NOT UPGRADINGPRODUCTCODE`, meant only to skip *unregistering* the service
+during a major upgrade, but that same condition also skipped *stopping* it.
+`UPGRADINGPRODUCTCODE` is true for the whole `RemoveExistingProducts` run, so
+on every upgrade the old service kept running, held its lock on
+`smtprelayd.exe`, and `RemoveFiles`/`InstallFiles` failed to replace it —
+exactly the reported install-over-existing failure. Split the two actions:
+`StopServiceCA` now runs on any `REMOVE="ALL"` (plain uninstall and the old
+side of an upgrade alike); `UninstallServiceCA` keeps the
+`NOT UPGRADINGPRODUCTCODE` guard, so the SCM registration still survives an
+upgrade. Not yet verified on real hardware — reasoned from the WiX/MSI
+execute-sequence semantics and the existing (verified) first-install
+behaviour, not from a build-and-install cycle; the Windows upgrade cycle in
+the phase 5 checklist below stays open until that happens.
+Second, from a pasted CI log: `govulncheck` reported six stdlib
+vulnerabilities (`net/url` quadratic complexity, `html/template` JS context
+tracking, `crypto/tls` post-handshake message limits, `net/http` H2C
+timeout, `encoding/asn1` recursion depth, `x/net/idna` punycode), all fixed
+in `go1.25.13`; CI was still resolving `GO_VERSION: "1.25"` to `1.25.12`.
+No application code was implicated. Per the existing note in `ci.yml` that a
+pin must not describe a toolchain that never ran, bumped `go.mod`'s `go`
+directive and both workflows' `GO_VERSION` to the exact `1.25.13`, rather
+than leave the pin floating on the minor version. Verified locally:
+`GOTOOLCHAIN=go1.25.13 go build ./...` and `go vet ./...` both clean.
+**Previous session**: 2026-08-12 (eighteenth session) — **All eleven findings of the
 second security review closed**, and separately the **Windows MSI was installed
 on hardware and works**, which closes the 2026-08-11 installer defect that had
 made every fresh Windows install unstartable. Details of the MSI run are under
@@ -726,7 +753,11 @@ Unchanged, plus:
       install, files in place, service registered as `NT SERVICE\smtprelayd`
       and not running, configure, `check`, start, log line, stop. Uninstall and
       the upgrade path are **not** verified; this line claimed both until
-      2026-08-12 and never had evidence for either
+      2026-08-12 and never had evidence for either. The upgrade path had a
+      defect fixed 2026-08-17 (a running service locked `smtprelayd.exe`,
+      failing every install-over-existing) but the fix itself is reasoned
+      from MSI semantics, not yet run on hardware — see the nineteenth
+      session above
 - [x] `.github/workflows/release.yml`: builds, tests, SBOM, all three package
       formats, SHA-256 checksums, build provenance attestation, `gh release
       create` — no third-party release action
