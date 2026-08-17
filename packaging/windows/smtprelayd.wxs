@@ -101,7 +101,12 @@
            repair and upgrade as well: an ACL widened by hand between versions
            is exactly the case that must be repaired. -->
       <Custom Action="SecureDataDirCA" After="InstallServiceCA">NOT REMOVE="ALL"</Custom>
-      <Custom Action="StopServiceCA" Before="RemoveFiles">REMOVE="ALL" AND NOT UPGRADINGPRODUCTCODE</Custom>
+      <!-- Runs on a plain uninstall AND on the old side of a major upgrade:
+           the running service locks smtprelayd.exe, so it must be stopped
+           before RemoveFiles or the subsequent InstallFiles of the new
+           version fails to replace the binary. Only the registration
+           removal below is skipped during an upgrade. -->
+      <Custom Action="StopServiceCA" Before="RemoveFiles">REMOVE="ALL"</Custom>
       <Custom Action="UninstallServiceCA" After="StopServiceCA">REMOVE="ALL" AND NOT UPGRADINGPRODUCTCODE</Custom>
     </InstallExecuteSequence>
 
