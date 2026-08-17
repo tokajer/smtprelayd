@@ -18,7 +18,7 @@ env:
   # against 1.25.0 there) the default GOTOOLCHAIN=auto silently downloaded
   # whatever 1.25.x the proxy served, so the pin described a toolchain that
   # never ran and the binaries were produced by an unpinned one.
-  GO_VERSION: "1.25"
+  GO_VERSION: "1.25.13"
   GOVULNCHECK_VERSION: "v1.6.0"
   GOSEC_VERSION: "v2.28.0"
 

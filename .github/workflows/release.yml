@@ -23,7 +23,7 @@ env:
   # Keep in step with go.mod's `go` directive and with ci.yml. A pin below it
   # does not lower the toolchain -- GOTOOLCHAIN=auto downloads a newer one --
   # it only stops describing what actually produced the release binaries.
-  GO_VERSION: "1.25"
+  GO_VERSION: "1.25.13"
   NFPM_VERSION: "v2.47.0"
   GOVULNCHECK_VERSION: "v1.6.0"
   CYCLONEDX_VERSION: "v1.10.0"
