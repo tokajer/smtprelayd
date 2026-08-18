@@ -1,5 +1,7 @@
 # smtprelayd — Open Source SMTP Relay for Windows & Linux
 
+[![GitHub all releases](https://img.shields.io/github/downloads/tokajer/smtprelayd/total)](https://github.com/tokajer/smtprelayd/releases)
+
 Accepts mail from printers, ERP systems and monitoring on the local network and
 forwards it to a smarthost — primarily Microsoft 365 using OAuth2 / XOAUTH2.
 Runs as a Windows service or a systemd unit from a single static binary, with
