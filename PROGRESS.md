@@ -13,11 +13,37 @@ rewriting, recipient routing) remains complete and compiles clean. Packaging
 and the Windows service wrapper (normally phase 5) were pulled forward and
 validated. The MSI's **first-install path is verified on hardware**
 (2026-08-12): install → configure → `check` → start → stop, with the service
-running as `NT SERVICE\smtprelayd`. Its upgrade path had a defect fixed in the
-nineteenth session (below) but **not yet verified on hardware**; uninstall
-remains unverified too. Log rotation and Windows ACL verification at startup
-are complete.
-**Last session**: 2026-08-17 (nineteenth session) — Two field-triggered fixes,
+running as `NT SERVICE\smtprelayd`. Its upgrade path had two distinct defects,
+fixed in the nineteenth and twentieth sessions (below) but **not yet verified
+on hardware** end to end; uninstall remains unverified too. Log rotation and
+Windows ACL verification at startup are complete.
+**Last session**: 2026-08-18 (twentieth session) — Field fix, no phase work.
+Reported as "der windows installer bricht ab beim aktualisieren", this time
+with a verbose MSI log (`msiexec /L*v`) from an actual upgrade attempt
+(0.2.6 → 0.2.8) rather than reasoning alone. A second, independent defect
+from the one the nineteenth session fixed: `InstallServiceCA` is conditioned
+on `NOT Installed AND NOT UPGRADINGPRODUCTCODE`, meant to run only on a
+genuinely fresh install and never during an upgrade. But `UPGRADINGPRODUCTCODE`
+is only ever set by the engine in the *nested* `RemoveExistingProducts` call
+that removes the old product — never in the new product's own execute
+sequence — so `NOT UPGRADINGPRODUCTCODE` was unconditionally true there, and
+`InstallServiceCA` ran on every upgrade, not only fresh installs. Since the
+old product's `UninstallServiceCA` deliberately leaves the SCM registration
+in place across an upgrade (correct, existing behaviour), the new product's
+`InstallServiceCA` then tried to register a service that already existed;
+`smtprelayd.exe install` returned exit code 1, which MSI surfaces as
+Error 1722 on `InstallFinalize`, rolling the whole transaction back to
+Error 1603. Confirmed directly from the pasted log: `StopServiceCA` and
+`UninstallServiceCA` correctly skipped in the old product's nested removal,
+files replaced cleanly, then `InstallServiceCA` executed regardless and
+failed. Fixed by conditioning on `WIX_UPGRADE_DETECTED` instead — the
+property WiX's `MajorUpgrade`/`FindRelatedProducts` sets (and propagates as
+a secure property) in the *new* product's own sequence when an earlier
+version is present, unlike `UPGRADINGPRODUCTCODE`. Not yet verified on real
+hardware — no WiX toolchain on this machine to rebuild the MSI; the Windows
+upgrade cycle in the phase 5 checklist below stays open until a rebuilt MSI
+is exercised on a real upgrade.
+**Previous session**: 2026-08-17 (nineteenth session) — Two field-triggered fixes,
 no phase work. First: "auf windows bricht das drüber installieren mit einem
 Fehler ab" — the MSI's `StopServiceCA` was conditioned on `REMOVE="ALL" AND
 NOT UPGRADINGPRODUCTCODE`, meant only to skip *unregistering* the service

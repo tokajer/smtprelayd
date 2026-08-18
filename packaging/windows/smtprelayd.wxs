@@ -93,9 +93,20 @@
 
     <InstallExecuteSequence>
       <!-- Only on a genuinely fresh install: never on repair (Installed is
-           already set) and never on the old side of a major upgrade, so an
-           in-place version bump does not stop and re-register the service. -->
-      <Custom Action="InstallServiceCA" After="InstallFiles">NOT Installed AND NOT UPGRADINGPRODUCTCODE</Custom>
+           already set) and never when upgrading an earlier version, so an
+           in-place version bump does not re-register a service the SCM
+           already holds. UPGRADINGPRODUCTCODE is not usable here: the engine
+           only sets it in the nested RemoveExistingProducts call that
+           removes the *old* product, never in this (the new product's) own
+           execute sequence, so "NOT UPGRADINGPRODUCTCODE" was always true
+           here and this action ran on every upgrade too -- which is exactly
+           what broke the 2026-08-18 upgrade, since the old registration is
+           deliberately left in place by UninstallServiceCA below and
+           "install" over an existing registration fails.
+           WIX_UPGRADE_DETECTED is the property MajorUpgrade's FindRelatedProducts
+           sets (and propagates as a secure property) in this product's own
+           sequence when an earlier version is present. -->
+      <Custom Action="InstallServiceCA" After="InstallFiles">NOT Installed AND NOT WIX_UPGRADE_DETECTED</Custom>
       <!-- After InstallServiceCA, because the ACE for the NT SERVICE\smtprelayd
            virtual account can only be resolved once the service exists. Runs on
            repair and upgrade as well: an ACL widened by hand between versions
