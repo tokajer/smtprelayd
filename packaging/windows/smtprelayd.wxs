@@ -99,7 +99,7 @@
            only sets it in the nested RemoveExistingProducts call that
            removes the *old* product, never in this (the new product's) own
            execute sequence, so "NOT UPGRADINGPRODUCTCODE" was always true
-           here and this action ran on every upgrade too -- which is exactly
+           here and this action ran on every upgrade too, which is exactly
            what broke the 2026-08-18 upgrade, since the old registration is
            deliberately left in place by UninstallServiceCA below and
            "install" over an existing registration fails.

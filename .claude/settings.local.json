@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(xmllint --noout /var/home/tokajer/Dokumente/GitHub/smtprelayd/packaging/windows/smtprelayd.wxs)"
+    ]
+  }
+}
