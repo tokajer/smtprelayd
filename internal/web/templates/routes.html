@@ -1,6 +1,6 @@
 {{define "content"}}
 <h1>Routes</h1>
-<div class="table-wrap">
+<div class="table-wrap" id="routes-live" hx-get="{{.CurrentURL}}" hx-trigger="every 10s" hx-select="#routes-live" hx-target="#routes-live" hx-swap="outerHTML">
 <table>
 <thead><tr>
 	<th>Route</th><th>Queued</th><th>Deferred</th><th>Delivered</th><th>Bounced</th>

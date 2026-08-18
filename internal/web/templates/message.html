@@ -1,4 +1,5 @@
 {{define "content"}}
+<div id="message-live"{{if .Message}} hx-get="{{.CurrentURL}}" hx-trigger="every 10s" hx-select="#message-live" hx-target="#message-live" hx-swap="outerHTML"{{end}}>
 {{if not .Message}}
 <h1>Message not found</h1>
 <p class="empty">No message with this queue ID exists in the history store.</p>
@@ -57,4 +58,5 @@
 </table>
 </div>
 {{end}}
+</div>
 {{end}}

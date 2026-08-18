@@ -139,7 +139,7 @@ func TestSecurityHeadersOnEveryPage(t *testing.T) {
 	for _, path := range []string{"/queue", "/search", "/bounces", "/routes", "/config"} {
 		rec := get(t, h, path)
 		for header, want := range map[string]string{
-			"Content-Security-Policy": "default-src 'self'; frame-ancestors 'none'",
+			"Content-Security-Policy": "default-src 'self'; script-src 'self'; frame-ancestors 'none'",
 			"X-Content-Type-Options":  "nosniff",
 			"X-Frame-Options":         "DENY",
 			"Referrer-Policy":         "strict-origin-when-cross-origin",

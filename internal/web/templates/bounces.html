@@ -32,7 +32,11 @@
 	<button type="submit">Search</button>
 </form>
 {{if .FilterError}}<p class="notice">{{.FilterError}}</p>{{end}}
-<div class="table-wrap">
+{{/* Only this table (not the filter form above) polls: it re-fetches
+     .CurrentURL, which already carries the submitted filters, so a refresh
+     re-runs the same search rather than resetting it, and never touches
+     text the operator is still typing into the form. */}}
+<div class="table-wrap" id="bounces-live" hx-get="{{.CurrentURL}}" hx-trigger="every 10s" hx-select="#bounces-live" hx-target="#bounces-live" hx-swap="outerHTML">
 <table>
 <thead><tr>
 	<th>Sent</th><th>Client</th><th>Route</th><th class="cell-addr">From</th><th class="cell-addr">Recipients</th><th class="cell-subject">Subject</th><th>Attempts</th><th class="cell-resp">Last response</th>
@@ -54,6 +58,6 @@
 {{end}}
 </tbody>
 </table>
-</div>
 {{template "pager" .}}
+</div>
 {{end}}

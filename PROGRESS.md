@@ -19,7 +19,49 @@ fix below): the MSI installs without error, exactly one service registration
 remains (no duplicate), the on-disk binary is replaced, and the service keeps
 running afterwards. Uninstall remains unverified. Log rotation and Windows ACL
 verification at startup are complete.
-**Last session**: 2026-08-18 (twentieth session) — Field fix, no phase work.
+**Last session**: 2026-08-18 (twenty-first session) — Dashboard fix, no phase
+work. Reported as "Das Dashboard aktualisiert sich nicht konstant wenn sich
+der Status ändert": the dashboard never had any auto-refresh mechanism at
+all — no htmx, no `meta http-equiv="refresh"`, no SSE/WebSocket — a fact
+`MEMORY.md` already documented as a deliberate 2026-08-07/4c decision
+("htmx was never added and the dashboard carries no JavaScript at all.
+Adding it later is still open, and the CSP would have to allow it"). Asked
+the operator to pick between the three ways to close that gap
+(`meta`-refresh, htmx polling, SSE); "htmx besser bitte" reopened the
+2026-08-07 decision explicitly rather than by drift. htmx 2.0.4 is vendored
+as a static asset (`internal/web/static/htmx.min.js`, `embed.FS`), fetched
+from the upstream GitHub release tag and cross-checked byte-for-byte
+(`sha256 e209dda5…`) against the npm/unpkg mirror before being committed —
+not pulled from a CDN at runtime, since a page that only ever answers on
+loopback should not gain a dependency on an outside host being reachable.
+The live queue, bounces, routes and per-message views, plus the header stat
+tiles, now poll `hx-get="{{.CurrentURL}}"` (the request's own path and
+query — `baseData` gained this field, and `base()` now takes the `*http.
+Request` it is read from) every 10s and swap themselves in place via
+`hx-select`/`hx-target`/`hx-swap="outerHTML"`, so sort order, pagination and
+active search filters survive a refresh unchanged. Deliberately excluded
+from polling: `/search` entirely (an ad hoc lookup, not a live view) and the
+filter `<form>` on `/bounces` (scoped outside the polling `<div>`) — either
+one being swapped on a timer would silently overwrite text the operator is
+still typing, which is the standard htmx-polling footgun. CSP tightened from
+bare `default-src 'self'` to `default-src 'self'; script-src 'self'` to say
+explicitly that scripts load only from the dashboard's own origin; htmx's
+polling needs neither inline script nor `eval`, so nothing beyond that
+needed relaxing, and `docs/SECURITY.md`'s "no inline scripts" line stays
+true. Not build-verified — no Go toolchain is installed on this machine (a
+recurring gap in earlier sessions too, e.g. the fourteenth); `go build`,
+`go vet`, `go test ./...`, `gofmt`, `govulncheck` and `gosec` are all still
+outstanding for this change and should run in CI or a session with a
+toolchain before this is considered done. Reviewed by hand instead: every
+edited template file re-read after editing for balanced `{{}}`/HTML tags,
+`base()`'s new `for _, rt := range routes` loop variable renamed off `r` to
+avoid shadowing the newly added `*http.Request` parameter of the same name
+(caught before commit, not a live bug — Go's block scoping meant the shadow
+was confined to the loop and `r.URL.RequestURI()` afterwards was always
+correct, but the name reuse was confusing enough to fix), and the existing
+`TestSecurityHeadersOnEveryPage` CSP-string assertion in `web_test.go`
+updated to match.
+**Previous session**: 2026-08-18 (twentieth session) — Field fix, no phase work.
 Reported as "der windows installer bricht ab beim aktualisieren", this time
 with a verbose MSI log (`msiexec /L*v`) from an actual upgrade attempt
 (0.2.6 → 0.2.8) rather than reasoning alone. A second, independent defect

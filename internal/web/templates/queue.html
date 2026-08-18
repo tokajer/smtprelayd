@@ -1,6 +1,6 @@
 {{define "content"}}
 <h1>Queue</h1>
-<div class="table-wrap">
+<div class="table-wrap" id="queue-live" hx-get="{{.CurrentURL}}" hx-trigger="every 10s" hx-select="#queue-live" hx-target="#queue-live" hx-swap="outerHTML">
 <table>
 <thead><tr>
 	<th><a href="{{index .SortLinks "received_at"}}">Sent</a></th>
@@ -31,6 +31,6 @@
 {{end}}
 </tbody>
 </table>
-</div>
 {{template "pager" .}}
+</div>
 {{end}}

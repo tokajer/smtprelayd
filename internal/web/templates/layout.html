@@ -7,6 +7,7 @@
 <meta name="color-scheme" content="light dark">
 <title>smtprelayd dashboard</title>
 <link rel="stylesheet" href="/static/style.css">
+<script src="/static/htmx.min.js"></script>
 </head>
 <body>
 <header class="topbar">
@@ -24,7 +25,11 @@
 	<aside>{{template "sidebar" .}}</aside>
 	<main class="card">
 		{{if or (eq .Page "queue") (eq .Page "search") (eq .Page "bounces") (eq .Page "routes")}}
-		<div class="stats">
+		{{/* Excluded on /search: this region re-fetches .CurrentURL, and
+		     that page's filter form lives outside it, so its inputs are
+		     never disturbed by a refresh; /search itself is left out
+		     entirely because it is an ad hoc lookup, not a live view. */}}
+		<div class="stats" id="stats"{{if ne .Page "search"}} hx-get="{{.CurrentURL}}" hx-trigger="every 10s" hx-select="#stats" hx-target="#stats" hx-swap="outerHTML"{{end}}>
 			<div class="tile tile-queued"><div class="label">Queued</div><div class="value">{{.Totals.Queued}}</div></div>
 			<div class="tile tile-deferred"><div class="label">Deferred</div><div class="value">{{.Totals.Deferred}}</div></div>
 			<div class="tile tile-delivered"><div class="label">Delivered</div><div class="value">{{.Totals.Delivered}}</div></div>

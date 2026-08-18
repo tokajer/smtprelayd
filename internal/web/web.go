@@ -25,6 +25,14 @@ import (
 //go:embed static/style.css
 var styleCSS []byte
 
+// htmxJS is vendored, not fetched from a CDN: the dashboard's CSP is
+// default-src 'self', and a page reachable only on loopback should not
+// depend on an outside host being reachable at all. Version 2.0.4, verified
+// against the upstream release before being committed.
+//
+//go:embed static/htmx.min.js
+var htmxJS []byte
+
 //go:embed templates/*.html
 var templateFS embed.FS
 
@@ -90,6 +98,11 @@ type baseData struct {
 	Routes        []metrics.RouteStatus
 	Totals        totals
 	RecentBounces []*store.Message
+	// CurrentURL is the request's own path and query, used only as the
+	// polling target for htmx: the live regions re-fetch the page they are
+	// already on, so sort order, pagination and search filters survive a
+	// refresh unchanged.
+	CurrentURL string
 }
 
 // totals is the sum of the per-route counters already held in memory for the
@@ -101,17 +114,17 @@ type totals struct {
 	Bounced          uint64
 }
 
-func (s *Server) base(page string) baseData {
+func (s *Server) base(page string, r *http.Request) baseData {
 	var routes []metrics.RouteStatus
 	if s.metrics != nil {
 		routes = s.metrics.Status()
 	}
 	var sum totals
-	for _, r := range routes {
-		sum.Queued += r.Queued
-		sum.Deferred += r.Deferred
-		sum.Delivered += r.Delivered
-		sum.Bounced += r.Bounced
+	for _, rt := range routes {
+		sum.Queued += rt.Queued
+		sum.Deferred += rt.Deferred
+		sum.Delivered += rt.Delivered
+		sum.Bounced += rt.Bounced
 	}
 	recent, err := s.store.FindBounces(store.BounceFilter{Limit: 5})
 	if err != nil {
@@ -125,6 +138,7 @@ func (s *Server) base(page string) baseData {
 	return baseData{
 		Version: s.version, Page: page, Theme: s.theme,
 		Routes: routes, Totals: sum, RecentBounces: recent,
+		CurrentURL: r.URL.RequestURI(),
 	}
 }
 
@@ -179,6 +193,11 @@ func (s *Server) handleStyle(w http.ResponseWriter, _ *http.Request) {
 	_, _ = w.Write(s.css)
 }
 
+func (s *Server) handleHTMXScript(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "text/javascript; charset=utf-8")
+	_, _ = w.Write(htmxJS)
+}
+
 // handleQueue shows messages still in the spool: queued or deferred,
 // sortable by the columns the plan calls for.
 func (s *Server) handleQueue(w http.ResponseWriter, r *http.Request) {
@@ -208,7 +227,7 @@ func (s *Server) handleQueue(w http.ResponseWriter, r *http.Request) {
 		NextHref  string
 		PrevHref  string
 	}{
-		baseData:  s.base("queue"),
+		baseData:  s.base("queue", r),
 		Messages:  msgs,
 		SortLinks: sortLinks("/queue", nil, sortCol, order),
 		HasMore:   hasMore,
@@ -268,7 +287,7 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		NextHref    string
 		PrevHref    string
 	}{
-		baseData: s.base("search"),
+		baseData: s.base("search", r),
 		Filter: searchFilterView{
 			Sender: filter.Sender, Recipient: filter.Recipient, Subject: filter.Subject,
 			Client: filter.Client, Route: filter.Route, Status: filter.Status,
@@ -343,7 +362,7 @@ func (s *Server) handleBounces(w http.ResponseWriter, r *http.Request) {
 		NextHref    string
 		PrevHref    string
 	}{
-		baseData: s.base("bounces"),
+		baseData: s.base("bounces", r),
 		Filter: bounceFilterView{
 			Sender: filter.Sender, Recipient: filter.Recipient, Subject: filter.Subject,
 			Client: filter.Client, Route: filter.Route, Class: filter.Class,
@@ -383,7 +402,7 @@ func (s *Server) handleMessage(w http.ResponseWriter, r *http.Request) {
 		Message      *store.Message
 		RequeueToken string
 		DeleteToken  string
-	}{baseData: s.base("message"), Message: msg}
+	}{baseData: s.base("message", r), Message: msg}
 	if msg != nil {
 		now := time.Now()
 		data.RequeueToken = s.csrf.token("requeue", id.String(), now)
@@ -452,11 +471,11 @@ func (s *Server) handleDeleteAction(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (s *Server) handleRoutes(w http.ResponseWriter, _ *http.Request) {
-	s.render(w, "routes", s.base("routes"))
+func (s *Server) handleRoutes(w http.ResponseWriter, r *http.Request) {
+	s.render(w, "routes", s.base("routes", r))
 }
 
-func (s *Server) handleConfig(w http.ResponseWriter, _ *http.Request) {
+func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 	data := struct {
 		baseData
 		ListenersText string
@@ -464,7 +483,7 @@ func (s *Server) handleConfig(w http.ResponseWriter, _ *http.Request) {
 		RoutesText    string
 		BounceText    string
 	}{
-		baseData:      s.base("config"),
+		baseData:      s.base("config", r),
 		ListenersText: formatListeners(s.cfg.Listeners),
 		ClientsText:   formatClients(s.cfg.Clients),
 		RoutesText:    formatRoutes(s.cfg.Routes),

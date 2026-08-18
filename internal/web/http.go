@@ -16,8 +16,9 @@ import (
 )
 
 // Handler returns the dashboard's HTTP handler, wrapped with the security
-// headers docs/SECURITY.md requires for it: a strict CSP with no inline
-// scripts (there are none; the dashboard has no JavaScript), a frame-busting
+// headers docs/SECURITY.md requires for it: a strict CSP that allows scripts
+// only from the dashboard's own origin (htmx, vendored under /static/, is
+// the only one and needs neither inline script nor eval), a frame-busting
 // header, MIME sniffing turned off, and a conservative referrer policy.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
@@ -33,6 +34,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /routes", s.handleRoutes)
 	mux.HandleFunc("GET /config", s.handleConfig)
 	mux.HandleFunc("GET /static/style.css", s.handleStyle)
+	mux.HandleFunc("GET /static/htmx.min.js", s.handleHTMXScript)
 	return s.requireLoopbackHost(securityHeaders(mux))
 }
 
@@ -72,7 +74,7 @@ func (s *Server) requireLoopbackHost(next http.Handler) http.Handler {
 func securityHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		h := w.Header()
-		h.Set("Content-Security-Policy", "default-src 'self'; frame-ancestors 'none'")
+		h.Set("Content-Security-Policy", "default-src 'self'; script-src 'self'; frame-ancestors 'none'")
 		h.Set("X-Content-Type-Options", "nosniff")
 		h.Set("X-Frame-Options", "DENY")
 		h.Set("Referrer-Policy", "strict-origin-when-cross-origin")
