@@ -61,6 +61,18 @@ was confined to the loop and `r.URL.RequestURI()` afterwards was always
 correct, but the name reuse was confusing enough to fix), and the existing
 `TestSecurityHeadersOnEveryPage` CSP-string assertion in `web_test.go`
 updated to match.
+**Same session, follow-up**: reported back as "refreshed nicht" — the
+operator's test was specifically on `/search`, which the first pass had
+excluded from polling entirely rather than only excluding its filter form,
+on the reasoning (wrongly applied uniformly) that an "ad hoc lookup" page
+should stay static. `/search`'s results table now polls exactly like
+`/bounces` already did: scoped to a `#search-live` `<div>` around the table
+and pager, outside the `<form>`, so submitted filters keep being re-run on
+refresh and unsubmitted keystrokes are never touched. Also dropped the
+`{{if ne .Page "search"}}` guard on the header stat tiles — that exclusion
+never had a reason to exist, since the stats block sits in `layout.html`
+entirely outside any page's filter form and polling it was always safe on
+all four pages that show it.
 **Previous session**: 2026-08-18 (twentieth session) — Field fix, no phase work.
 Reported as "der windows installer bricht ab beim aktualisieren", this time
 with a verbose MSI log (`msiexec /L*v`) from an actual upgrade attempt
