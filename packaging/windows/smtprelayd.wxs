@@ -25,6 +25,17 @@
   here before and left the directory inheriting from %ProgramData%, which
   carries BUILTIN\Users:(OI)(CI)(RX); it adds ACEs but does not set
   PROTECTED_DACL_SECURITY_INFORMATION, so no install ever passed the check.
+
+  Uninstall does not remove %ProgramData%\SMTPRelayd by default: the spool
+  may still hold accepted, undelivered mail, and the history database is the
+  only record of it. PurgeDataDlg asks the operator during an interactive
+  uninstall whether to delete it anyway; "yes" sets CLEANDATA=1, which gates
+  PurgeDataDirCA ("smtprelayd.exe purge-datadir") in InstallExecuteSequence.
+  The dialog only ever shows for a real, interactive, top-level uninstall
+  (REMOVE="ALL" AND NOT UPGRADINGPRODUCTCODE, and InstallUISequence does not
+  run at all under msiexec /qn or in an upgrade's nested removal), so a
+  silent or scripted uninstall never deletes data unless CLEANDATA=1 is
+  passed explicitly on the command line.
 -->
 <Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
 
@@ -42,6 +53,11 @@
       DowngradeErrorMessage="A newer version of smtprelayd is already installed." />
 
     <MediaTemplate EmbedCab="yes" />
+
+    <!-- Answer to PurgeDataDlg. Unset (falsy) unless the operator clicks
+         "Yes, delete it" or passes it explicitly on the command line for a
+         scripted uninstall, e.g. msiexec /x smtprelayd.msi /qn CLEANDATA=1. -->
+    <Property Id="CLEANDATA" Value="0" />
 
     <Directory Id="TARGETDIR" Name="SourceDir">
       <Directory Id="ProgramFiles64Folder">
@@ -90,6 +106,36 @@
                   Execute="deferred" Impersonate="no" Return="ignore" />
     <CustomAction Id="SecureDataDirCA" FileKey="smtprelaydEXE" ExeCommand="secure-datadir"
                   Execute="deferred" Impersonate="no" Return="check" />
+    <CustomAction Id="PurgeDataDirCA" FileKey="smtprelaydEXE" ExeCommand="purge-datadir"
+                  Execute="deferred" Impersonate="no" Return="ignore" />
+
+    <!-- Deliberately not built on WixUI: the rest of this MSI shows no
+         wizard at all, and pulling in WixUI_InstallDir or similar for one
+         yes/no question would add a full install wizard neither asked for
+         nor previously present. This is the smallest dialog that can ask
+         one question and set one property. -->
+    <UI>
+      <Dialog Id="PurgeDataDlg" Width="270" Height="105" Title="smtprelayd Setup" NoMinimize="yes">
+        <Control Id="Question" Type="Text" X="20" Y="15" Width="230" Height="45" NoPrefix="yes"
+                 Text="Also delete the data directory (%ProgramData%\SMTPRelayd: spool and message history)? This cannot be undone." />
+        <Control Id="YesButton" Type="PushButton" X="90" Y="70" Width="80" Height="17" Text="Yes, delete it">
+          <Publish Property="CLEANDATA" Value="1">1</Publish>
+          <Publish Event="EndDialog" Value="Return">1</Publish>
+        </Control>
+        <Control Id="NoButton" Type="PushButton" X="180" Y="70" Width="70" Height="17" Text="No" Default="yes" Cancel="yes">
+          <Publish Property="CLEANDATA" Value="0">1</Publish>
+          <Publish Event="EndDialog" Value="Return">1</Publish>
+        </Control>
+      </Dialog>
+    </UI>
+
+    <InstallUISequence>
+      <!-- Same condition UninstallServiceCA runs under below: a genuine
+           top-level uninstall, never an upgrade's nested removal of the old
+           product. InstallUISequence itself does not run under msiexec /qn,
+           which is what keeps a silent uninstall from ever showing this. -->
+      <Show Dialog="PurgeDataDlg" Before="ExecuteAction">REMOVE="ALL" AND NOT UPGRADINGPRODUCTCODE</Show>
+    </InstallUISequence>
 
     <InstallExecuteSequence>
       <!-- Only on a genuinely fresh install: never on repair (Installed is
@@ -119,6 +165,11 @@
            removal below is skipped during an upgrade. -->
       <Custom Action="StopServiceCA" Before="RemoveFiles">REMOVE="ALL"</Custom>
       <Custom Action="UninstallServiceCA" After="StopServiceCA">REMOVE="ALL" AND NOT UPGRADINGPRODUCTCODE</Custom>
+      <!-- CLEANDATA is only ever "1" if the operator clicked "Yes, delete
+           it" on PurgeDataDlg, or passed it explicitly for a scripted
+           uninstall; it is never set during an upgrade's nested removal,
+           which never runs InstallUISequence at all. -->
+      <Custom Action="PurgeDataDirCA" After="UninstallServiceCA">REMOVE="ALL" AND NOT UPGRADINGPRODUCTCODE AND CLEANDATA="1"</Custom>
     </InstallExecuteSequence>
 
   </Product>

@@ -19,7 +19,53 @@ fix below): the MSI installs without error, exactly one service registration
 remains (no duplicate), the on-disk binary is replaced, and the service keeps
 running afterwards. Uninstall remains unverified. Log rotation and Windows ACL
 verification at startup are complete.
-**Last session**: 2026-08-18 (twenty-first session) — Dashboard fix, no phase
+**Last session**: 2026-08-18 (twenty-second session) — Two open Phase 5
+checklist items field-verified, plus a small feature added on request. First,
+the field report: a non-admin Windows install triggers a UAC elevation
+prompt and proceeds correctly (rather than installing unelevated or failing
+silently — the behaviour the checklist item was asking for), and plain
+uninstall completes. Both checklist items above are now closed.
+Then, requested directly ("bitte noch einbauen, damit optional per Abfrage
+auch das ProgramData bereinigt wird"): an interactive uninstall now asks
+whether to also delete `%ProgramData%\SMTPRelayd`. `PurgeDataDlg` is a small,
+hand-authored WiX `<Dialog>` (Yes/No, no WixUI — nothing else in this MSI
+uses a wizard either, and pulling one in for a single question would have
+been a much bigger change than asked for), sequenced only for a genuine
+top-level interactive uninstall (`REMOVE="ALL" AND NOT
+UPGRADINGPRODUCTCODE`; `InstallUISequence` does not run at all under
+`msiexec /qn`, so a silent uninstall never shows it and never deletes data
+unless `CLEANDATA=1` is passed explicitly on the command line). "Yes" sets
+`CLEANDATA=1`, gating a new deferred custom action `PurgeDataDirCA`
+(`smtprelayd.exe purge-datadir`, new in `cmd/smtprelayd/verify_windows.go`)
+in `InstallExecuteSequence`, scheduled after `UninstallServiceCA`. Built as a
+Go subcommand rather than WiX's `util:RemoveFolderEx`, deliberately: an
+earlier design pass considered `RemoveFolderEx` gated by a Component
+`Condition`, but that pattern only fires reliably when the component was
+*unconditionally* installed in the first place (so it has a real
+Present→Absent transition to hang the removal off); conditioning the
+component itself on `CLEANDATA` would very likely have made the deletion
+silently never run, since the component would never have been recorded as
+installed to begin with. A plain `<CustomAction Execute="deferred">` gated by
+an `InstallExecuteSequence` condition sidesteps that entirely and is exactly
+the pattern `InstallServiceCA`/`UninstallServiceCA`/`SecureDataDirCA` already
+use successfully. `purgeDataDir` resolves the directory exactly like
+`secureDataDir` (configured `data_dir` when the configuration still loads,
+the config file's own directory otherwise) but adds a guard `secureDataDir`
+does not need: it refuses to act unless the resolved directory's last path
+element is literally `SMTPRelayd`, because this deletes recursively via
+`os.RemoveAll` and runs unattended with no further confirmation once
+scheduled, so a wrong resolution must fail closed rather than delete
+whatever it computed. `MEMORY.md`'s deployment section updated: the "MSI
+does not remove ProgramData on uninstall" line now says "by default," with
+the mechanism recorded. Not yet verified on hardware — no Go toolchain and
+no Windows/WiX available in this environment (same recurring gap as several
+earlier sessions); before this is trusted, run an actual uninstall both ways
+(clicking "Yes, delete it" and confirming the directory is gone; clicking
+"No" and confirming it survives) and confirm the dialog does **not** appear
+mid-upgrade (install version B over a running version A and watch that no
+dialog shows and the data directory survives, since `UPGRADINGPRODUCTCODE`
+is set in exactly that nested removal).
+**Previous session**: 2026-08-18 (twenty-first session) — Dashboard fix, no phase
 work. Reported as "Das Dashboard aktualisiert sich nicht konstant wenn sich
 der Status ändert": the dashboard never had any auto-refresh mechanism at
 all — no htmx, no `meta http-equiv="refresh"`, no SSE/WebSocket — a fact
@@ -855,9 +901,17 @@ Unchanged, plus:
       for unsafe.Pointer usage in trust_windows.go for LocalFree API call
 - [x] Real end-to-end test of install → configure → start → stop on Windows
       (2026-08-12, from an MSI built after the `secure-datadir` fix)
-- [ ] Windows upgrade cycle (version B's MSI over a running version A), the
-      uninstall path, and a non-admin install being refused rather than
-      silently degraded
+- [x] Windows upgrade cycle (version B's MSI over a running version A) —
+      verified on hardware 2026-08-18 (twentieth session, the
+      `WIX_UPGRADE_DETECTED` fix); this line was left unchecked when that
+      session closed the item in prose but never came back to the checklist
+- [x] Uninstall path and a non-admin install being refused rather than
+      silently degraded — both field-verified 2026-08-18 (twenty-second
+      session): a non-admin install triggers a UAC elevation prompt rather
+      than installing unelevated or failing silently, and plain uninstall
+      completes. Uninstall optionally purging `%ProgramData%\SMTPRelayd` is
+      new the same session (see below) and is **not yet** verified on
+      hardware itself
 - [ ] Linux `.deb` install → configure → start → stop cycle on Debian/Ubuntu
       (the `.rpm` path is fully verified on Fedora, the `.deb` on nothing)
 - [x] CI workflow that runs on every push/PR (`.github/workflows/ci.yml`):

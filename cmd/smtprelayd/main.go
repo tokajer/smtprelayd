@@ -50,6 +50,8 @@ Windows only, requires an elevated prompt:
   start           start the registered Windows service
   stop            stop the registered Windows service
   secure-datadir  write the data directory ACL the service requires to start
+  purge-datadir   delete the data directory (spool and history); run by the
+                  MSI only when the uninstall dialog is answered "yes"
 
 On Linux the service is managed with systemctl instead; the packaged unit
 file registers it as smtprelayd.service.
@@ -105,6 +107,9 @@ func run(cmd, configPath string, console bool) error {
 
 	case "secure-datadir":
 		return secureDataDir(configPath)
+
+	case "purge-datadir":
+		return purgeDataDir(configPath)
 
 	case "check":
 		cfg, err := config.Load(configPath)

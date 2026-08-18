@@ -339,5 +339,21 @@ The load-bearing principles:
   next to the code that verifies it. `.github/workflows/release.yml` builds and
   publishes all three on a `vX.Y.Z` tag. Neither package starts the service
   automatically — there is no configuration yet on a fresh install. The MSI
-  does not remove `%ProgramData%\SMTPRelayd` on uninstall: the spool may still
-  hold accepted, undelivered mail.
+  does not remove `%ProgramData%\SMTPRelayd` on uninstall **by default**: the
+  spool may still hold accepted, undelivered mail. **Added 2026-08-18**: an
+  interactive uninstall now asks (`PurgeDataDlg`, a minimal hand-authored
+  WiX dialog, not WixUI — nothing else in this MSI shows a wizard either)
+  whether to delete it anyway; answering yes sets `CLEANDATA=1`, which gates
+  a new deferred custom action, `smtprelayd.exe purge-datadir`
+  (`cmd/smtprelayd/verify_windows.go`), in `InstallExecuteSequence` — same
+  pattern as `secure-datadir`, including the same data-directory resolution
+  (configured `data_dir` when the configuration still loads, the config
+  file's own directory otherwise), plus one extra guard `secure-datadir`
+  does not need: it refuses to act unless the resolved directory's last path
+  element is literally `SMTPRelayd`, since this deletes recursively and runs
+  unattended with no further confirmation. The dialog is conditioned on
+  `REMOVE="ALL" AND NOT UPGRADINGPRODUCTCODE`, so it never appears during an
+  upgrade's nested removal of the old product, and `InstallUISequence` does
+  not run at all under `msiexec /qn`, so a silent or scripted uninstall never
+  deletes data unless `CLEANDATA=1` is passed explicitly on the command
+  line — the default stays "leave it in place."
