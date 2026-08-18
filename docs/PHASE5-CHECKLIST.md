@@ -40,13 +40,16 @@ not exercised and stay open.
 - [x] `sc.exe start smtprelayd` — service reaches RUNNING
 - [x] A log line ("starting", version, config path) appears where configured
 - [x] `sc.exe stop smtprelayd` — service reaches STOPPED within a few seconds
-- [ ] Install version B's MSI over a running version A (same `UpgradeCode`):
+- [x] Install version B's MSI over a running version A (same `UpgradeCode`):
       no duplicate service, service registration and running/stopped state
       untouched by the upgrade, binary on disk replaced.
       The Linux equivalent found a real defect (an upgraded package left the
-      old binary running), so this is not a formality — and the MSI's
-      `secure-datadir` custom action is sequenced to run on upgrade and
-      repair too, which nothing has exercised yet
+      old binary running), so this was not a formality: two Windows-side
+      defects were found and fixed first (`StopServiceCA` not stopping the
+      running service, then `InstallServiceCA` re-registering an already-
+      registered service — see `PROGRESS.md`, nineteenth/twentieth sessions).
+      Verified on hardware 2026-08-18: install succeeds, exactly one service
+      registration, binary replaced, service running afterwards
 - [ ] Uninstall: service no longer listed in `sc.exe query`, Program Files
       folder removed
 - [ ] Uninstall with spool/history files present in `C:\ProgramData\SMTPRelayd`:

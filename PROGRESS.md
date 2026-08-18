@@ -13,10 +13,12 @@ rewriting, recipient routing) remains complete and compiles clean. Packaging
 and the Windows service wrapper (normally phase 5) were pulled forward and
 validated. The MSI's **first-install path is verified on hardware**
 (2026-08-12): install → configure → `check` → start → stop, with the service
-running as `NT SERVICE\smtprelayd`. Its upgrade path had two distinct defects,
-fixed in the nineteenth and twentieth sessions (below) but **not yet verified
-on hardware** end to end; uninstall remains unverified too. Log rotation and
-Windows ACL verification at startup are complete.
+running as `NT SERVICE\smtprelayd`. Its **upgrade path is now verified on
+hardware too** (2026-08-18, twentieth session, after the `WIX_UPGRADE_DETECTED`
+fix below): the MSI installs without error, exactly one service registration
+remains (no duplicate), the on-disk binary is replaced, and the service keeps
+running afterwards. Uninstall remains unverified. Log rotation and Windows ACL
+verification at startup are complete.
 **Last session**: 2026-08-18 (twentieth session) — Field fix, no phase work.
 Reported as "der windows installer bricht ab beim aktualisieren", this time
 with a verbose MSI log (`msiexec /L*v`) from an actual upgrade attempt
@@ -39,10 +41,16 @@ files replaced cleanly, then `InstallServiceCA` executed regardless and
 failed. Fixed by conditioning on `WIX_UPGRADE_DETECTED` instead — the
 property WiX's `MajorUpgrade`/`FindRelatedProducts` sets (and propagates as
 a secure property) in the *new* product's own sequence when an earlier
-version is present, unlike `UPGRADINGPRODUCTCODE`. Not yet verified on real
-hardware — no WiX toolchain on this machine to rebuild the MSI; the Windows
-upgrade cycle in the phase 5 checklist below stays open until a rebuilt MSI
-is exercised on a real upgrade.
+version is present, unlike `UPGRADINGPRODUCTCODE`. A second bug was
+introduced fixing the first: the explanatory `<!-- -->` comment contained a
+bare `--`, which is invalid inside an XML comment and broke `candle.exe` in
+CI ("candle.exe failed (WiX Toolset)"); caught immediately from the CI report
+and fixed by rewording, verified with `xmllint --noout`. With both fixed, the
+rebuilt MSI was installed as an upgrade on real hardware and verified: no
+error, exactly one service registration (no duplicate), binary on disk
+replaced, service running afterwards. The Windows upgrade item in the phase 5
+checklist below is now closed; uninstall and the non-admin-refusal item stay
+open.
 **Previous session**: 2026-08-17 (nineteenth session) — Two field-triggered fixes,
 no phase work. First: "auf windows bricht das drüber installieren mit einem
 Fehler ab" — the MSI's `StopServiceCA` was conditioned on `REMOVE="ALL" AND
