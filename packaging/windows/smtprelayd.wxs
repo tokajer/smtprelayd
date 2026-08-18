@@ -1,8 +1,23 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
-  Built with WiX Toolset v3 (candle.exe / light.exe -ext WixUtilExtension),
-  preinstalled on the windows-latest GitHub Actions runner image, so no
-  third-party build tool needs to be installed in CI.
+  Built with WiX Toolset v3 (candle.exe -ext WixUtilExtension, then
+  light.exe -ext WixUtilExtension -sice:ICE20), preinstalled on the
+  windows-latest GitHub Actions runner image, so no third-party build tool
+  needs to be installed in CI.
+
+  -sice:ICE20 is required, not optional, once PurgeDataDlg exists below:
+  ICE20 fails the link otherwise, demanding the full standard dialog set
+  (FilesInUse, ErrorDialog, FatalError, UserExit, Exit dialogs plus their
+  entries in both InstallUISequence and AdminUISequence) that WixUIExtension
+  normally supplies for free as part of a whole wizard. Building all of that
+  by hand for one yes/no question, rather than suppressing the check, would
+  mean adopting a full WixUI wizard for an MSI that otherwise shows no UI at
+  all, a materially bigger change than "ask before deleting the data
+  directory." Suppressing ICE20 does not regress anything: without it, a
+  fatal error or a Cancel click during setup just falls back to the Windows
+  Installer engine's own default handling, which is exactly what already
+  happened on every run before PurgeDataDlg existed, since there was no
+  custom UI at all then either.
 
   Variables supplied at candle.exe time (-d<Name>=<Value>):
     Version              MSI ProductVersion, numeric major.minor.build only
@@ -115,6 +130,8 @@
          nor previously present. This is the smallest dialog that can ask
          one question and set one property. -->
     <UI>
+      <TextStyle Id="DefaultFont" FaceName="Tahoma" Size="8" />
+      <Property Id="DefaultUIFont" Value="DefaultFont" />
       <Dialog Id="PurgeDataDlg" Width="270" Height="105" Title="smtprelayd Setup" NoMinimize="yes">
         <Control Id="Question" Type="Text" X="20" Y="15" Width="230" Height="45" NoPrefix="yes"
                  Text="Also delete the data directory (%ProgramData%\SMTPRelayd: spool and message history)? This cannot be undone." />

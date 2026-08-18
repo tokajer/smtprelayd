@@ -154,6 +154,7 @@ jobs:
             -out "obj\smtprelayd.wixobj" "packaging\windows\smtprelayd.wxs"
           if ($LASTEXITCODE -ne 0) { throw "candle.exe failed" }
           & "$wixBin\light.exe" -ext WixUtilExtension `
+            -sice:ICE20 `
             -out "dist\smtprelayd-${{ needs.build.outputs.pkg_version }}-amd64.msi" `
             "obj\smtprelayd.wixobj"
           if ($LASTEXITCODE -ne 0) { throw "light.exe failed" }

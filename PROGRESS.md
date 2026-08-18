@@ -65,6 +65,33 @@ earlier sessions); before this is trusted, run an actual uninstall both ways
 mid-upgrade (install version B over a running version A and watch that no
 dialog shows and the data directory survives, since `UPGRADINGPRODUCTCODE`
 is set in exactly that nested removal).
+**Same session, CI build failure and fix**: the very next `release.yml` run
+after the above failed at `light.exe` with `error LGHT0204`, three separate
+ICE violations, from a screenshot of the Actions log (not reasoned about —
+the exact codes made the cause unambiguous): ICE20 ("Standard Dialog
+'FilesInUse' not found in Dialog table", "ErrorDialog Property not
+specified", and `FatalError`/`UserExit`/`Exit` missing from both
+`InstallUISequence` and `AdminUISequence`) and ICE31 ("the 'DefaultUIFont'
+Property must be set to a valid TextStyle"). Root cause: the moment a
+`<UI>`/`<Dialog>` exists anywhere in a WiX source, ICE20 requires the
+*complete* standard dialog set an MSI project normally gets for free from
+`WixUIExtension`'s prebuilt wizard fragments — building all of that by hand
+for one yes/no question would mean adopting a full install wizard this MSI
+has deliberately never had. Fixed two ways: ICE31 properly, by adding a
+`TextStyle`/`DefaultUIFont` property (two lines, no reason not to have a
+real font); ICE20 by suppressing it with `-sice:ICE20` on the `light.exe`
+invocation in `release.yml`, since not having `FatalError`/`UserExit`/`Exit`
+dialogs regresses nothing — a fatal error or Cancel during setup already
+fell back to the Windows Installer engine's own default handling before
+`PurgeDataDlg` existed, because there was no custom UI at all then either.
+Caught and fixed before it reached CI a second time: the header comment
+explaining `-sice:ICE20` itself contained a bare `--` inside an XML
+comment, the identical class of mistake the twentieth session's
+`WIX_UPGRADE_DETECTED` fix made in the same file — caught this time by
+running `xmllint --noout` locally before reporting the fix as done, rather
+than after a second failed CI run. Not yet re-verified against an actual
+`light.exe` run — no WiX toolchain in this environment — so the CI run
+after this fix lands is the first real confirmation and should be watched.
 **Previous session**: 2026-08-18 (twenty-first session) — Dashboard fix, no phase
 work. Reported as "Das Dashboard aktualisiert sich nicht konstant wenn sich
 der Status ändert": the dashboard never had any auto-refresh mechanism at
