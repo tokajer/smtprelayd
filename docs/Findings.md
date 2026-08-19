@@ -440,3 +440,79 @@ than repeating it.
 - Prometheus label values are escaped.
 - Client matching is fail-closed, with connection and session caps for an
   unmatched source.
+
+# Security findings — targeted review, 2026-08-19
+
+Requested as "prüfe das Projekt auf Sicherheit und eventuelle Schwachstellen
+bzw Sicherheitslücken." Not a full-tree review: scoped to what changed since
+the second review's fixes landed (`fa2432c`, 2026-08-12) — four sessions
+covering the htmx dashboard, the Windows uninstall `purge-datadir` feature,
+the lumberjack module swap and the Go toolchain pin — plus a re-check that
+the eleven previously closed findings and the banned-import/pattern rules had
+not regressed.
+
+**Fixed 2026-08-19.**
+
+## 1 — Low: `purge-datadir` does not check the data directory for a symlink or reparse point before recursing into it
+
+`cmd/smtprelayd/verify_windows.go` (`purgeDataDir`), added in the
+twenty-second session alongside the MSI's opt-in "delete
+`%ProgramData%\SMTPRelayd` on uninstall" feature. The function validated the
+resolved directory only by its basename
+(`strings.EqualFold(filepath.Base(dir), "SMTPRelayd")`) and then called
+`os.RemoveAll(dir)` directly, running as SYSTEM (`Impersonate="no"`) from a
+deferred custom action with `Return="ignore"`, so a failure there is silent.
+Every other function touching this same directory — `secureDataDir` in the
+same file, via `config.SecureDataDir` → `config.CheckDir`, and
+`verifyDataDirSecurity` via `config.CheckDataDirACL` — Lstats the path first
+and refuses it if `os.ModeSymlink` is set, which on Windows `os.Lstat` sets
+for NTFS junctions (mount-point reparse points) as well as true symbolic
+links. `purgeDataDir` was the one place in the tree that skipped it, despite
+being the one function that recurses into the directory rather than only
+reading or ACLing it — exactly the case `docs/EXPLOIT-SURFACE.md` §1 has in
+mind requiring the data directory "must not be a symlink," and §4's "refuse
+to follow symlinks anywhere under the data directory."
+
+Whether this was independently exploitable was not established: Go's
+`os.RemoveAll` tries a direct `os.Remove` on every path before ever opening
+and listing a directory's contents, and `RemoveDirectory` on a Windows
+reparse point is generally understood to delete only the link, not recurse
+into its target, so a planted junction at this exact path may well have been
+harmless in practice. That could not be verified in this environment — no
+Windows available. The fix does not depend on resolving that either way: it
+reuses `config.CheckDir`, the same check `secureDataDir` already runs, so the
+ambiguity is closed regardless of the underlying `RemoveAll`/
+`RemoveDirectory` semantics on a reparse point.
+
+**Fix**: call `config.CheckDir(dir)` before `os.RemoveAll(dir)`, refusing a
+symlink or reparse point the same way `secureDataDir` does; a missing
+directory (`os.IsNotExist`) is not an error, since purge may run against a
+data directory that never existed or was already removed.
+
+Not build-verified — no Go toolchain in this environment, and the function is
+Windows-only (`//go:build windows`) with no existing test file. Reviewed by
+hand against `config.CheckDir`'s existing signature and behaviour
+(`internal/config/trust_windows.go`); should be exercised on real hardware (a
+fresh uninstall with "Yes, delete it") before being trusted, alongside the
+rest of the not-yet-hardware-verified half of this feature already tracked in
+`PROGRESS.md`.
+
+## Also checked, found solid — no regression from the second review
+
+- `hx-get="{{.CurrentURL}}"` (new in the htmx dashboard): rendered through
+  `html/template` in a plain (non-URL) attribute context, so it is
+  HTML-attribute-escaped; a query string crafted to contain `"` cannot break
+  out of the attribute.
+- CSP tightened to `script-src 'self'`, no `unsafe-inline`/`unsafe-eval`
+  introduced.
+- Vendored `internal/web/static/htmx.min.js` hashes to the `sha256:e209dda5…`
+  value `PROGRESS.md` already records.
+- WiX sequencing for `PurgeDataDlg`/`PurgeDataDirCA`/`CLEANDATA` reasoned
+  through again: never reachable under `msiexec /qn`, never reachable during
+  an upgrade's nested removal (`UPGRADINGPRODUCTCODE`).
+- No new occurrence of `InsecureSkipVerify`, `os/exec`, `unsafe`, or
+  `template.HTML`/`.JS`/`.URL` outside the existing, already-documented and
+  annotated exceptions.
+- The `lumberjack` → `gopkg.in/natefinch/lumberjack.v2` swap and the
+  `go1.25.13` toolchain pin are both a straight version/import change with no
+  behavioural difference relevant here.

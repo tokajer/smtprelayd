@@ -58,6 +58,16 @@ func secureDataDir(configPath string) error {
 // runs unattended from a deferred custom action with no further
 // confirmation, so a wrong resolution here must fail closed rather than
 // remove whatever it computed.
+//
+// It also runs the same config.CheckDir symlink/reparse-point refusal
+// secureDataDir already runs through SecureDataDir, for the same reason
+// docs/EXPLOIT-SURFACE.md §1 gives for checking it at startup: this is the
+// one function in the tree that recurses into the data directory instead of
+// only reading or ACLing it, so a junction planted at this path — before a
+// fresh install or after an operator manually recreated it without the
+// ACL — matters most exactly here, run as SYSTEM with no further
+// confirmation. A missing directory is not an error: purge-datadir may run
+// against a data directory that never existed or was already removed.
 func purgeDataDir(configPath string) error {
 	dir := filepath.Dir(configPath)
 	if cfg, err := config.Load(configPath); err == nil {
@@ -65,6 +75,12 @@ func purgeDataDir(configPath string) error {
 	}
 	if !filepath.IsAbs(dir) || !strings.EqualFold(filepath.Base(dir), "SMTPRelayd") {
 		return fmt.Errorf("refusing to remove %q: does not look like the smtprelayd data directory", dir)
+	}
+	if err := config.CheckDir(dir); err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("refusing to remove %q: %w", dir, err)
 	}
 	if err := os.RemoveAll(dir); err != nil {
 		return err

@@ -19,7 +19,32 @@ fix below): the MSI installs without error, exactly one service registration
 remains (no duplicate), the on-disk binary is replaced, and the service keeps
 running afterwards. Uninstall remains unverified. Log rotation and Windows ACL
 verification at startup are complete.
-**Last session**: 2026-08-18 (twenty-second session) — Two open Phase 5
+**Last session**: 2026-08-19 (twenty-third session) — Targeted security
+review, no phase work. Requested as "prüfe das Projekt auf Sicherheit und
+eventuelle Schwachstellen bzw Sicherheitslücken." Not a full-tree pass:
+scoped to everything changed since the second review's fixes landed
+(`fa2432c`, 2026-08-12) — the htmx dashboard, the Windows uninstall
+`purge-datadir` feature, the lumberjack swap and the Go toolchain pin — plus a
+re-check that the eleven previously closed findings and the banned-import
+rules had not regressed; none had. One finding, written up in full in
+`docs/Findings.md` under "targeted review, 2026-08-19": `purgeDataDir`
+(`cmd/smtprelayd/verify_windows.go`), the deferred custom action behind the
+uninstaller's opt-in ProgramData purge, validated the resolved directory only
+by its basename and then recursed into it with `os.RemoveAll` as SYSTEM,
+skipping the `config.CheckDir` symlink/reparse-point refusal every other
+function touching that directory already runs. Fixed by calling `CheckDir`
+before `RemoveAll`, same as `secureDataDir` already does; a missing directory
+is treated as already-purged rather than an error. Whether the gap was
+independently exploitable was not established — Go's `RemoveAll` tries a
+direct `Remove` on every path first, and `RemoveDirectory` on a Windows
+reparse point is generally understood to delete only the link rather than
+recurse into its target — but the fix closes the question either way at no
+cost. Not build-verified — no Go toolchain in this environment, same
+recurring gap as most Windows-only work in this project, and the function has
+no existing test file — so this should be exercised on real hardware (a
+fresh uninstall with "Yes, delete it") together with the rest of the
+not-yet-hardware-verified half of this feature, see Open defects.
+**Previous session**: 2026-08-18 (twenty-second session) — Two open Phase 5
 checklist items field-verified, plus a small feature added on request. First,
 the field report: a non-admin Windows install triggers a UAC elevation
 prompt and proceeds correctly (rather than installing unelevated or failing
@@ -92,6 +117,65 @@ running `xmllint --noout` locally before reporting the fix as done, rather
 than after a second failed CI run. Not yet re-verified against an actual
 `light.exe` run — no WiX toolchain in this environment — so the CI run
 after this fix lands is the first real confirmation and should be watched.
+**Same session, `light.exe` fix confirmed, then a second symptom diagnosed
+from two verbose `/l*v` logs**: the rebuilt MSI links clean (ICE20/ICE31
+gone) and `msiexec /x` completes, but `PurgeDataDlg` still never appears —
+"Nur ein Uninstall yes or no, kein Auswahlfeld" (the generic Windows
+Installer confirmation, not the custom one). Both logs, from two separate
+runs against `C:\SERVICE\smtprelayd-0.2.15-amd64.msi` on host `ATAXVM-STSC`,
+show the identical signature: `Client-side and UI is none or basic: Running
+entire install on the server.`, `CLIENTUILEVEL=2`, `RemoteAdminTS = 1`, and
+the resolved `UILevel = 3` (Basic) rather than 5 (Full) — this despite
+`msiexec /x` being run with no `/q` flag at all, from an elevated prompt.
+`PurgeDataDirCA`'s own log line each time: `Skipping action: PurgeDataDirCA
+(condition is false)`, i.e. the WiX-side condition logic is proven correct
+in both runs — `CLEANDATA` simply never became `1`, because `PurgeDataDlg`
+never got a chance to render at Basic UI level (Windows Installer suppresses
+package-authored `Show`-sequenced dialogs at Basic, showing only its own
+built-in progress/confirmation UI). `RemoteAdminTS = 1` plus the negotiated
+Basic level strongly points at the RDP session to `ATAXVM-STSC` itself,
+not the package: Windows Installer is known to fall back the client/server
+UI negotiation to Basic when the elevated service (Session 0) and the
+calling process are on different Terminal Services sessions, independent of
+requested flags. Not yet resolved either way — the requested next step is
+testing from the VM's actual console (hypervisor console connection, not
+RDP) to conclusively separate "environment artifact" from "WiX bug"; that
+result is still outstanding. If console testing confirms the dialog does
+render there, no code change is needed at all — the feature already works
+correctly, this session just could not observe it working from the RDP
+session used for testing.
+**Same session, resolution**: console testing did not change the symptom —
+`UILevel = 3` reproduced identically on `ATAXVM-STSC` whether invoked over
+RDP or typed directly at the console. Four further candidate causes were
+checked and each ruled out in turn, all against this same VM: ARP/"Apps &
+Features" was never the path used (direct `msiexec /x` already showed it, so
+this was really ruled out earlier), a Group Policy restricting the Installer
+UI level (`gpresult` showed none), the two local-policy registry locations
+Windows Installer itself reads (`HKLM\SOFTWARE\Policies\Microsoft\Windows\
+Installer` and the legacy `...\CurrentVersion\Policies\Installer`, both
+absent), and a non-interactive window station from a remote-execution
+channel (confirmed the command was typed directly into the console window,
+keyboard focus on the VM itself). None explain `CLIENTUILEVEL=2` being
+computed client-side on this image before the server is ever involved; the
+actual cause is still unknown and is now out of scope to keep chasing
+without a second machine to compare against, which is not available.
+**What is confirmed instead, decisively**: the destructive half of the
+feature — the half that actually matters for safety — works correctly,
+independent of the dialog. Reinstalling and then running `msiexec /x
+smtprelayd-0.2.15-amd64.msi CLEANDATA=1` (the scripted path the header
+comment already documented as the alternative to the dialog) produced
+`Doing action: PurgeDataDirCA` in the log rather than `Skipping`, and
+`C:\ProgramData\SMTPRelayd` was confirmed gone afterward. Combined with
+every earlier run's `Skipping action: PurgeDataDirCA (condition is false)`
+whenever `CLEANDATA` stayed at its default `0`, this is now verified on real
+hardware in both directions: opt in and the directory is removed, don't and
+it survives untouched — which is the property that actually matters for an
+irreversible delete. The only unresolved piece is cosmetic: whatever is
+special about this one VM image that stops `PurgeDataDlg` itself from
+rendering. Left open rather than guessed at further; worth revisiting only
+if a second Windows machine becomes available to compare against, or if a
+future operator reports the same missing dialog elsewhere, giving something
+to correlate.
 **Previous session**: 2026-08-18 (twenty-first session) — Dashboard fix, no phase
 work. Reported as "Das Dashboard aktualisiert sich nicht konstant wenn sich
 der Status ändert": the dashboard never had any auto-refresh mechanism at
@@ -937,8 +1021,12 @@ Unchanged, plus:
       session): a non-admin install triggers a UAC elevation prompt rather
       than installing unelevated or failing silently, and plain uninstall
       completes. Uninstall optionally purging `%ProgramData%\SMTPRelayd` is
-      new the same session (see below) and is **not yet** verified on
-      hardware itself
+      new the same session (see below): the destructive logic itself is now
+      hardware-verified via the scripted path (`CLEANDATA=1` on the command
+      line — directory confirmed removed, and left untouched whenever
+      `CLEANDATA` stays at its default `0`); the interactive `PurgeDataDlg`
+      prompt does not render on the one test VM available, cause unresolved,
+      tracked below rather than blocking this item
 - [ ] Linux `.deb` install → configure → start → stop cycle on Debian/Ubuntu
       (the `.rpm` path is fully verified on Fedora, the `.deb` on nothing)
 - [x] CI workflow that runs on every push/PR (`.github/workflows/ci.yml`):
