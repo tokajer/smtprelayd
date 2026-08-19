@@ -44,6 +44,27 @@ recurring gap as most Windows-only work in this project, and the function has
 no existing test file — so this should be exercised on real hardware (a
 fresh uninstall with "Yes, delete it") together with the rest of the
 not-yet-hardware-verified half of this feature, see Open defects.
+**Same session, follow-up from a pasted `msiexec /L*v` upgrade log** (0.2.15
+→ 0.2.16, `ATAXVM-STSC`): reported as getting "2803" on an install-over.
+Confirmed harmless and unrelated to the fix above: `PurgeDataDirCA` is
+`Skipping action ... (condition is false)` both times it is evaluated in the
+log (`CLEANDATA` stayed `0`), so `purgeDataDir` never ran in this test at
+all, and the install finished with "Installation completed successfully" /
+success status `0`. The `DEBUG: Error 2803: Dialog View did not find a
+record for the dialog` / `Error 2867: The error dialog property is not set`
+pairs each appear immediately after a `RESTART MANAGER: Session opened`
+line — Restart Manager detects the running service's locked
+`smtprelayd-windows-amd64.exe` before `StopServiceCA` runs later in the
+sequence and tries to show its standard "files in use" prompt, which this
+MSI has no `Dialog` table entry for. This is the twenty-second session's
+`-sice:ICE20` suppression (added when `PurgeDataDlg` made ICE20 demand the
+full standard dialog set) showing up at runtime rather than link time: the
+engine's own fallback still triggers here, fails to find a dialog to show,
+logs 2803/2867, and proceeds anyway (`InstallValidate` returns 1). Log-noise
+only, not a functional defect — left as an open, low-priority cosmetic item
+rather than fixed, since closing it properly means authoring a real
+`FilesInUse` dialog and `ErrorDialog` property, i.e. adopting more of
+WixUI's standard dialog set than this MSI has ever wanted.
 **Previous session**: 2026-08-18 (twenty-second session) — Two open Phase 5
 checklist items field-verified, plus a small feature added on request. First,
 the field report: a non-admin Windows install triggers a UAC elevation
