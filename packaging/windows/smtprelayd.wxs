@@ -13,11 +13,22 @@
   by hand for one yes/no question, rather than suppressing the check, would
   mean adopting a full WixUI wizard for an MSI that otherwise shows no UI at
   all, a materially bigger change than "ask before deleting the data
-  directory." Suppressing ICE20 does not regress anything: without it, a
-  fatal error or a Cancel click during setup just falls back to the Windows
-  Installer engine's own default handling, which is exactly what already
-  happened on every run before PurgeDataDlg existed, since there was no
-  custom UI at all then either.
+  directory."
+
+  Suppressing ICE20 was first thought not to regress anything: reasoned,
+  not verified, and wrong in one respect. On real hardware (0.2.15 -> 0.2.16
+  upgrade, 2026-08-19), the missing FilesInUse dialog is not only a build-time
+  check. Restart Manager detects the running service's locked binary before
+  StopServiceCA gets to stop it, tries to show its own "files in use" prompt,
+  finds no authored dialog and no ErrorDialog property to fall back to, and
+  the engine's actual fallback is a visible message box: "The installer has
+  encountered an unexpected error installing this package... error code is
+  2803", confusing though not fatal; the install still completes. Fixed by
+  disabling Restart Manager for this package (MSIRESTARTMANAGERCONTROL below)
+  rather than authoring the dialogs ICE20 wants: StopServiceCA already stops
+  the service deterministically before RemoveFiles, so Restart Manager's own
+  detection is redundant here, and removing the trigger is smaller than
+  building a FilesInUse dialog just to satisfy it.
 
   Variables supplied at candle.exe time (-d<Name>=<Value>):
     Version              MSI ProductVersion, numeric major.minor.build only
@@ -73,6 +84,17 @@
          "Yes, delete it" or passes it explicitly on the command line for a
          scripted uninstall, e.g. msiexec /x smtprelayd.msi /qn CLEANDATA=1. -->
     <Property Id="CLEANDATA" Value="0" />
+
+    <!-- Restart Manager's own "files in use" detection is redundant here:
+         StopServiceCA below already stops the service deterministically
+         before RemoveFiles runs, which is what actually unlocks the binary
+         for an upgrade. On real hardware it surfaced instead as a visible
+         "installer has encountered an unexpected error... error code is
+         2803" message box, because this package has no authored FilesInUse
+         dialog for it to show instead (see the -sice:ICE20 note above).
+         Disabling Restart Manager removes the trigger for that fallback
+         rather than building a dialog just to satisfy it. -->
+    <Property Id="MSIRESTARTMANAGERCONTROL" Value="Disable" />
 
     <Directory Id="TARGETDIR" Name="SourceDir">
       <Directory Id="ProgramFiles64Folder">

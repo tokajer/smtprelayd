@@ -60,11 +60,29 @@ MSI has no `Dialog` table entry for. This is the twenty-second session's
 `-sice:ICE20` suppression (added when `PurgeDataDlg` made ICE20 demand the
 full standard dialog set) showing up at runtime rather than link time: the
 engine's own fallback still triggers here, fails to find a dialog to show,
-logs 2803/2867, and proceeds anyway (`InstallValidate` returns 1). Log-noise
-only, not a functional defect — left as an open, low-priority cosmetic item
-rather than fixed, since closing it properly means authoring a real
-`FilesInUse` dialog and `ErrorDialog` property, i.e. adopting more of
-WixUI's standard dialog set than this MSI has ever wanted.
+logs 2803/2867, and proceeds anyway (`InstallValidate` returns 1).
+**Corrected immediately after**: reported back as "es kommt aber eine
+Fehlermeldung mit 2803" — right, and wrong to have called it log-noise
+first: `The installer has encountered an unexpected error installing this
+package... error code is 2803` is the verbatim text Windows Installer's
+generic fallback message box shows, not just a verbose-log artifact, so an
+operator running the upgrade interactively sees it appear, several times,
+during an otherwise-successful run. Fixed properly this time instead of
+left open: `<Property Id="MSIRESTARTMANAGERCONTROL" Value="Disable" />`
+added next to `CLEANDATA`, since `StopServiceCA` already stops the service
+deterministically before `RemoveFiles` — which is what actually unlocks the
+binary for an upgrade — making Restart Manager's own detection (and its
+attempt to show a dialog this MSI has never authored) redundant rather than
+something to build a `FilesInUse` dialog to satisfy. Smaller and more
+targeted than the alternative of adopting more of WixUI's standard dialog
+set. The header comment's ICE20 paragraph and the new property both got the
+`xmllint --noout` check before reporting this done — the exact mistake the
+twentieth and twenty-second sessions each made once already (a bare `--`
+inside a prose XML comment) was caught and fixed at draft time this
+session, in both new comment blocks, before it could repeat a third time.
+Not yet re-verified against an actual upgrade — no WiX/Windows toolchain in
+this environment — so the next upgrade test on `ATAXVM-STSC` is what
+confirms the message box is actually gone.
 **Previous session**: 2026-08-18 (twenty-second session) — Two open Phase 5
 checklist items field-verified, plus a small feature added on request. First,
 the field report: a non-admin Windows install triggers a UAC elevation
