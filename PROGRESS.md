@@ -94,6 +94,127 @@ gap as most sessions here, left for CI.
 `docs/CONFIGURATION.md` section 9 and `configs/smtprelayd.example.toml` both
 document `service.timezone`; `MEMORY.md` sections 7 and 10 updated for the
 timezone option and both startup-failure logging fixes.
+**Same session, further follow-up: the long-open "abort or only log" question
+closed.** Requested directly: "fehlerhafter Token-Abruf soll loggen und den
+Start verhindern." `authms365.TokenSource` only ever fetched a token lazily,
+on the first delivery attempt against a route, so a rejected M365 credential
+or an unreachable tenant at boot was invisible until mail was already queued
+behind it — exactly the gap the open question in this file described. New
+`Manager.VerifyTokens` (`internal/delivery/delivery.go`) walks `cfg.Routes`
+in configuration order and calls `Token(ctx)` on each xoauth2 route's already
+constructed source, returning the first error wrapped with the route name; a
+route with no cached source (`plain`/`login`/`none`) is skipped, since a
+static credential has nothing to verify over the network. `serve()`
+(`cmd/smtprelayd/main.go`) calls it right after `delivery.New` succeeds and
+before any worker goroutine starts, `log.Error`s and returns on failure —
+the same "log then abort" shape every other startup dependency in `serve()`
+already uses (`spool.Open`, `store.Open`, `listener.New`, `web.New`), so this
+is one more instance of an existing pattern, not a new one. Not folded into
+`delivery.New` itself, deliberately: construction only validates shape
+(tenant/client ID/secret non-empty), this call reaches the network, and
+keeping them separate meant no existing caller of `New` — including its own
+tests — needed to change. Three new tests in
+`internal/delivery/delivery_test.go` cover the skip-when-not-xoauth2 case,
+the success case and the abort case, against a `fakeTokenSource` stub rather
+than a real token request: `authms365.New` hardcodes the token authority to
+`login.microsoftonline.com` with no seam for a test server from outside its
+own package, the same reason `authms365`'s own tests reach into the
+unexported `endpoint` field directly instead. **Accepted tradeoff, stated
+before building this rather than found afterward**: both the systemd unit
+(`Restart=on-failure`, `RestartSec=5`, `StartLimitBurst=5` in
+`StartLimitIntervalSec=60`) and the Windows service recovery action restart
+the process automatically, so a queued message is never lost while the
+tenant is unreachable — but a Microsoft 365 outage or a rejected secret
+lasting longer than roughly the first 25 seconds of restart attempts
+exhausts the Linux unit's restart burst and leaves the service down until an
+operator intervenes (`systemctl reset-failed` and a manual start). That is
+what "verhindern" was asked to do, not a side effect to soften.
+`docs/MS365-AUTH.md`/`docs/CONFIGURATION.md` not touched: neither documents
+today's lazy-fetch behaviour to begin with, so there was no stale claim to
+correct.
+Verified with the Go 1.25.13 toolchain: `gofmt -l .` clean, `go vet ./...`
+clean, `GOOS=windows GOARCH=amd64 go build ./...` clean, `go test ./...` and
+`go test -race ./...` both green across every package including the three
+new tests, `scripts/check-banned-imports.sh` clean for all three targets.
+`govulncheck`/`gosec` not run locally, same recurring gap, left for CI.
+**Same session, a second, deeper follow-up: a bad startup was never actually
+reported to Windows.** Requested directly: "auch eine falsche Konfiguration
+sollte den Start auf Windows verhindern." Tracing why led past config
+specifically to the real, general bug: `winProgram.Start`
+(`cmd/smtprelayd/service_windows.go`) is the kardianos/service entry point
+the SCM calls on Windows, and it launched `serve()` in a goroutine and
+returned `nil` immediately, unconditionally — so the SCM was told "started
+successfully" before `config.Load` had even run, let alone `checkEnvironment`,
+`spool.Open`, `store.Open`, `listener.New`, `delivery.New`,
+`dm.VerifyTokens` (the previous follow-up, same session) or the SMTP
+listener's own socket bind. Every one of those already logged its failure
+correctly (several sessions' worth of exactly that work), but none of it
+ever reached the Windows service state: the process would exit right after,
+and the SCM would carry on showing the service as running because nothing
+had told it otherwise — a genuinely silent failure on the one platform this
+project's own installer targets most, not merely an under-logged one.
+Fixed with a ready signal rather than a fixed wait: `serve()`
+(`cmd/smtprelayd/main.go`) gained a `ready chan<- error` parameter (nil on
+the foreground/systemd path, where a non-zero process exit already is a
+startup failure systemd's `Restart=on-failure` acts on) and a named return
+value plus one `defer` that sends `err` on it exactly once, whichever return
+path is taken. An explicit `notifyReady(nil)` call marks the one point past
+every synchronous, fail-fast step — including the SMTP listener's own
+socket bind, moved out of the old combined `listener.Set.Serve` into a new
+`Set.Bind` (fails fast, e.g. an address already in use) called just before
+that point, with `Set.Run` (blocks until shutdown, replaces the accepting
+half of the old `Serve`) called just after. `winProgram.Start` now blocks on
+that channel and returns whatever it receives, so the SCM sees a real
+"failed to start" — triggering `OnFailureRestart` and showing a stopped
+service with an error, not a running one doing nothing — for exactly the
+class of failure this session already made sure reached the log file. A
+fixed-wait heuristic (return success if `serve()` has not failed within N
+seconds) was considered and rejected: `authms365`'s token request timeout is
+15 seconds, so a wait short enough to feel responsive could still report
+success moments before a slow-but-genuine tenant rejection arrived; the
+`ready`-channel signal has no such window, at the cost that a slow init
+(worst case still the same ~15s) makes the SCM wait that long for `Start` to
+return, comfortably inside its default ~30s patience but named here as the
+accepted tradeoff rather than found later.
+**Same session, a real bug found by the new test for the above, not part of
+what was asked**: splitting listener bind from run needed a `Set`-level test
+that had never existed, and the first version of it — dial, close, cancel —
+failed `go test -race` on the very first run. `Set.Close` closed every
+listener socket, then called `wg.Wait()` per server; `Server.accept`'s loop
+could have already had `Accept` return a real connection in the instant
+before the socket closed, and would then call `wg.Add(1)` concurrently with
+that `Wait()` — exactly the ordering `sync.WaitGroup`'s own documentation
+calls out as undefined: an `Add` with a positive delta on a counter that
+could be zero must happen before the matching `Wait`, and closing a socket
+provides no such ordering by itself. This is not new in this session — the
+same two calls existed in the previous combined `Serve` — it had simply
+never been exercised by a `-race` test at the `Set` level before. Fixed with
+a `closeMu sync.Mutex` plus `closed bool` on `Server`: `stopAccepting` sets
+`closed` under the lock before closing the socket, and `accept` checks
+`closed` under the same lock immediately before every `wg.Add`, refusing and
+closing the connection instead if shutdown has already begun. That
+serialisation is what gives `sync.WaitGroup` the ordering it requires,
+regardless of how the two goroutines happen to interleave. `Set.Close` keeps
+its original two-phase shape (stop every server accepting first, then wait
+for all of them) rather than closing-and-waiting one server at a time, so
+one slow listener's sessions still cannot delay the others from being told
+to stop. Two tests in the new `internal/listener/listener_test.go` cover
+`Bind` failing on an address already in use and `Bind`+`Run` actually
+accepting a connection; a third, `TestCloseDoesNotRaceAcceptedConnections`,
+dials continuously from four goroutines while cancelling to give `-race` a
+real chance at the window that caught this, and is the regression test —
+run eight times in a row under `-race` with no failure once the fix landed,
+after reliably failing before it.
+Verified with the Go 1.25.13 toolchain: `gofmt -l .` clean, `go vet ./...`
+clean on both `GOOS`, `GOOS=windows GOARCH=amd64 go build ./...` clean
+(exercises the changed `service_windows.go` directly), `go test ./...` and
+`go test -race ./...` both green across every package including the three
+new listener tests, `scripts/check-banned-imports.sh` clean for all three
+targets. Not verified: an actual Windows service start against a broken
+configuration — no Windows machine in this environment — so the next
+deployment session should deliberately break `smtprelayd.toml` (or block the
+configured port) before starting the service and confirm the SCM now shows
+a failed start rather than a silently dead "running" one.
 **Previous session**: 2026-08-21 (twenty-sixth session) — Deployment support only,
 no phase work, no code changed. Walked an operator through configuring the
 `m365` route's `oauth2.client_secret` on a live Windows install, starting
@@ -1336,6 +1457,13 @@ Unchanged, plus:
       file mode, `data_dir` pointed at `/etc/smtprelayd` instead of
       `/var/lib/smtprelayd`, missing client CIDR), see the twenty-fifth
       session above; still not the verification this item asks for)
+- [ ] Windows service start failure actually reported to the SCM — added
+      2026-08-21, reasoned from the kardianos/service contract and verified
+      by unit/race tests only, never against a real Windows service: break
+      `smtprelayd.toml` (or occupy a configured listener port) on
+      `ATAXVM-STSC`, start the service, and confirm `services.msc`/
+      `Get-Service` shows it stopped with an error — not silently "running" —
+      and that the reason is in `smtprelayd.log`/`smtprelayd-error.log`
 - [x] CI workflow that runs on every push/PR (`.github/workflows/ci.yml`):
       gofmt, vet, `go test -race`, the banned-import check and govulncheck,
       plus a cross-compile job for all three targets
@@ -1627,14 +1755,26 @@ tracked in the phase 5 checklist rather than here.
 ## Open questions
 
 - Tenant, mailbox and sending domain for the Microsoft 365 route.
-- Should a failed token acquisition at startup abort, or only be logged? Today
-  no token is fetched before the first delivery, so a tenant outage at boot is
-  invisible until a message arrives.
+- ~~Should a failed token acquisition at startup abort, or only be logged?~~
+  **Answered 2026-08-21**: abort, and log. `delivery.Manager.VerifyTokens`
+  eagerly fetches a token for every xoauth2 route right after `delivery.New`,
+  before any worker starts; `serve()` logs and returns on failure, the same
+  shape every other startup dependency already uses. Accepted tradeoff: an
+  outage or rejected secret outlasting the restart-on-failure burst window
+  (Linux: `StartLimitBurst=5` in 60s) leaves the service down until an
+  operator intervenes, which is what "prevent the start" was asked to do.
 - ~~Should the dashboard require authentication, or is localhost binding
   enough?~~ **Answered 2026-08-11**: loopback binding is the authentication and
   is now enforced — a non-loopback `[web].address` fails startup. A token login
   for the dashboard is wanted eventually but is its own phase, not a blocker.
-- Which addresses go into `[bounce].notify`?
+- ~~Which addresses go into `[bounce].notify`?~~ **Answered 2026-08-21**:
+  `smtprelay@mydomain.local`, set as the global recipient in
+  `configs/smtprelayd.example.toml`. `bounce.sender`, `notify_route`,
+  `digest_minutes` and `max_per_hour` were already filled with working
+  defaults (`postmaster@example.at`, `m365`, 15, 12); nothing else is
+  required for notifications to be enabled once this is carried into the
+  live configuration and `notify_route` is confirmed to name an actual
+  configured route there.
 - Should downstream bounces be ingested from the relay mailbox via Graph?
 - ~~Should the API listener be exposed beyond localhost?~~ **Answered
   2026-08-11 by implication**: the API shares the dashboard's listener, which
@@ -1767,3 +1907,7 @@ tracked in the phase 5 checklist rather than here.
 | 2026-08-12 | `internal/logging` got its first tests as part of that swap | The package had none, so the rotation dependency could have been replaced with a stub and CI would still have passed. The four now cover what the package is actually responsible for: 0600 on creation, restricting a file an earlier version left 0644, rotation producing a real backup file, and secret redaction surviving the writer setup |
 | 2026-08-20 | Added `dpapi:<path>`, Windows only, alongside `${ENV_VAR}` and `file:` | `file:` still leaves a secret in plaintext on disk, and the operator asked directly for it not to be. DPAPI is machine-scoped (`CRYPTPROTECT_LOCAL_MACHINE`), not user-scoped: the virtual service account has no ordinary profile to hold a per-user master key. It defends against the ciphertext being copied off the machine; it cannot and does not defend against an attacker who already has Administrator/SYSTEM on the machine the service runs on, since an unattended service must be able to decrypt at boot with no human to prompt for a passphrase — that limit was stated to the operator before building this, not discovered after |
 | 2026-08-20 | `unsafe` is allowlisted per file in `internal/buildpolicy`, not banned with zero exceptions | DPAPI (`crypt32.dll`'s `CryptProtectData`/`CryptUnprotectData`) has no safe wrapper in `golang.org/x/sys/windows`. The ban stays a CI-enforced default; `dpapi_windows.go` joins the previously dormant `trust_windows.go` entry as the only two files permitted to import it, each named with its reason, so a third file reaching for `unsafe` anywhere else in the tree still fails the build |
+| 2026-08-21 | A failed OAuth2 token acquisition at startup aborts the service instead of only being logged | Requested directly. Without an eager fetch, a rejected M365 credential or an unreachable tenant was invisible until the first message was already queued behind it. Accepted cost: an outage longer than the restart-on-failure burst window leaves the service down until an operator intervenes, which is the literal ask, not a side effect to soften |
+| 2026-08-21 | `winProgram.Start` blocks on a `ready` channel from `serve()` instead of returning `nil` unconditionally | The SCM was told "started successfully" before `config.Load` or any other startup check had even run, so every startup-failure log line this project has added over many sessions never actually stopped Windows from showing the service as running. A `ready` signal at the one point past every synchronous check, rather than a fixed wait, was chosen because `authms365`'s 15s request timeout means a short wait could still report success moments before a genuine, slow tenant rejection |
+| 2026-08-21 | `listener.Set.Serve` split into `Bind` (fails fast) and `Run` (blocks until shutdown) | The SMTP listener's own socket bind was the last startup step that could still fail after the `ready` signal above; splitting it out lets that failure also reach the SCM instead of only the log |
+| 2026-08-21 | `Server.accept`'s `wg.Add` and `Set.Close`'s `wg.Wait` are serialised through a `closeMu`/`closed` pair, not left to rely on the listener socket being closed first | `sync.WaitGroup` requires every `Add` with a positive delta on a counter that could be zero to happen before the matching `Wait`; closing the socket does not guarantee that ordering against a connection `Accept` had already returned. Found by `-race` in the new `Set`-level test the `Bind`/`Run` split needed, not something this session set out to fix — pre-existing in the previous combined `Serve`, simply never exercised by a test at that level before |

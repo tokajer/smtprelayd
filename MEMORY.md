@@ -147,6 +147,16 @@ Client credentials flow, no user interaction, no password.
 - SASL payload: `user=<mailbox>\x01auth=Bearer <token>\x01\x01`, base64 encoded.
 - Cache the token in memory and refresh roughly 5 minutes before expiry. Never
   persist it to disk. Expose token age as a metric.
+- **Decided 2026-08-21**: a token is also fetched eagerly for every xoauth2
+  route at startup (`delivery.Manager.VerifyTokens`, called from `serve()`
+  right after `delivery.New`), and a failure aborts startup rather than only
+  being logged. Before this, no token was fetched before the first delivery
+  attempt, so a rejected credential or an unreachable tenant at boot was
+  silent until mail was already queued behind it. Accepted cost: an outage
+  or rejected secret that outlasts the restart-on-failure burst window
+  (Linux: `StartLimitBurst=5` within `StartLimitIntervalSec=60`) leaves the
+  service down until an operator intervenes — the literal request, not a
+  side effect.
 
 **Throttling**: Microsoft 365 permits on the order of 10 concurrent connections
 and roughly 30 messages per minute per connection, with a daily recipient cap.
@@ -366,6 +376,30 @@ The load-bearing principles:
   totally unparsable config file, or one that fails its own trust check
   (`CheckConfigFile`) — `data_dir` is never known in either case. Those stay
   stderr/journald/Windows-Event-Log-only.
+- **On Windows, a startup failure now also stops the SCM from showing the
+  service as running** — added 2026-08-21, closing the gap the two bullets
+  above did not: every one of those failures was logged correctly, but
+  `winProgram.Start` (`cmd/smtprelayd/service_windows.go`) returned `nil` to
+  the SCM unconditionally, before `config.Load` or any other check had even
+  run, so Windows kept showing "running" over a process that had already
+  exited. `serve()` now takes a `ready chan<- error`, sent to exactly once —
+  by an explicit call once every synchronous, fail-fast step has succeeded
+  (including the SMTP listener's own socket bind, now `listener.Set.Bind`,
+  split out of the old combined `Serve` so a bind conflict is caught at the
+  same point), or by a deferred fallback carrying whatever error an earlier
+  return produced. `winProgram.Start` blocks on it and forwards the result,
+  so a bad configuration, an unopenable spool/store, a bind conflict or a
+  rejected OAuth2 credential now surfaces as a real SCM start failure
+  (`OnFailureRestart` fires, `services.msc`/`sc query` shows it stopped with
+  an error) instead of a silently dead "running" service. The foreground and
+  systemd paths pass `nil` for `ready` and are unaffected — a non-zero exit
+  already is a startup failure there. **Found as a side effect, not part of
+  what was asked**: the `Set`-level test the `Bind`/`Run` split needed
+  exposed a genuine pre-existing data race between `Server.accept`'s
+  `wg.Add` and `Set.Close`'s `wg.Wait`, present in the previous combined
+  `Serve` too but never before exercised by a `-race` test at that level.
+  Fixed with a `closeMu`/`closed` pair on `Server` serialising the two, per
+  `sync.WaitGroup`'s own ordering requirement.
 - Never store state next to the binary.
 - Configuration reload without restart: SIGHUP on Linux, a service control code
   or a dashboard action on Windows. Listener socket changes require a restart

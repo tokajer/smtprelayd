@@ -4,6 +4,8 @@
 package delivery
 
 import (
+	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"strings"
@@ -11,6 +13,7 @@ import (
 	"time"
 
 	"github.com/tokajer/smtprelayd/internal/config"
+	"github.com/tokajer/smtprelayd/internal/delivery/smarthost"
 	"github.com/tokajer/smtprelayd/internal/spool"
 	"github.com/tokajer/smtprelayd/internal/store"
 )
@@ -82,3 +85,50 @@ func TestFailRecordsRealClientFailureButNotANotificationsOwn(t *testing.T) {
 		t.Fatalf("pending = %d after a notification's own failure, want still 1 (no loop)", got)
 	}
 }
+
+// fakeTokenSource stands in for authms365.TokenSource so VerifyTokens can be
+// tested without reaching the real login.microsoftonline.com: authms365.New
+// hardcodes that authority and has no seam for a test server.
+type fakeTokenSource struct{ err error }
+
+func (f fakeTokenSource) Token(context.Context) (string, error) {
+	if f.err != nil {
+		return "", f.err
+	}
+	return "tok", nil
+}
+
+func TestVerifyTokensSkipsRoutesWithNoCachedSource(t *testing.T) {
+	// testManager's one route has Auth: "none", so New never populated
+	// m.tokens for it; VerifyTokens must not treat that as a failure.
+	m, _ := testManager(t)
+	if err := m.VerifyTokens(context.Background()); err != nil {
+		t.Fatalf("VerifyTokens: %v", err)
+	}
+}
+
+func TestVerifyTokensPassesWhenEveryRouteTokenFetchSucceeds(t *testing.T) {
+	m, _ := testManager(t)
+	m.tokens["m365"] = fakeTokenSource{}
+	if err := m.VerifyTokens(context.Background()); err != nil {
+		t.Fatalf("VerifyTokens: %v", err)
+	}
+}
+
+func TestVerifyTokensFailsStartupOnRejectedCredential(t *testing.T) {
+	m, _ := testManager(t)
+	m.tokens["m365"] = fakeTokenSource{err: errors.New("invalid_client")}
+
+	err := m.VerifyTokens(context.Background())
+	if err == nil {
+		t.Fatal("VerifyTokens accepted a route whose token fetch failed")
+	}
+	if !strings.Contains(err.Error(), "m365") || !strings.Contains(err.Error(), "invalid_client") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+// Compile-time assertion that fakeTokenSource satisfies the interface
+// delivery actually stores, so a signature drift there fails this test file
+// to build rather than silently type-checking against something else.
+var _ smarthost.TokenSource = fakeTokenSource{}

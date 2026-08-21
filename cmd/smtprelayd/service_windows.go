@@ -43,8 +43,12 @@ func controlService(action, configPath string) error {
 }
 
 // winProgram adapts serve() to the kardianos/service Start/Stop lifecycle.
-// Start must return quickly, so the relay runs in a goroutine; Stop cancels
-// the context serve() was given and waits for it to unwind.
+// Start must return quickly, so the relay runs in a goroutine — but it
+// blocks that quick return on serve's ready signal, so a startup failure
+// (bad configuration, a spool/store that would not open, a port already
+// bound, a rejected OAuth2 credential) is reported to the SCM as a failed
+// start instead of silently leaving a dead process reported as running. Stop
+// cancels the context serve() was given and waits for it to unwind.
 type winProgram struct {
 	configPath string
 	console    bool
@@ -56,8 +60,9 @@ func (p *winProgram) Start(s kservice.Service) error {
 	var ctx context.Context
 	ctx, p.cancel = context.WithCancel(context.Background())
 	p.done = make(chan error, 1)
-	go func() { p.done <- serve(ctx, p.configPath, p.console) }()
-	return nil
+	ready := make(chan error, 1)
+	go func() { p.done <- serve(ctx, p.configPath, p.console, ready) }()
+	return <-ready
 }
 
 func (p *winProgram) Stop(s kservice.Service) error {

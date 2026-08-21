@@ -39,6 +39,15 @@ type Server struct {
 
 	ln net.Listener
 	wg sync.WaitGroup
+
+	// closeMu serialises wg.Add in accept against wg.Wait in close: closing
+	// the socket alone does not stop a connection Accept had already
+	// returned from also reaching Add, and sync.WaitGroup requires every Add
+	// with a positive delta on a counter that could be zero to happen before
+	// the matching Wait. Setting closed under this lock before Wait, and
+	// checking it under the same lock before every Add, gives that ordering.
+	closeMu sync.Mutex
+	closed  bool
 }
 
 // Set owns every listener of a running instance.
@@ -109,31 +118,50 @@ func New(cfg *config.Config, sp *spool.Spool, log *slog.Logger, st *store.Store)
 	return set, nil
 }
 
-// Serve binds every listener and blocks until ctx is cancelled.
-func (s *Set) Serve(ctx context.Context) error {
+// Bind opens every listener's socket. Split from Run so a caller learns
+// about a bind failure (e.g. an address already in use) synchronously,
+// before doing anything that could be mistaken for "started successfully" —
+// on Windows in particular, see winProgram.Start in cmd/smtprelayd.
+func (s *Set) Bind() error {
 	for _, srv := range s.servers {
 		if err := srv.listen(); err != nil {
 			s.Close()
 			return err
 		}
 	}
+	return nil
+}
+
+// Run accepts connections on every already-bound listener and blocks until
+// ctx is cancelled. Call Bind first.
+func (s *Set) Run(ctx context.Context) {
 	for _, srv := range s.servers {
 		go srv.accept(ctx)
 	}
 	<-ctx.Done()
 	s.Close()
-	return nil
 }
 
-// Close stops accepting and waits for open sessions to finish.
+// Close stops every server accepting, then waits for open sessions to
+// finish. Every socket is closed before any Wait, same as before this was
+// split across two loops for the race fix in stopAccepting's doc comment:
+// otherwise one slow listener's sessions would delay the others from even
+// being told to stop.
 func (s *Set) Close() {
 	for _, srv := range s.servers {
-		if srv.ln != nil {
-			_ = srv.ln.Close()
-		}
+		srv.stopAccepting()
 	}
 	for _, srv := range s.servers {
 		srv.wg.Wait()
+	}
+}
+
+func (s *Server) stopAccepting() {
+	s.closeMu.Lock()
+	s.closed = true
+	s.closeMu.Unlock()
+	if s.ln != nil {
+		_ = s.ln.Close()
 	}
 }
 
@@ -170,7 +198,19 @@ func (s *Server) accept(ctx context.Context) {
 			_ = conn.Close()
 			continue
 		}
+		s.closeMu.Lock()
+		if s.closed {
+			// stopAccepting already closed the listener; this connection was
+			// accepted in the narrow window before that took effect. Refusing
+			// it here, rather than calling wg.Add, is what keeps Add from
+			// ever racing the Wait in Set.Close — see closeMu's doc comment.
+			s.closeMu.Unlock()
+			<-s.sem
+			_ = conn.Close()
+			continue
+		}
 		s.wg.Add(1)
+		s.closeMu.Unlock()
 		go func() {
 			defer func() {
 				<-s.sem

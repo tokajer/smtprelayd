@@ -149,7 +149,7 @@ func run(cmd, configPath string, console bool, outPath string) error {
 		return nil
 
 	case "run":
-		return serve(context.Background(), configPath, console)
+		return serve(context.Background(), configPath, console, nil)
 
 	default:
 		return fmt.Errorf("unknown command %q, see -h", cmd)
@@ -160,7 +160,31 @@ func run(cmd, configPath string, console bool, outPath string) error {
 // paths pass context.Background(), relying solely on the signal.NotifyContext
 // below; the Windows service path passes a context it cancels itself from
 // Stop(), since a service has no process group to signal.
-func serve(ctx context.Context, configPath string, console bool) error {
+//
+// ready, if non-nil, receives exactly one value: nil once every synchronous,
+// fail-fast startup step has succeeded and only the long-running accept loop
+// remains, or the error that made serve return if one occurred first.
+// The foreground and systemd paths pass nil — a process that exits with a
+// non-zero status is already a startup failure there, which is what systemd's
+// Restart=on-failure acts on. On Windows nothing reads the process exit
+// status: kardianos/service's Start must return quickly, and doing so
+// unconditionally (the previous behaviour) told the SCM the service had
+// started before config.Load, or any other step here, had even run — a bad
+// configuration, a spool/store that would not open, a port already bound, or
+// a rejected OAuth2 credential all went unnoticed by Windows, reaching only
+// the log file. winProgram.Start (service_windows.go) now blocks on ready and
+// forwards a startup error to the SCM instead.
+func serve(ctx context.Context, configPath string, console bool, ready chan<- error) (err error) {
+	notified := false
+	notifyReady := func(e error) {
+		if ready == nil || notified {
+			return
+		}
+		notified = true
+		ready <- e
+	}
+	defer func() { notifyReady(err) }()
+
 	cfg, err := config.Load(configPath)
 	if err != nil {
 		logStartupFailure(configPath, cfg, err)
@@ -235,6 +259,10 @@ func serve(ctx context.Context, configPath string, console bool) error {
 		log.Error("delivery: failed to start", "error", err)
 		return err
 	}
+	if err := dm.VerifyTokens(ctx); err != nil {
+		log.Error("delivery: startup oauth2 token verification failed", "error", err)
+		return err
+	}
 	done := make(chan struct{})
 	go func() {
 		dm.Run(ctx)
@@ -273,12 +301,16 @@ func serve(ctx context.Context, configPath string, console bool) error {
 		}()
 	}
 
-	if err := set.Serve(ctx); err != nil {
-		log.Error("listener: stopped", "error", err)
+	if err := set.Bind(); err != nil {
+		log.Error("listener: failed to bind", "error", err)
 		stop()
 		<-done
 		return err
 	}
+	// Everything that can fail synchronously has now succeeded; only the
+	// accept loop, which runs until shutdown, remains.
+	notifyReady(nil)
+	set.Run(ctx)
 	<-done
 	log.Info("stopped", "queued", sp.Len())
 	return nil

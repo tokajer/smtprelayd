@@ -189,7 +189,7 @@ failed_retention_hours = 168
 
 [bounce]
 sender          = "postmaster@example.at"  # empty envelope sender is used on the wire
-notify          = []                       # global recipients, empty disables mail
+notify          = ["smtprelay@mydomain.local"]  # global recipients, empty disables mail
 notify_route    = "m365"                   # route used to send notifications
 digest_minutes  = 15                       # batch failures into one message
 max_per_hour    = 12                       # cap, excess is recorded but not mailed

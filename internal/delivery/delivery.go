@@ -121,6 +121,29 @@ func (m *Manager) warnSecretExpiry(r config.Route) {
 	}
 }
 
+// VerifyTokens eagerly acquires a token for every xoauth2 route. Without this,
+// authms365.TokenSource fetches nothing until the first message is attempted,
+// so a rejected credential or an unreachable tenant is invisible at startup
+// and only surfaces once mail is already queued behind it. Decided
+// 2026-08-21: the caller aborts startup on a non-nil error rather than only
+// logging it, so the failure is loud immediately instead of silent until a
+// message arrives. Routes iterate in configuration order for a deterministic
+// error when more than one is broken; a route with no cached source (auth
+// other than xoauth2) is skipped, since there is nothing to verify over the
+// network for a static credential.
+func (m *Manager) VerifyTokens(ctx context.Context) error {
+	for _, r := range m.cfg.Routes {
+		ts, ok := m.tokens[r.Name]
+		if !ok {
+			continue
+		}
+		if _, err := ts.Token(ctx); err != nil {
+			return fmt.Errorf("route %s: %w", r.Name, err)
+		}
+	}
+	return nil
+}
+
 // Run dispatches queued messages until ctx is cancelled, then waits for the
 // attempts already in flight.
 func (m *Manager) Run(ctx context.Context) {
