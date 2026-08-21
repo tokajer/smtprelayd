@@ -23,6 +23,7 @@
 			<option value="deferred" {{if eq .Filter.Status "deferred"}}selected{{end}}>deferred</option>
 			<option value="delivered" {{if eq .Filter.Status "delivered"}}selected{{end}}>delivered</option>
 			<option value="bounced" {{if eq .Filter.Status "bounced"}}selected{{end}}>bounced</option>
+			<option value="removed" {{if eq .Filter.Status "removed"}}selected{{end}}>removed</option>
 		</select>
 	</label>
 	<label>Since (RFC 3339)

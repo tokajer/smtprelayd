@@ -414,6 +414,19 @@ func TestDeleteActionRemovesFromSpoolKeepsHistory(t *testing.T) {
 	if msg == nil {
 		t.Fatal("history row deleted along with the spool entry; delete must retain history")
 	}
+	if msg.Status != "removed" {
+		t.Fatalf("status = %q, want removed", msg.Status)
+	}
+
+	active, err := st.FindMessages(store.MessageFilter{Status: "active", Limit: 100})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, m := range active {
+		if m.QueueID == id {
+			t.Fatal("deleted message still matches the /queue active filter")
+		}
+	}
 }
 
 // enqueueMessage puts one message in both the spool and the history store,

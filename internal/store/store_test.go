@@ -281,6 +281,31 @@ func TestRecordAttemptRejectsUnknownQueueID(t *testing.T) {
 	}
 }
 
+// TestRecordRemovalAppendsAfterExistingAttempts guards against RecordRemoval
+// colliding with a real delivery attempt's attempt_num after at least one
+// retry already happened before the operator deleted the message.
+func TestRecordRemovalAppendsAfterExistingAttempts(t *testing.T) {
+	s := testStore(t)
+	now := time.Now()
+	_ = s.RecordMessage(testRecord("REMOVE-AFTER-RETRY", now, now.Add(96*time.Hour)))
+	_ = s.RecordAttempt("REMOVE-AFTER-RETRY", 1, 421, "try later", "temporary", nil)
+
+	if err := s.RecordRemoval("REMOVE-AFTER-RETRY"); err != nil {
+		t.Fatal(err)
+	}
+
+	msg, err := s.FindMessageByID("REMOVE-AFTER-RETRY")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if msg.Status != "removed" {
+		t.Fatalf("status = %q, want removed", msg.Status)
+	}
+	if len(msg.Attempts) != 2 || msg.Attempts[1].AttemptNum != 2 || msg.Attempts[1].Class != "removed" {
+		t.Fatalf("unexpected attempts: %+v", msg.Attempts)
+	}
+}
+
 func TestFindMessagesFiltersByDerivedStatus(t *testing.T) {
 	s := testStore(t)
 	now := time.Now()
@@ -294,6 +319,9 @@ func TestFindMessagesFiltersByDerivedStatus(t *testing.T) {
 	_ = s.RecordMessage(testRecord("Q-BOUNCED", now, expires))
 	_ = s.RecordAttempt("Q-BOUNCED", 1, 550, "no such user", "permanent", nil)
 
+	_ = s.RecordMessage(testRecord("Q-REMOVED", now, expires))
+	_ = s.RecordRemoval("Q-REMOVED")
+
 	for _, tc := range []struct {
 		status string
 		wantID string
@@ -302,6 +330,7 @@ func TestFindMessagesFiltersByDerivedStatus(t *testing.T) {
 		{"deferred", "Q-DEFERRED"},
 		{"delivered", "Q-DELIVERED"},
 		{"bounced", "Q-BOUNCED"},
+		{"removed", "Q-REMOVED"},
 	} {
 		got, err := s.FindMessages(MessageFilter{Status: tc.status, Limit: 100})
 		if err != nil {
@@ -356,6 +385,8 @@ func TestFindMessagesActiveStatusIsQueuedOrDeferred(t *testing.T) {
 	_ = s.RecordAttempt("ACTIVE-DEFERRED", 1, 421, "try later", "temporary", nil)
 	_ = s.RecordMessage(testRecord("ACTIVE-DELIVERED", now, expires))
 	_ = s.RecordAttempt("ACTIVE-DELIVERED", 1, 250, "ok", "delivered", nil)
+	_ = s.RecordMessage(testRecord("ACTIVE-REMOVED", now, expires))
+	_ = s.RecordRemoval("ACTIVE-REMOVED")
 
 	got, err := s.FindMessages(MessageFilter{Status: "active", Limit: 100})
 	if err != nil {

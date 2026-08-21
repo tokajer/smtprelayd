@@ -58,7 +58,8 @@ Messages the relay could not hand over to a smarthost.
 ### `GET /api/v1/messages`
 
 Full message history. Same filters plus `status` with values `queued`,
-`deferred`, `delivered`, `bounced`.
+`deferred`, `delivered`, `bounced`, `removed` (discarded from the spool by an
+operator via `DELETE /messages/{id}` before it reached an outcome).
 
 ```json
 {

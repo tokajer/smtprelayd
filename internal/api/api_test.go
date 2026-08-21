@@ -178,6 +178,9 @@ func TestAdminScopeCanDeleteAndAudits(t *testing.T) {
 	if msg == nil {
 		t.Fatal("history row deleted along with the spool entry; delete must retain history")
 	}
+	if msg.Status != "removed" {
+		t.Fatalf("status = %q, want removed", msg.Status)
+	}
 
 	entries, err := st.FindAuditByQueueID(id)
 	if err != nil {

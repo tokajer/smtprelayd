@@ -296,7 +296,8 @@ func (s *Store) RecordMessage(rec MessageRecord) error {
 }
 
 // RecordAttempt inserts a delivery attempt record.
-// class is one of "delivered", "temporary", "permanent", "expired".
+// class is one of "delivered", "temporary", "permanent", "expired", or
+// "removed" (written by RecordRemoval, never by the delivery worker).
 func (s *Store) RecordAttempt(queueID string, attemptNum int, smtpCode int, smtpResponse, class string, nextAttemptAt *time.Time) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -326,6 +327,21 @@ func (s *Store) RecordAttempt(queueID string, attemptNum int, smtpCode int, smtp
 	}
 
 	return nil
+}
+
+// RecordRemoval records that an operator discarded a message from the spool
+// before it reached a delivery outcome (the dashboard/API "delete" action).
+// Without this, FindMessages' derived status keeps whatever class the last
+// real delivery attempt left behind (or none at all), so a discarded message
+// would keep matching the "active"/"queued"/"deferred" filters indefinitely
+// even though it no longer exists in the spool.
+func (s *Store) RecordRemoval(queueID string) error {
+	var next int
+	row := s.db.QueryRow(`SELECT COALESCE(MAX(attempt_num), 0) + 1 FROM attempts WHERE queue_id = ?`, queueID)
+	if err := row.Scan(&next); err != nil {
+		return fmt.Errorf("store: record removal: %w", err)
+	}
+	return s.RecordAttempt(queueID, next, 0, "", "removed", nil)
 }
 
 // RecordAudit inserts an audit log entry.

@@ -319,6 +319,7 @@ td .qid, .qid {
 .pill-delivered { color: var(--ok); }
 .pill-bounced, .pill-permanent, .pill-expired { color: var(--danger); }
 .pill-temporary { color: var(--warn); }
+.pill-removed { color: var(--muted); }
 
 /* ---------- sidebar lists ---------- */
 

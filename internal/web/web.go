@@ -461,6 +461,9 @@ func (s *Server) handleDeleteAction(w http.ResponseWriter, r *http.Request) {
 	}
 	switch err := s.spool.Discard(id); {
 	case err == nil:
+		if rerr := s.store.RecordRemoval(id.String()); rerr != nil {
+			s.log.Warn("removal record write failed", "queue_id", id.String(), "error", rerr)
+		}
 		if aerr := s.store.RecordAudit("dashboard", r.RemoteAddr, "delete", id.String(), ""); aerr != nil {
 			s.log.Warn("audit log write failed", "action", "delete", "queue_id", id.String(), "error", aerr)
 		}

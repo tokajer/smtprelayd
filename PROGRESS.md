@@ -19,7 +19,59 @@ fix below): the MSI installs without error, exactly one service registration
 remains (no duplicate), the on-disk binary is replaced, and the service keeps
 running afterwards. Uninstall remains unverified. Log rotation and Windows ACL
 verification at startup are complete.
-**Last session**: 2026-08-21 (twenty-seventh session) — Two small features
+**Last session**: 2026-08-21 (twenty-eighth session) — Bug fix, no phase work.
+Reported as "nach /queue bleiben die gelöschten Einträge sichtbar. ist das
+gewollt?" Traced to a real gap, not a misunderstanding: `/queue`'s "active"
+filter (`internal/store/query.go`) derives status purely from the latest row
+in the `attempts` table, and the dashboard/API delete action
+(`handleDeleteAction` in `internal/web/web.go`, `handleDelete` in
+`internal/api/endpoints.go`) only ever called `spool.Discard`, which removes
+the spool file but writes no attempt record — so a deleted message kept
+whatever status it had before deletion ("queued" or "deferred") and kept
+matching `/queue`'s active filter indefinitely, until the history retention
+job eventually purged the row (`history.retention_days`, default 90). The
+header stat tiles were unaffected since those come from the in-memory
+`metrics.Registry`, not the store, which is why only the table below them was
+stale. Presented two fix options and asked before implementing, since this
+touches store status vocabulary and the JSON API contract, not just a local
+display bug: a live-spool cross-check scoped to `/queue`, or a new terminal
+status the store itself records. Operator chose the latter. New
+`Store.RecordRemoval(queueID)` (`internal/store/store.go`) computes the next
+`attempt_num` and inserts one attempt row with class `"removed"`, called from
+both delete handlers right after `spool.Discard` succeeds (failure only
+logged, matching the existing `RecordAudit` error handling right next to it —
+the spool removal already happened and is the part that must not be rolled
+back). `classToStatus`/`statusClasses` (`internal/store/query.go`) gained a
+`"removed"` case, so it is excluded from `active`/`queued`/`deferred` for
+free and separately filterable via `/search?status=removed` and
+`GET /api/v1/messages?status=removed`, without hard-deleting the history row
+— `spool.Discard`'s own "retains history by design" comment stays true, this
+just makes the derived status agree with reality instead of freezing at
+whatever the last real delivery attempt (or lack of one) left behind.
+`.pill-removed` added to `internal/web/static/style.css` (reusing `--muted`,
+same as "queued") and a `removed` option added to `/search`'s status filter
+dropdown; no other template changes needed since `queue.html`/`message.html`
+already render whatever `.Status`/`.Class` the store returns. `docs/guides/
+API.md`'s status enum for `GET /api/v1/messages` updated. Extended rather
+than duplicated the existing delete tests
+(`TestDeleteActionRemovesFromSpoolKeepsHistory` in `internal/web/web_test.go`,
+`TestAdminScopeCanDeleteAndAudits` in `internal/api/api_test.go`) with a
+status-is-"removed" assertion and an active-filter-excludes-it check; new
+`internal/store/store_test.go` cases cover the status derivation itself and
+`RecordRemoval` appending after a real attempt already exists (guards against
+an `attempt_num` collision when a message was retried at least once before
+being deleted). Verified with the Go 1.25.13 toolchain: `gofmt -l .` clean,
+`go vet ./...` clean, `GOOS=windows GOARCH=amd64 go build ./...` clean,
+`go test ./...` and `go test -race ./...` both green across every package,
+`scripts/check-banned-imports.sh` clean for all three targets.
+`govulncheck`/`gosec` not run locally, not installed in this environment,
+same recurring gap as most sessions here, left for CI. Also manually verified
+end to end against a running instance (temp config, real SMTP submission,
+real HTTP POST through the CSRF-protected form): before the fix, the message
+sat in `/queue` as "deferred" after being deleted; after, `/queue` no longer
+lists it, the message page shows status "removed", `/search?status=removed`
+finds it, and `/search?status=active` does not.
+**Previous session**: 2026-08-21 (twenty-seventh session) — Two small features
 added on request, no phase work. First, "ich möchte statt utc auch eine
 andere Zeitzone verwenden können": asked the operator up front whether the
 scope was the log file, the dashboard, or both, since the two draw from

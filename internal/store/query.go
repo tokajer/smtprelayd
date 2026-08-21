@@ -99,7 +99,8 @@ type MessageFilter struct {
 	Sender    string     // substring match on the envelope sender
 	Recipient string     // substring match
 	Subject   string     // substring match; matches nothing meaningful once retain_subjects redacts a row
-	// Status is one of "", "queued", "deferred", "delivered", "bounced", or
+	// Status is one of "", "queued", "deferred", "delivered", "bounced",
+	// "removed" (discarded by an operator before reaching an outcome), or
 	// "active" (queued or deferred, i.e. still in the spool) for the live
 	// queue view; "" means any.
 	Status string
@@ -120,9 +121,9 @@ var messageSortColumns = map[string]string{
 	"route":       "m.route",
 	// Status is derived, not stored, so sorting by it needs a synthesised
 	// rank rather than a column: queued, then deferred, then delivered,
-	// then bounced. The mapping is fixed here, never influenced by request
-	// input, so this is as safe to interpolate as any other allowlisted
-	// column.
+	// then bounced/removed sharing the last rank. The mapping is fixed
+	// here, never influenced by request input, so this is as safe to
+	// interpolate as any other allowlisted column.
 	"status": `CASE WHEN latest.class IS NULL THEN 0 WHEN latest.class = 'temporary' THEN 1 WHEN latest.class = 'delivered' THEN 2 ELSE 3 END`,
 }
 
@@ -133,6 +134,7 @@ var statusClasses = map[string][]string{
 	"deferred":  {"temporary"},
 	"delivered": {"delivered"},
 	"bounced":   {"permanent", "expired"},
+	"removed":   {"removed"},
 }
 
 // BounceFilter specifies query parameters for FindBounces.
@@ -393,6 +395,8 @@ func classToStatus(class string, hasAttempt bool) string {
 		return "delivered"
 	case "permanent", "expired":
 		return "bounced"
+	case "removed":
+		return "removed"
 	default:
 		return "deferred"
 	}
