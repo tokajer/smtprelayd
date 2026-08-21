@@ -19,7 +19,106 @@ fix below): the MSI installs without error, exactly one service registration
 remains (no duplicate), the on-disk binary is replaced, and the service keeps
 running afterwards. Uninstall remains unverified. Log rotation and Windows ACL
 verification at startup are complete.
-**Last session**: 2026-08-21 (twenty-eighth session) — Bug fix, no phase work.
+**Last session**: 2026-08-21 (twenty-ninth session) — MSI installer UI
+investigation, no code change. Reported as "der windows installer zeigt jetzt
+nur mehr den admin promt und beim installieren ist kein progress zu sehen,
+auch beim deinstallieren nichts zu sehen und keine Abfrage," this time on a
+genuinely separate physical Windows 11 notebook, not `ATAXVM-STSC` — initially
+suspected as evidence the twenty-second session's unexplained UI-level mystery
+was package-related after all (the `-sice:ICE20` suppression under
+`PurgeDataDlg`), since ICE20 requires the full standard dialog set once any
+custom dialog is authored. Two verbose `msiexec /l*v` logs (install and
+uninstall, both run with no `/qn`/`/quiet`) disproved that theory directly.
+Install: `UILevel` resolves correctly to `5` (Full), `PurgeDataDlg` is
+correctly skipped (`condition is false` — right, since its condition is
+uninstall-only), and the entire install completes in about three seconds
+start to finish; the "no progress seen" report there is almost certainly the
+install just being too fast to visually register, not a suppression bug.
+Uninstall: the log shows `Client-side and UI is none or basic: Running entire
+install on the server` and `CLIENTUILEVEL=2` (explicitly None) set by the
+client side before the package is even opened — this is `MSI_LUA`, Windows
+Installer's own compatibility shim for a UAC-split-token Administrator
+performing a *maintenance* operation (uninstall/repair) on an already
+"admin-assigned" per-machine product; it elevates the operation itself and,
+in doing so, forces `CLIENTUILEVEL=None`, suppressing both the built-in
+progress dialog and `PurgeDataDlg` before `InstallUISequence` is ever
+reached. Nothing in `smtprelayd.wxs` can affect this — the UI level is
+decided client-side, ahead of the package being read. This corrects the
+twenty-second session's framing: that session found the identical signature
+(`CLIENTUILEVEL`, `RemoteAdminTS=1`, `UILevel=3`) on `ATAXVM-STSC` over RDP and
+concluded, for lack of a second machine, that it was likely specific to that
+VM/RDP session; a second machine is now available and shows the same
+behaviour, so it is not VM- or RDP-specific — it is `MSI_LUA` reacting to a
+UAC-split-token admin account, independent of host. The operator's real-world
+trigger is "Apps & Features" uninstall, not a raw `msiexec` invocation or a
+double-click, and it hit the same suppression, confirming the shim engages
+through that path too. Functionally nothing is broken either way — both
+verbose logs end "completed successfully," service correctly installed or
+removed, files in the right place — only the visible feedback (progress bar,
+and the interactive purge-data question) is suppressed. Practical operator
+workaround, not yet tested by the operator this session: run the uninstall
+from an already-elevated shell (opened via "Run as Administrator" before
+typing the command) rather than letting `msiexec`/the shell elevate
+on-demand, which should sidestep the shim and let the built-in progress UI
+and `PurgeDataDlg` render normally. Follow-up if it recurs: confirm that
+workaround, and if operators need the data-purge question reliably rather
+than relying on `CLEANDATA=1` scripted on the command line, revisit whether
+the pre-elevation instructions belong in `docs/guides/CONFIGURATION.md` or a
+Windows-specific install guide.
+**Same session, follow-up ("können wir das fixen?" then "beim install dialog
+sollte wenn es fertig ist ein finish buttone oder erfolgsmeldung kommen")**:
+two related MSI UI gaps addressed, one implemented, one scoped but
+deliberately deferred. First, whether the `MSI_LUA`/`CLIENTUILEVEL` shim above
+can be fixed from within `smtprelayd.wxs`: no — it is decided by `msiexec.exe`
+client-side, before the package is even opened, so nothing in the `.wxs` can
+touch it. The one real fix is a WiX Burn bootstrapper wrapping the `.msi`, so
+Explorer/Apps & Features launch something that requests elevation once
+(`requireAdministrator`) before `msiexec` ever runs, sidestepping the shim
+entirely — but that replaces the shipped artifact (bootstrapper `.exe`
+instead of a bare `.msi`), adds `burn.exe`/`insignia.exe` steps to
+`release.yml`, changes what Apps & Features registers, and needs the full
+install/upgrade/uninstall hardware cycle re-verified. Operator chose to go
+ahead with it ("Bootstrapper bauen"); not yet started, see below.
+
+Second, prompted separately: no Finish button or success confirmation
+appeared at the end of either install or uninstall, only a silent close.
+Tracing it: `smtprelayd.wxs`'s `<UI>` block has only ever authored
+`PurgeDataDlg`, no `ExitDialog`/`UserExit`/`FatalError` — `InstallUISequence`
+simply had nothing left to show once `ExecuteAction` finished, on
+install *and* uninstall alike, independent of the `MSI_LUA` question above
+(the install-side verbose log from the same session already showed `UILevel`
+resolving correctly to `5`/Full, so the UI was capable of rendering — there
+was just nothing authored to render at the end). Fixed by referencing
+WixUIExtension's stock dialogs rather than hand-authoring them:
+`-ext WixUIExtension` added to both `candle.exe` and `light.exe` in
+`release.yml`, `<UIRef Id="WixUI_ErrorProgressText" />` added for the
+Error/ActionText table entries those dialogs expect, and three `<Show>`
+entries (`ExitDialog` on success, `UserExit` on cancel, `FatalError` on
+error) added to the existing `InstallUISequence` right after `PurgeDataDlg`'s.
+Deliberately not a full WixUI wizard (no Welcome/License/feature-tree pages,
+matching the existing "smallest dialog that can ask one question" reasoning
+for `PurgeDataDlg`) — just the three closing dialogs every WixUI wizard
+already shares. `-sice:ICE20` stays suppressed and the header comment now
+explains why more precisely: ICE20 additionally wants a `FilesInUse` dialog
+and `AdminUISequence` entries, neither of which this package authors or
+needs (no administrative/network install has ever been supported), and
+suppressing a build-time lint does not change runtime behaviour the way the
+missing `FilesInUse` dialog actually did on real hardware (see the
+`MSIRESTARTMANAGERCONTROL` fix above) — this is a lint gap, not a functional
+one. Verified with `xmllint --noout` (clean) only; **no WiX toolchain in this
+environment**, same recurring gap as every other Windows packaging change
+here — not build-verified, so the very next `release.yml` run (or a local
+`light.exe` if the operator has WiX available) is the first real check that
+`WixUI_ErrorProgressText`/`ExitDialog`/`UserExit`/`FatalError` resolve
+correctly via the extension, and the next install/uninstall on hardware is
+what confirms an actual Finish screen appears. Bootstrapper work (the
+`MSI_LUA` fix) intentionally not started in the same pass — staged
+separately so this smaller, self-contained change can be verified on its own
+first before the bigger, harder-to-verify Burn/Bundle rework begins. One
+caveat flagged to the operator, not yet acted on: an unsigned bootstrapper
+`.exe` may draw more SmartScreen friction than the current unsigned `.msi`
+does today, worth watching for once that work starts.
+**Previous session**: 2026-08-21 (twenty-eighth session) — Bug fix, no phase work.
 Reported as "nach /queue bleiben die gelöschten Einträge sichtbar. ist das
 gewollt?" Traced to a real gap, not a misunderstanding: `/queue`'s "active"
 filter (`internal/store/query.go`) derives status purely from the latest row
@@ -1560,8 +1659,17 @@ Unchanged, plus:
       hardware-verified via the scripted path (`CLEANDATA=1` on the command
       line — directory confirmed removed, and left untouched whenever
       `CLEANDATA` stays at its default `0`); the interactive `PurgeDataDlg`
-      prompt does not render on the one test VM available, cause unresolved,
-      tracked below rather than blocking this item
+      prompt does not render on the one test VM available at the time, cause
+      unresolved then, tracked below rather than blocking this item.
+      **Root cause identified 2026-08-21 (twenty-ninth session)**, on a
+      second, genuinely separate physical Windows 11 machine showing the
+      identical signature: not VM/RDP-specific after all, but Windows
+      Installer's own `MSI_LUA` compatibility shim forcing
+      `CLIENTUILEVEL=None` for a UAC-split-token Administrator running a
+      maintenance operation (uninstall) on an already admin-assigned
+      per-machine product — decided client-side before the package is even
+      opened, so nothing in `smtprelayd.wxs` can affect it. See that
+      session's entry above for the verbose-log evidence
 - [ ] Linux `.deb` install → configure → start → stop cycle on Debian/Ubuntu
       (the `.rpm` path is fully verified on Fedora; the `.deb` has a smoke
       test only, 2026-08-21, run inside WSL on the MSI test VM `ATAXVM-STSC`
@@ -1581,6 +1689,27 @@ Unchanged, plus:
       — accepted on the reasoning/test-level evidence above, not on a
       hardware run; still genuinely unverified on real hardware, revisit if
       it becomes relevant again rather than treated as confirmed working.
+- [ ] MSI Finish/success dialog — added 2026-08-21 (twenty-ninth session),
+      `WixUIExtension`'s stock `ExitDialog`/`UserExit`/`FatalError` referenced
+      via `<UIRef Id="WixUI_ErrorProgressText" />` and three new `<Show>`
+      entries in `InstallUISequence` (`smtprelayd.wxs`), so both install and
+      uninstall end with a Finish screen instead of silently closing. No WiX
+      toolchain in this environment; only `xmllint --noout` clean, not
+      build-verified. Next release build and next install/uninstall on
+      hardware confirm it.
+- [ ] WiX Burn bootstrapper wrapping the `.msi` — scoped 2026-08-21 (twenty-
+      ninth session) to fix the `MSI_LUA`/`CLIENTUILEVEL` UI suppression
+      documented above: requests elevation once before `msiexec` runs, so
+      Apps & Features uninstall (the operator's real trigger) is no longer
+      silently downgraded to no UI. Not started — deliberately staged after
+      the Finish-dialog change above so that smaller, self-contained change
+      can be verified on its own first. Will replace the shipped `.msi` with
+      a bootstrapper `.exe` registered in Apps & Features, add
+      `burn.exe`/`insignia.exe` steps to `release.yml`, and needs the full
+      install/upgrade/uninstall hardware cycle re-verified once built. Watch
+      for SmartScreen friction on the new unsigned `.exe` — flagged as a
+      possible regression versus today's unsigned `.msi`, not yet observed
+      either way.
 - [x] CI workflow that runs on every push/PR (`.github/workflows/ci.yml`):
       gofmt, vet, `go test -race`, the banned-import check and govulncheck,
       plus a cross-compile job for all three targets

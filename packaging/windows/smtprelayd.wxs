@@ -1,19 +1,22 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
-  Built with WiX Toolset v3 (candle.exe -ext WixUtilExtension, then
-  light.exe -ext WixUtilExtension -sice:ICE20), preinstalled on the
-  windows-latest GitHub Actions runner image, so no third-party build tool
-  needs to be installed in CI.
+  Built with WiX Toolset v3 (candle.exe -ext WixUtilExtension -ext
+  WixUIExtension, then light.exe -ext WixUtilExtension -ext WixUIExtension
+  -sice:ICE20), preinstalled on the windows-latest GitHub Actions runner
+  image, so no third-party build tool needs to be installed in CI.
+  WixUIExtension is linked for the stock ExitDialog/UserExit/FatalError
+  dialogs and the WixUI_ErrorProgressText fragment below, not for a full
+  wizard.
 
-  -sice:ICE20 is required, not optional, once PurgeDataDlg exists below:
-  ICE20 fails the link otherwise, demanding the full standard dialog set
-  (FilesInUse, ErrorDialog, FatalError, UserExit, Exit dialogs plus their
-  entries in both InstallUISequence and AdminUISequence) that WixUIExtension
-  normally supplies for free as part of a whole wizard. Building all of that
-  by hand for one yes/no question, rather than suppressing the check, would
-  mean adopting a full WixUI wizard for an MSI that otherwise shows no UI at
-  all, a materially bigger change than "ask before deleting the data
-  directory."
+  -sice:ICE20 is still required, even with those stock dialogs present:
+  ICE20 additionally demands a FilesInUse dialog and entries in
+  AdminUISequence (a network/administrative install this MSI has never
+  supported), neither of which exist here. Building those by hand only to
+  satisfy a build-time lint, rather than suppressing the check, would mean
+  adopting parts of a full WixUI wizard for an MSI that otherwise shows no
+  wizard flow at all — suppressing ICE20 does not change runtime behaviour,
+  it only skips light.exe's own validation of a feature (admin installs)
+  this package deliberately does not offer.
 
   Suppressing ICE20 was first thought not to regress anything: reasoned,
   not verified, and wrong in one respect. On real hardware (0.2.15 -> 0.2.16
@@ -146,14 +149,22 @@
     <CustomAction Id="PurgeDataDirCA" FileKey="smtprelaydEXE" ExeCommand="purge-datadir"
                   Execute="deferred" Impersonate="no" Return="ignore" />
 
-    <!-- Deliberately not built on WixUI: the rest of this MSI shows no
-         wizard at all, and pulling in WixUI_InstallDir or similar for one
-         yes/no question would add a full install wizard neither asked for
-         nor previously present. This is the smallest dialog that can ask
-         one question and set one property. -->
+    <!-- Deliberately not built on a full WixUI wizard (WixUI_InstallDir or
+         similar): the rest of this MSI shows no Welcome/License/feature-tree
+         pages, and pulling one in for one yes/no question would be a much
+         bigger change than asked for. WixUI_ErrorProgressText is pulled in
+         for its ActionText/Error table entries (progress messages, standard
+         error text) and the stock ExitDialog/UserExit/FatalError dialogs
+         below are the same shared dialogs any WixUI wizard uses, referenced
+         from WixUIExtension rather than hand-authored: without them, both
+         install and uninstall reached the end of ExecuteAction and simply
+         closed with no confirmation at all, which read as "did this actually
+         finish?" Their Show entries reuse the exact same
+         InstallUISequence table PurgeDataDlg already sequences into. -->
     <UI>
       <TextStyle Id="DefaultFont" FaceName="Tahoma" Size="8" />
       <Property Id="DefaultUIFont" Value="DefaultFont" />
+      <UIRef Id="WixUI_ErrorProgressText" />
       <Dialog Id="PurgeDataDlg" Width="270" Height="105" Title="smtprelayd Setup" NoMinimize="yes">
         <Control Id="Question" Type="Text" X="20" Y="15" Width="230" Height="45" NoPrefix="yes"
                  Text="Also delete the data directory (%ProgramData%\SMTPRelayd: spool and message history)? This cannot be undone." />
@@ -174,6 +185,14 @@
            product. InstallUISequence itself does not run under msiexec /qn,
            which is what keeps a silent uninstall from ever showing this. -->
       <Show Dialog="PurgeDataDlg" Before="ExecuteAction">REMOVE="ALL" AND NOT UPGRADINGPRODUCTCODE</Show>
+      <!-- Stock WixUIExtension dialogs, not hand-authored: give both install
+           and uninstall a closing screen instead of the wizard silently
+           disappearing once ExecuteAction finishes. OnExit applies to
+           whichever action actually ran (INSTALL or the REMOVE=ALL path),
+           since InstallUISequence is shared between both. -->
+      <Show Dialog="ExitDialog" OnExit="success" />
+      <Show Dialog="UserExit" OnExit="cancel" />
+      <Show Dialog="FatalError" OnExit="error" />
     </InstallUISequence>
 
     <InstallExecuteSequence>

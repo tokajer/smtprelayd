@@ -147,13 +147,13 @@ jobs:
           }
           New-Item -ItemType Directory -Force -Path obj, dist | Out-Null
           $wixBin = Join-Path $env:WIX "bin"
-          & "$wixBin\candle.exe" -ext WixUtilExtension `
+          & "$wixBin\candle.exe" -ext WixUtilExtension -ext WixUIExtension `
             -dVersion="${{ needs.build.outputs.pkg_version }}" `
             -dBinaryPath="bin\smtprelayd-windows-amd64.exe" `
             -dExampleConfigPath="configs\smtprelayd.example.toml" `
             -out "obj\smtprelayd.wixobj" "packaging\windows\smtprelayd.wxs"
           if ($LASTEXITCODE -ne 0) { throw "candle.exe failed" }
-          & "$wixBin\light.exe" -ext WixUtilExtension `
+          & "$wixBin\light.exe" -ext WixUtilExtension -ext WixUIExtension `
             -sice:ICE20 `
             -out "dist\smtprelayd-${{ needs.build.outputs.pkg_version }}-amd64.msi" `
             "obj\smtprelayd.wixobj"
