@@ -300,8 +300,23 @@ func (s *Secret) resolve(field string) error {
 			return fmt.Errorf("%s: secret file %s is empty", field, path)
 		}
 		return nil
+	case strings.HasPrefix(s.ref, "dpapi:"):
+		// Windows only: the file holds ciphertext produced by
+		// "smtprelayd protect-secret", bound to this machine's DPAPI key
+		// rather than sitting on disk in plaintext the way file: does.
+		// resolveDPAPISecret itself runs checkSecretFile first.
+		path := strings.TrimPrefix(s.ref, "dpapi:")
+		v, err := resolveDPAPISecret(path)
+		if err != nil {
+			return fmt.Errorf("%s: %w", field, err)
+		}
+		if v == "" {
+			return fmt.Errorf("%s: dpapi file %s decrypted to an empty secret", field, path)
+		}
+		s.value = v
+		return nil
 	default:
-		return fmt.Errorf("%s: secrets must be ${ENV_VAR} or file:<path>, never a literal value", field)
+		return fmt.Errorf("%s: secrets must be ${ENV_VAR}, file:<path> or dpapi:<path> (Windows only), never a literal value", field)
 	}
 }
 

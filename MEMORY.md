@@ -278,10 +278,20 @@ The load-bearing principles:
   switch: it declares an unprotected transport instead of pretending to verify
   one, it is never reached by fallback from a failed handshake, and it forces
   `auth = "none"` so no credential is ever exposed by it.
-- **Secrets never touch disk in plaintext.** Environment references or a
-  restricted file only. API tokens are stored as SHA-256 digests; the plaintext
-  is printed once by `smtprelayd token new` and never persisted. This supersedes
-  the earlier plan of plaintext tokens expanded from environment variables.
+- **Secrets never touch disk in plaintext.** Environment references, a
+  restricted file, or — **added 2026-08-20**, Windows only — a file encrypted
+  with the machine's DPAPI key (`dpapi:<path>`, written once by
+  `smtprelayd protect-secret`, decrypted by `internal/config`'s
+  `resolveDPAPISecret`). `dpapi:` genuinely raises the bar over `file:`: the
+  ciphertext is useless if copied off the machine. It does not, and cannot,
+  defend against an attacker who already has Administrator/SYSTEM on the
+  machine the service runs on — the service decrypts unattended at boot, with
+  no human to prompt for a passphrase, so the decryption capability
+  necessarily lives on the same box as the ciphertext. `file:` stays the only
+  option on Linux; there is no first-party equivalent there. API tokens are
+  stored as SHA-256 digests; the plaintext is printed once by
+  `smtprelayd token new` and never persisted. This supersedes the earlier plan
+  of plaintext tokens expanded from environment variables.
 - **Rewriting is the highest-risk code.** It writes attacker-influenced values
   into headers. CR, LF, NUL and control characters cause rejection, never
   sanitisation. Headers are built structurally, never by concatenation.
@@ -302,11 +312,18 @@ The load-bearing principles:
   executable directory and data directory ownership are verified at startup
   and abort on failure, because each of them lets an unprivileged local user
   steer a privileged process. See `docs/EXPLOIT-SURFACE.md`.
-- **No dynamic behaviour.** No `unsafe`, no cgo, no `os/exec`, no plugins, no
-  auto-update. Command injection and updater escalation are made structurally
-  impossible rather than defended against. First-party source carries no
-  exception; in the dependency graph the single accepted `os/exec` importer is
-  `modernc.org/libc` (see section 4), and the CI check fails on any other.
+- **No dynamic behaviour.** No cgo, no `os/exec`, no plugins, no auto-update.
+  Command injection and updater escalation are made structurally impossible
+  rather than defended against. In the dependency graph the single accepted
+  `os/exec` importer is `modernc.org/libc` (see section 4), and the CI check
+  fails on any other. `unsafe` is banned the same way, with a narrow,
+  explicitly named exception in `internal/buildpolicy`'s
+  `allowedBannedImports` for hand-written Windows API bindings that have no
+  safe wrapper in `golang.org/x/sys/windows`: `trust_windows.go` (ACL
+  `LocalFree`) and, **added 2026-08-20**, `dpapi_windows.go`
+  (`CryptProtectData`/`CryptUnprotectData`, the `dpapi:` secret above). Each
+  entry is one file, named in the allowlist with its reason, so a later
+  addition anywhere else in the tree still fails the build.
 
 ## 10. Deployment
 

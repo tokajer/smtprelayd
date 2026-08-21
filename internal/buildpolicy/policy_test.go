@@ -30,6 +30,7 @@ var bannedImports = map[string]string{
 // for platform-specific reasons. Each is a relative path from the repo root.
 var allowedBannedImports = map[string]map[string]bool{
 	"internal/config/trust_windows.go": {"unsafe": true}, // Windows ACL API requires unsafe.Pointer for LocalFree
+	"internal/config/dpapi_windows.go": {"unsafe": true}, // DPAPI (CryptProtectData/CryptUnprotectData) has no non-unsafe wrapper in golang.org/x/sys/windows
 }
 
 // bannedConversions are the html/template escape hatches. Every one of them

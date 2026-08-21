@@ -117,7 +117,7 @@ rate_limit_per_min = 25            # conservative, per connection limit is ~30
   [route.oauth2]
   tenant_id     = "00000000-0000-0000-0000-000000000000"
   client_id     = "00000000-0000-0000-0000-000000000000"
-  client_secret = "${SMTPRELAYD_M365_SECRET}"   # env reference or file: path only
+  client_secret = "${SMTPRELAYD_M365_SECRET}"   # env, file:<path>, or dpapi:<path> on Windows
   secret_expires = "2027-02-01"                # surfaced as a metric for alerting
   scope         = "https://outlook.office365.com/.default"
   mailbox       = "relay@example.at"

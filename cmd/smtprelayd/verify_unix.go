@@ -20,3 +20,7 @@ func secureDataDir(_ string) error {
 func purgeDataDir(_ string) error {
 	return fmt.Errorf("purge-datadir is only implemented on Windows, driven by the MSI's uninstall dialog; on Linux the data directory is left in place by `dnf remove`/`apt purge` deliberately and an operator removes it by hand if they want it gone")
 }
+
+func protectSecret(_ string) error {
+	return fmt.Errorf("protect-secret is only implemented on Windows: DPAPI has no Linux equivalent this project hand-rolls; use file: with restrictive ownership and mode instead")
+}

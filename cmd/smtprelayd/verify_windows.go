@@ -6,7 +6,9 @@
 package main
 
 import (
+	"bufio"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -87,4 +89,54 @@ func purgeDataDir(configPath string) error {
 	}
 	fmt.Printf("smtprelayd: data directory removed: %s\n", dir)
 	return nil
+}
+
+// protectSecret reads a plaintext secret as a single line from stdin and
+// writes it, encrypted with this machine's DPAPI key, to outPath — the file
+// a dpapi:<path> reference in the configuration then points at. Run once,
+// elevated, by whoever provisions the secret; the running service only ever
+// decrypts, never encrypts.
+//
+// Reading the secret itself from stdin rather than a flag keeps it out of
+// the process list and the shell's command history; -out is not secret and
+// works like every other flag this command accepts — it must precede the
+// command, since (flag).Parse stops at the first non-flag argument. The
+// intended invocation pipes a masked prompt into it, e.g. from PowerShell:
+//
+//	$s = Read-Host -AsSecureString "Secret"
+//	[Runtime.InteropServices.Marshal]::PtrToStringAuto(
+//	    [Runtime.InteropServices.Marshal]::SecureStringToBSTR($s)
+//	) | smtprelayd.exe -out C:\ProgramData\SMTPRelayd\secret.bin protect-secret
+func protectSecret(outPath string) error {
+	if outPath == "" {
+		return fmt.Errorf("protect-secret: -out <file> is required")
+	}
+	line, err := readSecretLine(os.Stdin)
+	if err != nil {
+		return fmt.Errorf("protect-secret: reading stdin: %w", err)
+	}
+	if line == "" {
+		return fmt.Errorf("protect-secret: no secret read from stdin")
+	}
+	ciphertext, err := config.ProtectMachineSecret([]byte(line))
+	if err != nil {
+		return fmt.Errorf("protect-secret: %w", err)
+	}
+	if err := os.WriteFile(outPath, ciphertext, 0o600); err != nil {
+		return fmt.Errorf("protect-secret: %w", err)
+	}
+	fmt.Printf("smtprelayd: wrote DPAPI-protected secret to %s\n", outPath)
+	fmt.Printf("smtprelayd: reference it in the configuration as dpapi:%s\n", outPath)
+	return nil
+}
+
+// readSecretLine reads the first line from r, stripped of its line ending.
+// A trailing newline with nothing before it, or no input at all, both read
+// back as "", which protectSecret rejects rather than encrypting nothing.
+func readSecretLine(r io.Reader) (string, error) {
+	scanner := bufio.NewScanner(r)
+	if !scanner.Scan() {
+		return "", scanner.Err()
+	}
+	return scanner.Text(), nil
 }

@@ -36,7 +36,7 @@ var version = "dev"
 
 const usage = `smtprelayd %s — Open Source SMTP Relay for Windows & Linux
 
-usage: smtprelayd [-config <file>] <command>
+usage: smtprelayd [-config <file>] [-out <file>] <command>
 
 commands:
   run        start the relay in the foreground (default)
@@ -52,6 +52,11 @@ Windows only, requires an elevated prompt:
   secure-datadir  write the data directory ACL the service requires to start
   purge-datadir   delete the data directory (spool and history); run by the
                   MSI only when the uninstall dialog is answered "yes"
+  protect-secret  encrypt a secret with this machine's DPAPI key and write it
+                  to -out (flag must come before the command, like -config),
+                  for a dpapi:<path> reference in the configuration; reads
+                  the plaintext secret as a single line from stdin, e.g.:
+                  smtprelayd -out C:\ProgramData\SMTPRelayd\secret.bin protect-secret
 
 On Linux the service is managed with systemctl instead; the packaged unit
 file registers it as smtprelayd.service.
@@ -64,6 +69,7 @@ func main() {
 	fs := flag.NewFlagSet("smtprelayd", flag.ExitOnError)
 	configPath := fs.String("config", defaultConfigPath(), "path to the configuration file")
 	console := fs.Bool("console", false, "also log to stderr when a log file is configured")
+	outPath := fs.String("out", "", "output file for protect-secret (Windows only)")
 	fs.Usage = func() { fmt.Fprintf(os.Stderr, usage, version) }
 	_ = fs.Parse(os.Args[1:])
 
@@ -93,13 +99,13 @@ func main() {
 		return
 	}
 
-	if err := run(cmd, *configPath, *console); err != nil {
+	if err := run(cmd, *configPath, *console, *outPath); err != nil {
 		fmt.Fprintln(os.Stderr, "smtprelayd:", err)
 		os.Exit(1)
 	}
 }
 
-func run(cmd, configPath string, console bool) error {
+func run(cmd, configPath string, console bool, outPath string) error {
 	switch cmd {
 	case "version":
 		fmt.Println("smtprelayd", version)
@@ -110,6 +116,9 @@ func run(cmd, configPath string, console bool) error {
 
 	case "purge-datadir":
 		return purgeDataDir(configPath)
+
+	case "protect-secret":
+		return protectSecret(outPath)
 
 	case "check":
 		cfg, err := config.Load(configPath)

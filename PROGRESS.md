@@ -19,7 +19,103 @@ fix below): the MSI installs without error, exactly one service registration
 remains (no duplicate), the on-disk binary is replaced, and the service keeps
 running afterwards. Uninstall remains unverified. Log rotation and Windows ACL
 verification at startup are complete.
-**Last session**: 2026-08-19 (twenty-third session) — Targeted security
+**Last session**: 2026-08-20 (twenty-fourth session) — Small feature added on
+request, no phase work. The session started as a question, "wie wird das
+passwort gespeichert wenn ich mich authentifizieren muss", answered by
+walking through `config.Secret.resolve()`'s existing `${ENV_VAR}`/`file:`
+options; the follow-up, "wie mache ich das auf windows", surfaced that a
+Windows service account has no reliable way to receive a machine-level
+environment variable without a reboot, so `file:` (readable-only-by-owner)
+was the practical answer there. Pushed back on directly: "ok dann liegt das
+file aber immer noch im klartext irgendwo... können wir das irgendwie
+beheben" — explained honestly rather than building blind that no unattended
+service can be fully proof against an attacker who already has
+Administrator/SYSTEM on the box, since the decryption capability must live
+on the same machine with no human to prompt for a passphrase at boot; DPAPI
+still raises a real, specific bar (the file becomes useless if copied off
+the machine) even though it cannot clear that bar. Confirmed wanted
+("mir geht es nur darum das ich die passwörter nicht im klartext irgendwo
+stehen haben will") and implemented: a new `dpapi:<path>` secret reference,
+Windows only, alongside the existing two. `internal/config/dpapi_windows.go`
+hand-rolls `CryptProtectData`/`CryptUnprotectData` via `crypt32.dll`
+(`golang.org/x/sys/windows.NewLazySystemDLL`/`NewProc`, no wrapper for DPAPI
+exists in that module), machine-scoped
+(`CRYPTPROTECT_LOCAL_MACHINE`) rather than user-scoped, because the virtual
+service account `NT SERVICE\smtprelayd` has no ordinary profile to hold a
+per-user DPAPI master key and machine scope is also what lets an elevated
+operator's own account encrypt a file the service account can later decrypt;
+`CRYPTPROTECT_UI_FORBIDDEN` on both directions so a service context can never
+block on a credential prompt it has no console to show. `dpapi_other.go`
+stubs the same function on non-Windows with a clear error rather than a
+silent empty secret. New CLI subcommand `smtprelayd -out <file> protect-secret`
+(Windows only, `verify_windows.go`) reads the plaintext as one line from
+stdin — deliberately not a flag, to keep it out of the process list and shell
+history — and writes the ciphertext; the header comment documents the
+intended PowerShell invocation piping a masked `Read-Host -AsSecureString`
+prompt into it. Caught while writing that same doc comment, before reporting
+anything done: the first draft showed `protect-secret -out <file>`, but
+`flag.FlagSet.Parse` stops at the first non-flag argument, so `-out` would
+never be parsed once it followed the command — `-out` has to precede the
+command, exactly like the existing `-config` already does. Fixed in both the
+top-level usage text and the doc comment before either was ever run, the
+same category of self-caught mistake as the recurring XML-comment
+double-hyphen one, just in a different file type this time.
+`resolveDPAPISecret` runs the same `checkSecretFile`
+symlink/reparse-point and containing-directory check the `file:` path
+already runs, since a secret file is a secret file whether or not it is
+encrypted at rest. This is the first *active* use of `unsafe` anywhere in
+the tree — `internal/buildpolicy`'s `allowedBannedImports` already had a
+dormant entry for `trust_windows.go` (a "LocalFree" exception that, on
+reading the actual file, is not currently exercised — `CheckDataDirACL` uses
+`golang.org/x/sys/windows`'s higher-level `SECURITY_DESCRIPTOR` methods
+instead) — a second entry for `dpapi_windows.go` was added next to it, named
+with its reason, so the CI import-policy test still fails on any *other*
+file reaching for `unsafe`. `MEMORY.md` section 9 updated in both directions
+this touches: the secrets bullet now names `dpapi:` and states plainly what
+security property it does and does not add, and the "No dynamic behaviour"
+bullet — which claimed flatly "No `unsafe`" — is corrected to describe the
+real, narrow, explicitly-allowlisted exception instead, since that claim was
+already slightly stale before this session (the dormant trust_windows.go
+entry) and would have been actively false after it without the fix.
+`docs/SECURITY.md` §3 and `README.md`'s Configuration section both updated
+to list all three secret forms; `configs/smtprelayd.example.toml`'s
+`client_secret` comment now mentions `dpapi:`.
+**Build-verified same session, once a toolchain became available.** No Go
+toolchain existed in this environment when the feature was written; the
+operator installed one on request (`go1.25.13`, user-local under `~/sdk`, no
+root — this machine is an ostree-immutable Fedora derivative, so a system
+package would have meant `rpm-ostree` layering and a reboot for no reason).
+With it, every check `CLAUDE.md`'s definition of done and `ci.yml`'s `check`
+job require came back clean against the full tree, including the new files:
+`gofmt -l .` (empty), `go vet ./...`, `go test -race ./...` (all packages,
+including the new `internal/config/dpapi_other_test.go`),
+`scripts/check-banned-imports.sh` (all three targets, confirming the new
+`dpapi_windows.go` allowlist entry is both necessary and sufficient),
+`govulncheck` v1.6.0 (no vulnerabilities) and `gosec` v2.28.0 `-severity=medium`
+(0 issues, 15 pre-existing `#nosec` lines, 52 files). `make build-all`
+compiled all three release targets, including `windows/amd64` — the one CI
+job that had never touched `dpapi_windows.go`/the `verify_windows.go`
+additions before this. Two checks beyond what `ci.yml` itself runs, done
+because this change's actual risk is Windows-specific and `ci.yml`'s vet/test
+job never sets `GOOS=windows`: `GOOS=windows GOARCH=amd64 go vet ./...` came
+back clean, which specifically exercises vet's `unsafeptr` analysis over the
+hand-marshalled `DATA_BLOB` pointers — the exact class of mistake this file
+was written most worried about. `gosec` could not be run the same way: `go
+run` builds the tool itself for the GOOS in the environment, so setting
+`GOOS=windows` produced a `gosec.exe` this Linux host cannot execute
+(`exec format error`) rather than a Windows-flavoured analysis — a tooling
+limitation, not a finding, and not resolved this session.
+**What is still not verified, and cannot be from this environment**: actual
+execution on Windows. Compiling and vetting prove the DPAPI struct
+marshalling is well-typed and passes vet's pointer-safety analysis; they
+cannot prove `CryptProtectData`/`CryptUnprotectData` behave as documented at
+runtime, and specifically cannot prove `CRYPTPROTECT_LOCAL_MACHINE` really
+does let the service account (`NT SERVICE\smtprelayd`) decrypt a blob a
+different, elevated, interactive operator account encrypted — that claim is
+still reasoned from documented DPAPI semantics, not observed. The real test,
+still outstanding: `protect-secret` → `dpapi:<path>` in the configuration →
+service starts and delivers, on real Windows hardware.
+**Previous session**: 2026-08-19 (twenty-third session) — Targeted security
 review, no phase work. Requested as "prüfe das Projekt auf Sicherheit und
 eventuelle Schwachstellen bzw Sicherheitslücken." Not a full-tree pass:
 scoped to everything changed since the second review's fixes landed
@@ -1497,3 +1593,5 @@ tracked in the phase 5 checklist rather than here.
 | 2026-08-12 | The journal mode is asserted by reading `PRAGMA journal_mode` back from the database, not by inspecting the DSN | The DSN said `_journal_mode=WAL` for months while the database ran in rollback mode, because modernc's driver reads only `_pragma=`. That spelling compiled, connected and did nothing, so only the database itself can distinguish the two. The test was confirmed to fail against the old spelling before being trusted |
 | 2026-08-12 | `internal/logging` imports `gopkg.in/natefinch/lumberjack.v2`, not `github.com/natefinch/lumberjack v2.0.0+incompatible` | Same library, field-identical API, one import line. The `gopkg.in` path is the properly versioned module with its own `go.mod`; `+incompatible` also dragged two test-only modules into the graph, since `go mod tidy` covers the tests of imported packages. Net three entries removed from `go.mod` |
 | 2026-08-12 | `internal/logging` got its first tests as part of that swap | The package had none, so the rotation dependency could have been replaced with a stub and CI would still have passed. The four now cover what the package is actually responsible for: 0600 on creation, restricting a file an earlier version left 0644, rotation producing a real backup file, and secret redaction surviving the writer setup |
+| 2026-08-20 | Added `dpapi:<path>`, Windows only, alongside `${ENV_VAR}` and `file:` | `file:` still leaves a secret in plaintext on disk, and the operator asked directly for it not to be. DPAPI is machine-scoped (`CRYPTPROTECT_LOCAL_MACHINE`), not user-scoped: the virtual service account has no ordinary profile to hold a per-user master key. It defends against the ciphertext being copied off the machine; it cannot and does not defend against an attacker who already has Administrator/SYSTEM on the machine the service runs on, since an unattended service must be able to decrypt at boot with no human to prompt for a passphrase — that limit was stated to the operator before building this, not discovered after |
+| 2026-08-20 | `unsafe` is allowlisted per file in `internal/buildpolicy`, not banned with zero exceptions | DPAPI (`crypt32.dll`'s `CryptProtectData`/`CryptUnprotectData`) has no safe wrapper in `golang.org/x/sys/windows`. The ban stays a CI-enforced default; `dpapi_windows.go` joins the previously dormant `trust_windows.go` entry as the only two files permitted to import it, each named with its reason, so a third file reaching for `unsafe` anywhere else in the tree still fails the build |

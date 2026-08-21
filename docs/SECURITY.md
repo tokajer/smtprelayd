@@ -50,8 +50,15 @@ The single most damaging failure mode gets the strictest handling.
 ## 3. Secrets
 
 - No secret is ever written to the configuration file. The loader accepts only
-  `${ENV_VAR}` references or a path to a file readable exclusively by the
-  service account.
+  `${ENV_VAR}` references, a path to a file readable exclusively by the
+  service account (`file:`), or, on Windows, a path to a file encrypted with
+  this machine's DPAPI key (`dpapi:`, written by `smtprelayd protect-secret`).
+  `dpapi:` is what the threat model row above means by "OS keystore": the
+  ciphertext is useless off this machine, though not against an attacker who
+  already has Administrator/SYSTEM on it — the service must be able to
+  decrypt unattended at boot, so nothing short of a human-entered passphrase
+  (which this service does not have anywhere to prompt for) can defend
+  against that. `file:` remains the only option on Linux.
 - Secrets are held in memory as long as needed and are never logged, never
   included in error strings, never rendered in the dashboard's configuration
   view, and never serialised into history or metrics.

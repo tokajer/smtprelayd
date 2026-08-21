@@ -141,8 +141,16 @@ gh attestation verify smtprelayd-linux-amd64-v1.0.0.tar.gz --repo <owner>/smtpre
 
 ## Configuration
 
-Copy `configs/smtprelayd.example.toml` and adapt it. Secrets are read from
-environment variables using `${VAR}` expansion — do not commit them.
+Copy `configs/smtprelayd.example.toml` and adapt it. A secret field never
+holds a literal value; it is one of:
+
+- `${VAR}` — read from an environment variable
+- `file:<path>` — read from a file readable only by the service account
+- `dpapi:<path>` (Windows only) — read from a file encrypted with this
+  machine's DPAPI key via `smtprelayd protect-secret`, so it is not stored in
+  plaintext on disk at all
+
+Do not commit any of these referenced values.
 
 ## Documentation
 
