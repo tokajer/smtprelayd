@@ -150,12 +150,19 @@ holds a literal value; it is one of:
   machine's DPAPI key via `smtprelayd protect-secret`, so it is not stored in
   plaintext on disk at all
 
-Do not commit any of these referenced values.
+Do not commit any of these referenced values. `docs/CONFIGURATION.md` is a
+step-by-step guide to every configurable part — listeners and the relay's own
+TLS certificate, client policy and sender rewriting, a generic smarthost with
+SMTP AUTH, API/metrics bearer tokens, queue and bounce behaviour, Linux and
+Windows paths side by side throughout. For the Microsoft 365 route
+specifically, `docs/MS365-AUTH.md` walks through all three secret forms from
+Entra ID app registration onward.
 
 ## Documentation
 
 - `MEMORY.md` — architecture decisions and rationale
 - `PROGRESS.md` — phase tracking
+- `docs/CONFIGURATION.md` — step-by-step guide to every configurable part
 - `docs/MS365-AUTH.md` — Entra ID and Exchange Online setup
 - `docs/SECURITY.md` — threat model, hardening requirements, deployment checklist
 - `docs/EXPLOIT-SURFACE.md` — privilege escalation and code-level attack surface

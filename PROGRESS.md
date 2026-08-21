@@ -19,7 +19,98 @@ fix below): the MSI installs without error, exactly one service registration
 remains (no duplicate), the on-disk binary is replaced, and the service keeps
 running afterwards. Uninstall remains unverified. Log rotation and Windows ACL
 verification at startup are complete.
-**Last session**: 2026-08-20 (twenty-fourth session) — Small feature added on
+**Last session**: 2026-08-21 (twenty-sixth session) — Deployment support only,
+no phase work, no code changed. Walked an operator through configuring the
+`m365` route's `oauth2.client_secret` on a live Windows install, starting
+from "wie mach ich in der config eine ms365 auth". Covered, in order: the
+`[route.oauth2]` block and the three `Secret` reference forms; where in Entra
+ID the client secret value comes from; that a `file:` secret outside
+`data_dir` needs a manual ACL, while one placed inside `data_dir` inherits
+`SecureDataDir`'s protected DACL automatically (no `icacls` needed there);
+that the configuration has no live reload, so a change needs `smtprelayd
+check` then a service restart to take effect. The operator then confirmed
+they are in fact on the DPAPI-capable build (after first believing
+otherwise), ran `protect-secret` against their existing plaintext
+`ms365.txt`, switched the route to
+`dpapi:C:\ProgramData\SMTPRelayd\ms365.dpapi`, and confirmed mail delivery
+through the M365 route actually works — both with the earlier `file:`
+reference and now with `dpapi:`. **This closes the twenty-fourth session's one
+outstanding item**: "the real test, still outstanding: `protect-secret` →
+`dpapi:<path>` in the configuration → service starts and delivers, on real
+Windows hardware" is now observed, not just reasoned from documented DPAPI
+semantics.
+**Same session, documentation follow-up.** First request: "bitte passe alle
+Dokus so an das es für alle eventualitäten eine Step by Step anleitung gibt
+... nicht für linux und Windows verschiedene." `docs/MS365-AUTH.md` gained a
+new "Configuring the relay, step by step" section — the route block, all
+three secret forms with Linux/Windows paths and commands inline rather than
+duplicated per OS, validate/apply/verify, and rotation — placed after
+"Common errors" rather than between the existing `### Entra ID setup` /
+`### Exchange Online setup` subsections, where a first draft had broken the
+`## Chosen approach` heading hierarchy (caught and fixed before reporting the
+edit done, by re-grepping the heading list). Second request, immediately
+after: the same treatment for every other configurable part, not only
+Microsoft 365 — "SMTPmit Auth + Zertifiket, Metriks bearer generiern usw.
+alles was unser tooll kann." New `docs/CONFIGURATION.md`: inbound
+listeners/the relay's own TLS certificate, client CIDR matching and all three
+sender-rewrite modes (reusing the example configuration's one-client-per-mode
+as the worked examples rather than inventing new ones), a generic smarthost
+route with `plain`/`login` SMTP AUTH and an `openssl`-based `ca_pin` recipe,
+a pointer to `docs/MS365-AUTH.md` for the Microsoft 365 route rather than
+repeating it, multi-route recipient splitting, queue/bounce tuning, the
+dashboard and its theme, and — the concrete gap this closes, since
+`docs/API.md` documents the token contract but never how to provision one —
+step-by-step bearer token generation (`openssl rand` → `sha256sum` →
+`[[web.token]]`) shared by the API and the metrics endpoint, plus the
+metrics endpoint's dual requirement (`[tls]` cert **and** a read-scope token
+once bound beyond loopback). Grounded in `internal/config/validate.go` and
+`internal/metrics/http.go`, not only the already-well-commented example
+config, for the parts not obvious from it: the listener/route TLS state
+machine, rewrite mode validation rules, and exactly which secret-and-token
+plumbing is shared between the API and metrics. `README.md`'s Configuration
+and Documentation sections both updated to point at the new guide. Docs only,
+no code changed.
+**Previous session**: 2026-08-21 (twenty-fifth session) — Deployment
+troubleshooting on a live install, no phase work and no code changed. Started
+with a status question ("was ist noch was müssen wir noch machen / testen"),
+answered from this file's own open items. The real work followed from "bei
+deb startet das noch wie kan ich es troubleshooting": a `.deb` install on
+`ATAXVM-STSC` — the same Windows test VM the MSI work uses — reached through a
+WSL shell (`administrator@ATAXVM-STSC:/mnt/c/Users/Administrator/Downloads$`),
+not a standalone Debian/Ubuntu host or VM. Three real, sequential faults
+turned up rather than one:
+1. `.../smtprelayd.toml is writable by group or others` — `checkTrusted`'s
+   write-bit refusal ([trust_unix.go:94-96](internal/config/trust_unix.go#L94-L96))
+   tripped because a `cp` + editor workflow left the copied config at a
+   permissive mode (reported truncated as `076x`) instead of the packaged
+   `0640`; fixed with `chmod 0600`.
+2. `open /etc/smtprelayd/smtprelayd.log: permission denied` — `data_dir` was
+   set to `/etc/smtprelayd` instead of `/var/lib/smtprelayd`. `log.file`
+   resolves relative to `data_dir` ([logpath.go](internal/config/logpath.go)),
+   and `/etc/smtprelayd` is deliberately not writable by the `smtprelayd`
+   group (`0750`, [postinstall.sh:8-11](packaging/linux/postinstall.sh#L8-L11))
+   so a compromised service cannot rewrite its own configuration. Fixed by
+   pointing `data_dir` at `/var/lib/smtprelayd`, as the example ships it.
+3. `550 5.7.1 relay access denied` — expected fail-closed behaviour
+   ([session.go:244-247](internal/listener/session.go#L244-L247)): the test
+   client's source address had no matching `[[client]]` CIDR. Fixed by adding
+   one.
+None of the three needed a code change; each was an operator/deployment-config
+mismatch, diagnosed from `journalctl -u smtprelayd` output pasted back
+verbatim at each step. Confirmed working end to end after all three fixes
+("ok somit passt das").
+Flagged directly afterward, unprompted: "bei fedora hatte ich keine Probleme
+mit der toml unter /etc/smtprelayd/" — explained that `checkTrusted` is
+identical on both platforms (`//go:build !windows`), so the difference is
+almost certainly `cp`-plus-editor versus a `mv` of the packaged file (which
+would have kept the shipped `0640` exactly), not a Fedora/Debian difference in
+the code. Also named, and agreed to record: this WSL session on the MSI test
+VM is a useful smoke test but is **not** the standalone Debian/Ubuntu
+verification the phase 5 checklist item asks for, since WSL2's systemd
+support has its own cgroup/namespace quirks that can differ from a bare-metal
+or VM install. The checklist below is updated to say so explicitly rather
+than silently counting this as the missing verification.
+**Previous session**: 2026-08-20 (twenty-fourth session) — Small feature added on
 request, no phase work. The session started as a question, "wie wird das
 passwort gespeichert wenn ich mich authentifizieren muss", answered by
 walking through `config.Secret.resolve()`'s existing `${ENV_VAR}`/`file:`
@@ -1163,7 +1254,13 @@ Unchanged, plus:
       prompt does not render on the one test VM available, cause unresolved,
       tracked below rather than blocking this item
 - [ ] Linux `.deb` install → configure → start → stop cycle on Debian/Ubuntu
-      (the `.rpm` path is fully verified on Fedora, the `.deb` on nothing)
+      (the `.rpm` path is fully verified on Fedora; the `.deb` has a smoke
+      test only, 2026-08-21, run inside WSL on the MSI test VM `ATAXVM-STSC`
+      rather than a standalone Debian/Ubuntu host or VM — three
+      deployment-config faults found and fixed with no code change (config
+      file mode, `data_dir` pointed at `/etc/smtprelayd` instead of
+      `/var/lib/smtprelayd`, missing client CIDR), see the twenty-fifth
+      session above; still not the verification this item asks for)
 - [x] CI workflow that runs on every push/PR (`.github/workflows/ci.yml`):
       gofmt, vet, `go test -race`, the banned-import check and govulncheck,
       plus a cross-compile job for all three targets

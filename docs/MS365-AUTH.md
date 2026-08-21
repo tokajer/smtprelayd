@@ -86,6 +86,150 @@ Configure `max_concurrent` and `rate_limit_per_min` conservatively. Treat
 | `5.7.139` not allowed | SMTP AUTH disabled for the mailbox or the tenant |
 | `4.7.500` server busy | Throttling — back off and retry |
 
+## Configuring the relay, step by step
+
+Everything below is one procedure for both platforms; only paths and service
+commands differ, so they are called out inline instead of duplicating the
+whole section per OS. Defaults (overridden by `service.data_dir` in the
+configuration, and by `-config` / `%ProgramData%` for the config file itself):
+
+| | Linux | Windows |
+|---|---|---|
+| Config file | `/etc/smtprelayd/smtprelayd.toml` | `%ProgramData%\SMTPRelayd\smtprelayd.toml` |
+| Data directory | `/var/lib/smtprelayd` | `%ProgramData%\SMTPRelayd` |
+| Apply a change | `sudo systemctl restart smtprelayd` | `Restart-Service smtprelayd` (elevated) |
+
+There is no live reload — the configuration is read once at startup — so every
+step below ends the same way: validate, then restart.
+
+### 1. Add the route
+
+Edit the configuration and add a `[[route]]` with `auth = "xoauth2"` plus a
+`[route.oauth2]` sub-table, using the tenant ID, client ID, mailbox and secret
+expiry recorded in the Entra ID and Exchange Online steps above:
+
+```toml
+[[route]]
+name    = "m365"
+default = true
+host    = "smtp.office365.com"
+port    = 587
+tls     = "starttls"
+min_tls = "1.2"
+auth    = "xoauth2"
+
+  [route.oauth2]
+  tenant_id      = "<tenant GUID>"
+  client_id      = "<application (client) ID>"
+  client_secret  = "<see step 2>"
+  secret_expires = "<YYYY-MM-DD, the secret's expiry from Entra ID>"
+  scope          = "https://outlook.office365.com/.default"
+  mailbox        = "relay@example.at"
+```
+
+### 2. Provision the client secret
+
+`client_secret` is never a literal value in the file — the loader rejects one
+(`internal/config/config.go`). Pick exactly one of the three reference forms.
+
+**Option A — `${ENV_VAR}`.** Practical on Linux via a systemd unit drop-in;
+not recommended on Windows, where a service account has no reliable way to
+pick up a machine environment variable without a reboot.
+
+```ini
+# /etc/systemd/system/smtprelayd.service.d/override.conf
+[Service]
+Environment=SMTPRELAYD_M365_SECRET=the-secret-value
+```
+```toml
+client_secret = "${SMTPRELAYD_M365_SECRET}"
+```
+```sh
+sudo systemctl daemon-reload
+sudo systemctl restart smtprelayd
+```
+
+**Option B — `file:<path>`.** Works on both platforms. Plaintext at rest; the
+protection is access control, not encryption — see `docs/SECURITY.md` §3.
+
+- The file holds the secret and nothing else — no trailing label, a trailing
+  newline is stripped automatically.
+- Linux: must be owned by root or the service's own uid, mode with no
+  group/other bits, and its containing directory must not be group- or
+  world-writable (`internal/config/trust_unix.go`). Placing it in the data
+  directory, already owned by the `smtprelayd` system user, is the simplest
+  way to satisfy that:
+  ```sh
+  printf '%s' 'the-secret-value' | sudo tee /var/lib/smtprelayd/ms365.txt >/dev/null
+  sudo chown smtprelayd:smtprelayd /var/lib/smtprelayd/ms365.txt
+  sudo chmod 0600 /var/lib/smtprelayd/ms365.txt
+  ```
+  ```toml
+  client_secret = "file:/var/lib/smtprelayd/ms365.txt"
+  ```
+- Windows: a file placed **inside** the data directory automatically inherits
+  the protected DACL `SecureDataDir` sets there (SYSTEM, Administrators and
+  `NT SERVICE\smtprelayd` only) — no `icacls` needed:
+  ```powershell
+  Set-Content -Path C:\ProgramData\SMTPRelayd\ms365.txt -Value 'the-secret-value' -NoNewline
+  ```
+  ```toml
+  client_secret = 'file:C:\ProgramData\SMTPRelayd\ms365.txt'
+  ```
+  A file placed **outside** the data directory gets no automatic protection —
+  `checkSecretFile` only refuses a symlink there — so it needs its own ACL:
+  ```powershell
+  icacls "C:\path\to\ms365.txt" /inheritance:r
+  icacls "C:\path\to\ms365.txt" /grant "*S-1-5-18:F"                 # SYSTEM
+  icacls "C:\path\to\ms365.txt" /grant "*S-1-5-32-544:F"              # Administrators
+  icacls "C:\path\to\ms365.txt" /grant "NT SERVICE\smtprelayd:F"      # service account
+  ```
+
+**Option C — `dpapi:<path>` (Windows only).** Encrypts the secret with this
+machine's DPAPI key, so a copy of the file is useless off this host; still
+inside the data directory for the same inherited-ACL reason as option B.
+
+```powershell
+Get-Content C:\ProgramData\SMTPRelayd\ms365.txt -Raw |
+    & "C:\Program Files\SMTPRelayd\smtprelayd.exe" `
+        -out C:\ProgramData\SMTPRelayd\ms365.dpapi protect-secret
+Remove-Item C:\ProgramData\SMTPRelayd\ms365.txt   # the plaintext is no longer needed
+```
+`-out` must precede the `protect-secret` command — flag parsing stops at the
+first non-flag argument, same as `-config` on every other command.
+```toml
+client_secret = 'dpapi:C:\ProgramData\SMTPRelayd\ms365.dpapi'
+```
+
+### 3. Validate
+
+```sh
+smtprelayd -config <config path from the table above> check
+```
+Catches a bad `file:`/`dpapi:` path, an unset `${ENV_VAR}`, or an invalid
+`secret_expires` before anything is restarted.
+
+### 4. Apply
+
+Restart the service (see the table above) — `check` only validates, it never
+reloads the running process.
+
+### 5. Verify
+
+```sh
+smtprelayd -config <config path> selftest   # fails loudly if it can relay from an unlisted address
+```
+Then send one real message through an allowlisted client and confirm it
+leaves `spool/active` — via the dashboard's queue view, `journalctl -u
+smtprelayd` / the Windows event log, or `smtprelayd.log` in the data
+directory.
+
+### 6. Rotating the secret later
+
+Repeat step 2 with the new value under the same path (or a new one), update
+`secret_expires`, then steps 3–4. `dpapi:` and `file:` both mean the new value
+simply overwrites the old file; nothing else in the configuration changes.
+
 ## How the relay implements this
 
 `internal/authms365` holds one `TokenSource` per route with `auth = "xoauth2"`.
