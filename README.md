@@ -26,24 +26,6 @@ no runtime dependencies and no cgo.
 - Installable as a Windows service (`.msi`) or via `.deb`/`.rpm` with a
   hardened systemd unit
 
-## Status
-
-Phases 1 through 4 are implemented and compiled: mail from an allowlisted
-client reaches a smarthost over TLS with SASL PLAIN, LOGIN or XOAUTH2,
-Microsoft 365 tokens are acquired through the OAuth2 client credentials flow,
-senders are rewritten and recipients routed per message, every message and
-delivery attempt is recorded in a SQLite history store, and the dashboard,
-JSON API and bounce-digest notifications are all in place and covered by
-automated tests. Phase 5 (packaging, the Windows service wrapper, CI,
-supply-chain hardening) was pulled forward early and is essentially done —
-install/uninstall/start/stop has been exercised on a real Windows machine.
-
-Outstanding: an end-to-end test against a real Microsoft 365 tenant (needs a
-tenant, mailbox and sending domain — nothing in the code path is unverified,
-but nothing has sent mail to a live inbox yet), and the equivalent
-install/upgrade cycle test for the `.deb`/`.rpm` packages on a real Linux
-machine. See `PROGRESS.md` for the detailed, session-by-session record.
-
 ## Build
 
 ```sh
@@ -191,6 +173,7 @@ Direct third-party dependencies, all pure Go and compatible with the GPL:
 | `modernc.org/sqlite` | History store, no cgo | BSD-3-Clause |
 | `gopkg.in/natefinch/lumberjack.v2` | Log rotation | MIT |
 | `github.com/kardianos/service` | Windows service registration (Windows-only build tag; its Linux backend, which shells out via `os/exec`, is never compiled in) | zlib |
+| `golang.org/x/sys` | Windows-only: DPAPI secret encryption, ACL verification, service listener binding | BSD-3-Clause |
 
 ## If you like my work you can
 
