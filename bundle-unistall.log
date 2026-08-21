@@ -1,0 +1,57 @@
+[3508:2DEC][2026-08-21T15:58:37]i001: Burn v3.14.1.8722, Windows v10.0 (Build 26200: Service Pack 0), path: C:\Windows\Temp\{99E922A7-2FE2-4BCA-80EA-47E42B1A8403}\.cr\smtprelayd-0.4.7-amd64-setup.exe
+[3508:2DEC][2026-08-21T15:58:37]i000: Initializing string variable 'CLEANDATA' to value '0'
+[3508:2DEC][2026-08-21T15:58:37]i009: Command Line: '-burn.clean.room=C:\Users\Administrator\Downloads\smtprelayd-0.4.7-amd64-setup.exe -burn.filehandle.attached=616 -burn.filehandle.self=620 /uninstall /log bundle-unistall.log'
+[3508:2DEC][2026-08-21T15:58:37]i000: Setting string variable 'WixBundleOriginalSource' to value 'C:\Users\Administrator\Downloads\smtprelayd-0.4.7-amd64-setup.exe'
+[3508:2DEC][2026-08-21T15:58:37]i000: Setting string variable 'WixBundleOriginalSourceFolder' to value 'C:\Users\Administrator\Downloads\'
+[3508:2DEC][2026-08-21T15:58:37]i000: Setting string variable 'WixBundleLog' to value 'C:\Users\Administrator\Downloads\bundle-unistall.log'
+[3508:2DEC][2026-08-21T15:58:37]i000: Setting string variable 'WixBundleManufacturer' to value 'Tokajer'
+[3508:292C][2026-08-21T15:58:37]i000: Setting numeric variable 'WixStdBALanguageId' to value 1033
+[3508:292C][2026-08-21T15:58:37]i000: Setting version variable 'WixBundleFileVersion' to value '0.4.7.0'
+[3508:2DEC][2026-08-21T15:58:38]i100: Detect begin, 1 packages
+[3508:2DEC][2026-08-21T15:58:38]i101: Detected package: smtprelayd_0.4.7_amd64.msi, state: Present, cached: Complete
+[3508:2DEC][2026-08-21T15:58:38]i199: Detect complete, result: 0x0
+[3508:2DEC][2026-08-21T15:58:40]i200: Plan begin, 1 packages, action: Uninstall
+[3508:2DEC][2026-08-21T15:58:40]i000: Setting string variable 'WixBundleRollbackLog_smtprelayd_0.4.7_amd64.msi' to value 'C:\Users\Administrator\Downloads\bundle-unistall_000_smtprelayd_0.4.7_amd64.msi_rollback.log'
+[3508:2DEC][2026-08-21T15:58:40]i000: Setting string variable 'WixBundleLog_smtprelayd_0.4.7_amd64.msi' to value 'C:\Users\Administrator\Downloads\bundle-unistall_000_smtprelayd_0.4.7_amd64.msi.log'
+[3508:2DEC][2026-08-21T15:58:40]i201: Planned package: smtprelayd_0.4.7_amd64.msi, state: Present, default requested: Absent, ba requested: Absent, execute: Uninstall, rollback: Install, cache: No, uncache: Yes, dependency: Unregister
+[3508:2DEC][2026-08-21T15:58:40]i299: Plan complete, result: 0x0
+[3508:2DEC][2026-08-21T15:58:40]i300: Apply begin
+[3508:2DEC][2026-08-21T15:58:40]i010: Launching elevated engine process.
+[3508:2DEC][2026-08-21T15:58:41]i011: Launched elevated engine process.
+[3508:2DEC][2026-08-21T15:58:41]i012: Connected to elevated engine.
+[1DD8:2654][2026-08-21T15:58:41]i358: Pausing automatic updates.
+[1DD8:2654][2026-08-21T15:58:41]i359: Paused automatic updates.
+[1DD8:2654][2026-08-21T15:58:41]i360: Creating a system restore point.
+[1DD8:2654][2026-08-21T15:58:41]w363: Could not create system restore point, error: 0x80070422. Continuing...
+[1DD8:2654][2026-08-21T15:58:41]i371: Updating session, registration key: SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\{5bba4a2b-60a4-44a8-a1ff-c5cbc462caef}, resume: Active, restart initiated: No, disable resume: No
+[1DD8:2654][2026-08-21T15:58:41]i326: Removed dependency: {5bba4a2b-60a4-44a8-a1ff-c5cbc462caef} on package provider: {A9C2FD0B-855B-4947-B632-232E057131EF}, package smtprelayd_0.4.7_amd64.msi
+[1DD8:2654][2026-08-21T15:58:41]i329: Removed package dependency provider: {A9C2FD0B-855B-4947-B632-232E057131EF}, package: smtprelayd_0.4.7_amd64.msi
+[1DD8:2654][2026-08-21T15:58:41]i301: Applying execute package: smtprelayd_0.4.7_amd64.msi, action: Uninstall, path: (null), arguments: ' ARPSYSTEMCOMPONENT="1" MSIFASTINSTALL="7" CLEANDATA="0"'
+[3508:2DEC][2026-08-21T15:59:38]i319: Applied execute package: smtprelayd_0.4.7_amd64.msi, result: 0x0, restart: None
+[1DD8:2654][2026-08-21T15:59:38]i351: Removing cached package: smtprelayd_0.4.7_amd64.msi, from path: C:\ProgramData\Package Cache\{A9C2FD0B-855B-4947-B632-232E057131EF}v0.4.7\
+[1DD8:2654][2026-08-21T15:59:38]i372: Session end, registration key: SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\{5bba4a2b-60a4-44a8-a1ff-c5cbc462caef}, resume: None, restart: None, disable resume: No
+[1DD8:2654][2026-08-21T15:59:38]i330: Removed bundle dependency provider: {5bba4a2b-60a4-44a8-a1ff-c5cbc462caef}
+[1DD8:2654][2026-08-21T15:59:38]i352: Removing cached bundle: {5bba4a2b-60a4-44a8-a1ff-c5cbc462caef}, from path: C:\ProgramData\Package Cache\{5bba4a2b-60a4-44a8-a1ff-c5cbc462caef}\
+[1DD8:2654][2026-08-21T15:59:38]i371: Updating session, registration key: SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\{5bba4a2b-60a4-44a8-a1ff-c5cbc462caef}, resume: None, restart initiated: No, disable resume: No
+[3508:2DEC][2026-08-21T15:59:38]i399: Apply complete, result: 0x0, restart: None, ba requested restart:  No
+[3508:2DEC][2026-08-21T15:59:49]i500: Shutting down, exit code: 0x0
+[3508:2DEC][2026-08-21T15:59:49]i410: Variable: CLEANDATA = 0
+[3508:2DEC][2026-08-21T15:59:49]i410: Variable: WixBundleAction = 3
+[3508:2DEC][2026-08-21T15:59:49]i410: Variable: WixBundleElevated = 1
+[3508:2DEC][2026-08-21T15:59:49]i410: Variable: WixBundleFileVersion = 0.4.7.0
+[3508:2DEC][2026-08-21T15:59:49]i410: Variable: WixBundleInstalled = 1
+[3508:2DEC][2026-08-21T15:59:49]i410: Variable: WixBundleLog = C:\Users\Administrator\Downloads\bundle-unistall.log
+[3508:2DEC][2026-08-21T15:59:49]i410: Variable: WixBundleLog_smtprelayd_0.4.7_amd64.msi = C:\Users\Administrator\Downloads\bundle-unistall_000_smtprelayd_0.4.7_amd64.msi.log
+[3508:2DEC][2026-08-21T15:59:49]i410: Variable: WixBundleManufacturer = Tokajer
+[3508:2DEC][2026-08-21T15:59:49]i410: Variable: WixBundleName = smtprelayd
+[3508:2DEC][2026-08-21T15:59:49]i410: Variable: WixBundleOriginalSource = C:\Users\Administrator\Downloads\smtprelayd-0.4.7-amd64-setup.exe
+[3508:2DEC][2026-08-21T15:59:49]i410: Variable: WixBundleOriginalSourceFolder = C:\Users\Administrator\Downloads\
+[3508:2DEC][2026-08-21T15:59:49]i410: Variable: WixBundleProviderKey = {5bba4a2b-60a4-44a8-a1ff-c5cbc462caef}
+[3508:2DEC][2026-08-21T15:59:49]i410: Variable: WixBundleRollbackLog_smtprelayd_0.4.7_amd64.msi = C:\Users\Administrator\Downloads\bundle-unistall_000_smtprelayd_0.4.7_amd64.msi_rollback.log
+[3508:2DEC][2026-08-21T15:59:49]i410: Variable: WixBundleSourceProcessFolder = C:\Users\Administrator\Downloads\
+[3508:2DEC][2026-08-21T15:59:49]i410: Variable: WixBundleSourceProcessPath = C:\Users\Administrator\Downloads\smtprelayd-0.4.7-amd64-setup.exe
+[3508:2DEC][2026-08-21T15:59:49]i410: Variable: WixBundleTag = 
+[3508:2DEC][2026-08-21T15:59:49]i410: Variable: WixBundleUILevel = 4
+[3508:2DEC][2026-08-21T15:59:49]i410: Variable: WixBundleVersion = 0.4.7.0
+[3508:2DEC][2026-08-21T15:59:49]i410: Variable: WixStdBALanguageId = 1033
+[3508:2DEC][2026-08-21T15:59:49]i007: Exit code: 0x0, restarting: No

@@ -22,25 +22,38 @@
   required to Authenticode-sign the Burn engine stub separately from the
   outer bundle exe.
 
-  DisplayInternalUI="yes" on the chained MsiPackage is deliberate: it tells
-  Burn to let the wrapped MSI show its own authored UI (PurgeDataDlg,
-  ExitDialog/UserExit/FatalError) directly, rather than running it silently
-  behind Burn's own generic themed screens. The operator therefore still
-  sees this bundle's own brief license page first, then the already
-  hardware-verified MSI UI underneath, an accepted tradeoff (two short
-  screens back to back instead of one) in exchange for reusing the MSI's
-  own UI unchanged, rather than re-authoring the purge-data question against
-  Burn's more limited stock bootstrapper theme.
+  DisplayInternalUI="yes" on the chained MsiPackage was first thought to let
+  the wrapped MSI show its own authored UI (PurgeDataDlg, ExitDialog)
+  directly through the bundle. Wrong, confirmed from a real uninstall's
+  verbose log: Burn only ever grants a chained MsiPackage Basic UI
+  (CLIENTUILEVEL=3), never Full, no matter what DisplayInternalUI is set to;
+  Basic suppresses every package-authored dialog, custom or stock, so
+  neither PurgeDataDlg nor ExitDialog ever rendered through the bundle,
+  either way. Left "yes" regardless: it still lets the MSI's own ActionText
+  feed Burn's progress page instead of a blank "Processing..." label.
 
-  CLEANDATA is forwarded from the bundle's own command line into the
-  wrapped MSI's property table via <MsiProperty> below, so a scripted purge
-  still works the same way it always has, just against the bundle instead
-  of the raw MSI:
-    smtprelayd-<version>-amd64-setup.exe /uninstall /quiet CLEANDATA=1
+  The purge-data question now lives in the bundle's own UI instead, via
+  smtprelayd-bundle-theme.xml's CLEANDATA checkbox on the Modify page (the
+  page WixStdBA shows for Apps & Features' Uninstall, since the bundle is
+  already installed; see that file's own header comment for how the
+  checkbox-to-Bundle-variable binding works. CLEANDATA is still forwarded
+  into the wrapped MSI's property table via <MsiProperty> below exactly as
+  before, so both paths keep working:
+    interactive: the Modify page's checkbox sets the Bundle variable, which
+      MsiProperty then forwards into the MSI's own CLEANDATA property
+    scripted: smtprelayd-<version>-amd64-setup.exe /uninstall /quiet
+      CLEANDATA=1 still works; the Modify page (and its checkbox) is never
+      visited for an explicit /uninstall, so this remains the only way to
+      purge data from a non-interactive uninstall, unchanged from before
+      this bundle existed.
 
   Variables supplied at candle.exe time (-d<Name>=<Value>):
-    Version   Bundle version, same numeric value smtprelayd.wxs uses
-    MsiPath   path to the already-built smtprelayd-<version>-amd64.msi
+    Version    Bundle version, same numeric value smtprelayd.wxs uses
+    MsiPath    path to the already-built smtprelayd-<version>-amd64.msi
+    ThemeFile  path to smtprelayd-bundle-theme.xml, passed explicitly
+               rather than as a bare relative filename, since ThemeFile's
+               own path resolution relative to the invocation's working
+               directory is not something to leave implicit
 -->
 <Wix xmlns="http://schemas.microsoft.com/wix/2006/wi"
      xmlns:bal="http://schemas.microsoft.com/wix/BalExtension">
@@ -53,12 +66,15 @@
     <BootstrapperApplicationRef Id="WixStandardBootstrapperApplication.HyperlinkLicense">
       <bal:WixStandardBootstrapperApplication
         LicenseUrl="https://github.com/tokajer/smtprelayd/blob/main/LICENSE"
+        ThemeFile="$(var.ThemeFile)"
         SuppressOptionsUI="yes" />
     </BootstrapperApplicationRef>
 
-    <!-- Overridable so an operator can pass CLEANDATA=1 on the bundle's own
-         command line exactly as before on the raw msiexec /x invocation. -->
-    <Variable Name="CLEANDATA" Type="string" Value="0" bal:Overridable="yes" />
+    <!-- Type="numeric": WixStdBA's checkbox-to-variable binding reads and
+         writes this via BalGetNumericVariable/SetVariableNumeric, not a
+         string comparison. Overridable so an operator can still pass
+         CLEANDATA=1 on the bundle's own command line for a scripted purge. -->
+    <Variable Name="CLEANDATA" Type="numeric" Value="0" bal:Overridable="yes" />
 
     <Chain>
       <MsiPackage SourceFile="$(var.MsiPath)" DisplayInternalUI="yes" Vital="yes">

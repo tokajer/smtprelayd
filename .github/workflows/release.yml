@@ -167,6 +167,7 @@ jobs:
           & "$wixBin\candle.exe" -ext WixBalExtension `
             -dVersion="${{ needs.build.outputs.pkg_version }}" `
             -dMsiPath="$msiPath" `
+            -dThemeFile="packaging\windows\smtprelayd-bundle-theme.xml" `
             -out "obj\smtprelayd-bundle.wixobj" "packaging\windows\smtprelayd-bundle.wxs"
           if ($LASTEXITCODE -ne 0) { throw "candle.exe (bundle) failed" }
           & "$wixBin\light.exe" -ext WixBalExtension `

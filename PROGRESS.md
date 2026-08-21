@@ -206,6 +206,81 @@ existing hardware-verified MSI upgrade/uninstall cycle still behaves once
 wrapped. `docs/` not yet updated to mention the new `-setup.exe` artifact or
 which of the two Windows artifacts an operator should use when — deferred
 until the bundle itself is confirmed working.
+**Same session, first real bundle test, two findings from a paired
+Burn/MSI log ("dialog kommt. uninstaller stop den dienst nicht. auswahl für
+clear data nicht vorhanden")**: one confirms and corrects the design above,
+one is unrelated and pre-existing.
+
+First: `DisplayInternalUI="yes"` does not do what its own comment claimed.
+The chained MSI's own verbose log showed `CLIENTUILEVEL=3` (Basic) on the
+uninstall Burn drove — confirmed by the property dump, not inferred — and
+Basic suppresses every package-authored dialog, `PurgeDataDlg` and the new
+`ExitDialog`/`UserExit`/`FatalError` alike, regardless of
+`DisplayInternalUI`. Burn simply never grants a chained `MsiPackage` Full
+UI. Fetched the real WiX v3 source rather than guess a third time
+(`wixtoolset/wix3` on GitHub, `develop` branch, `src/ext/BalExtension/
+wixstdba/Resources/HyperlinkTheme.xml` and `WixStandardBootstrapperApplication.cpp`)
+and confirmed the actual, documented mechanism instead:
+`WixStandardBootstrapperApplication.cpp` automatically binds any named
+`<Checkbox Name="X">` control on the stock theme's Install/Options/Modify
+pages to a same-named Bundle `Variable`, read via `BalGetNumericVariable`
+when the page loads and written back via `SetVariableNumeric` when the page
+is left (e.g. clicking "Uninstall"). New `packaging/windows/
+smtprelayd-bundle-theme.xml`, a copy of the fetched stock `HyperlinkTheme.xml`
+with one addition: a `CLEANDATA` checkbox on the `Modify` page specifically
+— the page WixStdBA shows when Burn detects the bundle is already
+installed, exactly the case for Apps & Features' "Uninstall." `smtprelayd-
+bundle.wxs`'s `CLEANDATA` `Variable` changed from `Type="string"` to
+`Type="numeric"` to match what the binding reads/writes. `release.yml`
+passes the new theme file's path as a `-dThemeFile=` candle variable,
+mirroring the existing `-dMsiPath=` pattern rather than relying on
+`ThemeFile`'s own bare-relative-path resolution. Important operational
+consequence documented in both files' comments: this checkbox is only ever
+reached through the *interactive* Modify page — an explicit `/uninstall` on
+the bundle's command line (exactly the test command used to capture the
+diagnostic logs) skips straight to execution and never shows it, so
+`CLEANDATA=1` on the command line remains the only scripted path, unchanged.
+Not build-verified — same recurring gap, and now a third distinct WiX
+dialect in one session (Product/UI dialogs, then Bundle/Chain, now
+Theme/.thm) with correspondingly less confidence than either earlier
+change; expect at least one more real `light.exe` round-trip.
+
+Second, unrelated to the above and unrelated to the bundle at all: asked
+"Zum Service" directly, the operator answered "ich habe den dienst
+gestopped" — they had to stop the Windows service manually after the
+uninstall, it did not stop on its own. The paired MSI verbose log had
+already shown `StopServiceCA` "returned actual error code 1 but will be
+translated to success due to continue marking," previously read (in an
+earlier session, on the raw-MSI path) as the benign "service already
+stopped" case; the operator's answer now rules that reading out for this
+run. Delegated to a background investigation (not yet acted on): `cmd/
+smtprelayd/main.go`'s `stop` dispatch surfaces `controlService`'s error only
+to stderr and `os.Exit(1)` — invisible to msiexec, which is exactly why
+`Return="ignore"` on `StopServiceCA` (`packaging/windows/smtprelayd.wxs`)
+has silently tolerated this. `controlService`
+(`cmd/smtprelayd/service_windows.go`) is a thin, three-line wrapper calling
+`kardianos/service`'s `Control(s, "stop")` with no pre-check of current
+service state and no logging of the underlying Win32 error. The vendored
+`kardianos/service` v1.3.0's own `stopWait` was independently found to have
+a real bug of its own (a `break` inside a `select` inside a `for` only exits
+the `select`, not the polling loop, so its 20s timeout does not actually
+bound the wait) — but that produces a *hang*, not a fast exit code 1, so it
+does not explain what was observed here; the more likely cause is `Control(
+svc.Stop)` itself returning a Win32 error immediately (`Impersonate="no"`
+rules out access-denied, SYSTEM has full rights regardless of the requested
+access mask), but the exact error cannot be confirmed since it never
+reaches any log. No test exists today for `controlService`/the stop path at
+all. Cross-referencing this file's own history: every previous
+"hardware-verified" Windows uninstall/upgrade claim only ever confirmed the
+service running again *after* an upgrade, never a plain terminal uninstall
+ending with the service actually stopped — this may be the first time that
+specific path was ever exercised end to end, on any invocation (raw
+`msiexec`, not just the bundle), which is why `smtprelayd.wxs`'s own header
+comment asserting "StopServiceCA already stops the service deterministically"
+turned out to be untested rather than false-but-known. Not yet fixed; needs
+a decision on scope (Go code in a different area than this session's
+packaging work, needs its own test coverage per `CLAUDE.md`'s definition of
+done, and the exact Win32 failure is still unconfirmed) before touching it.
 **Previous session**: 2026-08-21 (twenty-eighth session) — Bug fix, no phase work.
 Reported as "nach /queue bleiben die gelöschten Einträge sichtbar. ist das
 gewollt?" Traced to a real gap, not a misunderstanding: `/queue`'s "active"
