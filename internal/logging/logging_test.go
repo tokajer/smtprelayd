@@ -11,6 +11,9 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
+
+	_ "time/tzdata"
 )
 
 // The log file carries every queue ID, sender and recipient the relay handled,
@@ -134,5 +137,44 @@ func TestSecretsAreRedactedInTheFile(t *testing.T) {
 	}
 	if line["route"] != "m365" {
 		t.Fatalf("a non-secret attribute was redacted: %v", line)
+	}
+}
+
+// A configured Location must move the record's timestamp into that zone
+// rather than leaving it in whatever zone time.Now() happened to return.
+func TestLocationConvertsTheTimestamp(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "smtprelayd.log")
+	loc, err := time.LoadLocation("Pacific/Kiritimati") // UTC+14, never equal to the test host's zone
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	log, closer, err := New(Options{Level: slog.LevelInfo, File: path, Location: loc})
+	if err != nil {
+		t.Fatal(err)
+	}
+	log.Info("starting")
+	if err := closer.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var line map[string]any
+	if err := json.Unmarshal(b, &line); err != nil {
+		t.Fatalf("log line is not JSON: %v (%s)", err, b)
+	}
+	ts, ok := line["time"].(string)
+	if !ok {
+		t.Fatalf("no time field: %v", line)
+	}
+	parsed, err := time.Parse(time.RFC3339, ts)
+	if err != nil {
+		t.Fatalf("time field %q is not RFC3339: %v", ts, err)
+	}
+	if _, offset := parsed.Zone(); offset != 14*3600 {
+		t.Fatalf("time field %q was not converted to %s (want offset +14:00, got %ds)", ts, loc, offset)
 	}
 }

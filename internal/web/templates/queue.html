@@ -16,7 +16,7 @@
 <tbody>
 {{range .Messages}}
 <tr>
-	<td class="nowrap">{{.ReceivedAt.Format "2006-01-02 15:04:05"}}</td>
+	<td class="nowrap">{{localtime .ReceivedAt "2006-01-02 15:04:05"}}</td>
 	<td><span class="pill pill-{{.Status}}">{{.Status}}</span></td>
 	<td>{{.Client}}</td>
 	<td>{{.Route}}</td>

@@ -64,7 +64,11 @@ type Server struct {
 func New(cfg *config.Config, st *store.Store, sp *spool.Spool, reg *metrics.Registry, version string, log *slog.Logger) (*Server, error) {
 	pages := []string{"queue", "search", "bounces", "message", "routes", "config"}
 	tmpl := make(map[string]*template.Template, len(pages))
-	funcs := template.FuncMap{"bytes": formatBytes}
+	// Load already validated service.timezone; a nil Location here just
+	// means every timestamp keeps rendering in whatever zone it already
+	// carries (UTC, since that is what the store persists).
+	loc, _ := config.ParseTimezone(cfg.Service.Timezone)
+	funcs := template.FuncMap{"bytes": formatBytes, "localtime": localtimeFunc(loc)}
 	for _, name := range pages {
 		t, err := template.New(name).Funcs(funcs).ParseFS(templateFS,
 			"templates/layout.html", "templates/sidebar.html", "templates/pager.html",
@@ -605,6 +609,31 @@ func formatBytes(n int64) string {
 		return fmt.Sprintf("%.1f KB", float64(n)/1024)
 	default:
 		return fmt.Sprintf("%.1f MB", float64(n)/(1024*1024))
+	}
+}
+
+// localtimeFunc builds the "localtime" template func. It accepts both
+// time.Time (e.g. Message.ReceivedAt) and *time.Time (e.g. Attempt.NextAt,
+// which templates already guard with {{if .NextAt}} before calling this) so
+// every timestamp field in the dashboard can go through the same helper.
+func localtimeFunc(loc *time.Location) func(any, string) string {
+	return func(v any, layout string) string {
+		var t time.Time
+		switch x := v.(type) {
+		case time.Time:
+			t = x
+		case *time.Time:
+			if x == nil {
+				return ""
+			}
+			t = *x
+		default:
+			return ""
+		}
+		if loc != nil {
+			t = t.In(loc)
+		}
+		return t.Format(layout)
 	}
 }
 

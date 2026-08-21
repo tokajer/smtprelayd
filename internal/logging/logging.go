@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"gopkg.in/natefinch/lumberjack.v2"
 
@@ -27,11 +28,12 @@ var secretKeys = []string{"secret", "password", "token", "authorization", "crede
 // Options configures the logger.
 type Options struct {
 	Level      slog.Level
-	File       string // absolute path, empty disables file output
-	Console    bool   // also write to stderr
-	MaxSizeMB  int    // max log file size in MB before rotation (0 disables)
-	MaxBackups int    // number of old log files to keep
-	MaxAgeDays int    // max age of log files in days
+	File       string         // absolute path, empty disables file output
+	Console    bool           // also write to stderr
+	MaxSizeMB  int            // max log file size in MB before rotation (0 disables)
+	MaxBackups int            // number of old log files to keep
+	MaxAgeDays int            // max age of log files in days
+	Location   *time.Location // nil keeps each record's own (process-local) time
 }
 
 // New builds the process logger. The returned closer must be called on
@@ -79,12 +81,24 @@ func New(o Options) (*slog.Logger, io.Closer, error) {
 
 	h := slog.NewJSONHandler(io.MultiWriter(writers...), &slog.HandlerOptions{
 		Level:       o.Level,
-		ReplaceAttr: redact,
+		ReplaceAttr: newReplaceAttr(o.Location),
 	})
 	return slog.New(h), closer, nil
 }
 
-func redact(_ []string, a slog.Attr) slog.Attr {
+// newReplaceAttr applies the configured display timezone to the record's
+// timestamp, then redacts secrets. Both go through one ReplaceAttr because
+// slog only accepts a single hook.
+func newReplaceAttr(loc *time.Location) func([]string, slog.Attr) slog.Attr {
+	return func(_ []string, a slog.Attr) slog.Attr {
+		if loc != nil && a.Key == slog.TimeKey {
+			return slog.Time(slog.TimeKey, a.Value.Time().In(loc))
+		}
+		return redact(a)
+	}
+}
+
+func redact(a slog.Attr) slog.Attr {
 	k := strings.ToLower(a.Key)
 	for _, s := range secretKeys {
 		if strings.Contains(k, s) {

@@ -7,8 +7,8 @@
 <h1>Message <span class="qid">{{.Message.QueueID}}</span></h1>
 <dl class="envelope">
 	<dt>Status</dt><dd><span class="pill pill-{{.Message.Status}}">{{.Message.Status}}</span></dd>
-	<dt>Received</dt><dd>{{.Message.ReceivedAt.Format "2006-01-02 15:04:05 MST"}}</dd>
-	<dt>Expires</dt><dd>{{.Message.ExpiresAt.Format "2006-01-02 15:04:05 MST"}}</dd>
+	<dt>Received</dt><dd>{{localtime .Message.ReceivedAt "2006-01-02 15:04:05 MST"}}</dd>
+	<dt>Expires</dt><dd>{{localtime .Message.ExpiresAt "2006-01-02 15:04:05 MST"}}</dd>
 	<dt>Client</dt><dd>{{.Message.Client}}</dd>
 	<dt>Route</dt><dd>{{.Message.Route}}</dd>
 	<dt>Listener</dt><dd>{{.Message.Listener}}</dd>
@@ -45,11 +45,11 @@
 {{range .Message.Attempts}}
 <tr>
 	<td class="num">{{.AttemptNum}}</td>
-	<td class="nowrap">{{.AtTime.Format "2006-01-02 15:04:05"}}</td>
+	<td class="nowrap">{{localtime .AtTime "2006-01-02 15:04:05"}}</td>
 	<td><span class="pill pill-{{.Class}}">{{.Class}}</span></td>
 	<td class="nowrap">{{if .SMTPCode}}{{.SMTPCode}}{{end}}</td>
 	<td class="cell-resp">{{.SMTPResp}}</td>
-	<td class="nowrap">{{if .NextAt}}{{.NextAt.Format "2006-01-02 15:04:05"}}{{end}}</td>
+	<td class="nowrap">{{if .NextAt}}{{localtime .NextAt "2006-01-02 15:04:05"}}{{end}}</td>
 </tr>
 {{else}}
 <tr><td colspan="6" class="empty">no delivery attempts yet</td></tr>

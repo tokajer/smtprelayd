@@ -165,7 +165,12 @@ documented in `docs/MS365-AUTH.md` in case requirements change.
 Three layers, deliberately separate:
 
 1. **Event log** — JSON via `slog`, rotated by size and age. Every line carries
-   the queue ID.
+   the queue ID. Timestamps are process-local time by default; optional
+   `service.timezone` (added 2026-08-21, IANA name or `UTC`/`Local`) converts
+   them, and the same setting also converts every timestamp the dashboard
+   renders (queue, message detail, search, bounces, route list) — the history
+   database itself still stores and the API still reports in UTC either way,
+   so only display changes, never the stored or wire value.
 2. **History** — SQLite. One row per message, one row per delivery attempt
    including the verbatim SMTP response. Configurable retention, default 90
    days. This is the data source for the dashboard.
@@ -332,14 +337,23 @@ The load-bearing principles:
 - Linux: systemd unit, data under `/var/lib/smtprelayd`, config in
   `/etc/smtprelayd`. Logging goes to a rotated file under the data directory,
   not to journald — corrected 2026-08-12, this line claimed both and the
-  packaged unit never passed `-console`. What does reach journald is every
-  startup failure, because those are written to stderr before the file logger
-  exists, so a unit that will not come up is diagnosable with `journalctl`
-  alone. `-console` in the unit mirrors the full log into journald and is
-  documented there as an option rather than made the default: journald rate
-  limits and drops the excess, which would make the copy an operator reaches
-  for first the incomplete one during exactly the mail burst worth reading
-  about.
+  packaged unit never passed `-console`. `-console` in the unit mirrors the
+  full log into journald and is documented there as an option rather than
+  made the default: journald rate limits and drops the excess, which would
+  make the copy an operator reaches for first the incomplete one during
+  exactly the mail burst worth reading about.
+- **Startup failures reach the log file too, not only stderr/journald/the
+  Windows Event Log** — added 2026-08-21, closing a real gap: `spool.Open`,
+  `store.Open`, `listener.New`, `web.New`, `delivery.New` and the listener's
+  own `Serve` all now call `log.Error` in `cmd/smtprelayd/main.go`'s `serve()`
+  before returning, so any of those failing writes its reason into
+  `smtprelayd.log` before the process exits. One gap remains and is
+  structural, not an oversight: a failure in `config.Load` or
+  `checkEnvironment` happens before the log path is even known (`Load`) or
+  before the data directory's ACL has been verified safe to write into
+  (`checkEnvironment` must run — and fail closed — before anything touches
+  that directory, including the log file). Those two stay stderr/journald/
+  Windows-Event-Log-only, exactly as before.
 - Never store state next to the binary.
 - Configuration reload without restart: SIGHUP on Linux, a service control code
   or a dashboard action on Windows. Listener socket changes require a restart

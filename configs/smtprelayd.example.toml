@@ -4,6 +4,9 @@
 [service]
 data_dir  = "/var/lib/smtprelayd"   # Windows: C:\ProgramData\SMTPRelayd
 log_level = "info"                 # debug | info | warn | error
+# timezone = "Europe/Vienna"        # IANA name, or "UTC"/"Local"; unset keeps
+                                    # today's behaviour (log lines in process-
+                                    # local time, dashboard/history in UTC)
 
 [log]
 file        = "smtprelayd.log"      # relative to data_dir, and must stay

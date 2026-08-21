@@ -19,6 +19,11 @@ import (
 	"syscall"
 	"time"
 
+	// Blank-imported so service.timezone works from a single binary: Windows
+	// and minimal Linux images ship no IANA zoneinfo database on disk, and
+	// this project builds no external runtime for one to live in.
+	_ "time/tzdata"
+
 	"github.com/tokajer/smtprelayd/internal/api"
 	"github.com/tokajer/smtprelayd/internal/config"
 	"github.com/tokajer/smtprelayd/internal/delivery"
@@ -174,6 +179,11 @@ func serve(ctx context.Context, configPath string, console bool) error {
 		// changed underneath us, which is not a case to paper over.
 		return err
 	}
+	loc, err := config.ParseTimezone(cfg.Service.Timezone)
+	if err != nil {
+		// Same as above: Load already validated this value.
+		return err
+	}
 	log, closer, err := logging.New(logging.Options{
 		Level:      level,
 		File:       logFile,
@@ -181,14 +191,20 @@ func serve(ctx context.Context, configPath string, console bool) error {
 		MaxSizeMB:  cfg.Log.MaxSizeMB,
 		MaxBackups: cfg.Log.MaxBackups,
 		MaxAgeDays: cfg.Log.MaxAgeDays,
+		Location:   loc,
 	})
 	if err != nil {
 		return err
 	}
 	defer closer.Close()
 
+	// From here on the logger is live and writable, so every startup failure
+	// is logged before it is returned: main() only echoes it to stderr (lost
+	// on a Windows service with no console), while the log file is what an
+	// operator actually checks afterward.
 	sp, err := spool.Open(cfg.Service.DataDir)
 	if err != nil {
+		log.Error("spool: failed to open", "error", err)
 		return err
 	}
 	sp.SetQuota(cfg.Limits.SpoolMaxGB, cfg.Limits.SpoolWarnPercent)
@@ -196,6 +212,7 @@ func serve(ctx context.Context, configPath string, console bool) error {
 
 	st, err := store.Open(cfg.Service.DataDir, log, cfg.History.RetentionDays, cfg.History.RetainSubjects)
 	if err != nil {
+		log.Error("store: failed to open", "error", err)
 		return err
 	}
 	defer st.Close()
@@ -205,6 +222,7 @@ func serve(ctx context.Context, configPath string, console bool) error {
 
 	set, err := listener.New(cfg, sp, log, st)
 	if err != nil {
+		log.Error("listener: failed to start", "error", err)
 		return err
 	}
 
@@ -213,6 +231,7 @@ func serve(ctx context.Context, configPath string, console bool) error {
 
 	dm, err := delivery.New(cfg, sp, log, st)
 	if err != nil {
+		log.Error("delivery: failed to start", "error", err)
 		return err
 	}
 	done := make(chan struct{})
@@ -233,6 +252,7 @@ func serve(ctx context.Context, configPath string, console bool) error {
 	if cfg.Web.Enabled {
 		ws, err := web.New(cfg, st, sp, dm.Metrics(), version, log)
 		if err != nil {
+			log.Error("web: failed to start", "error", err)
 			return err
 		}
 		as := api.New(cfg, st, sp, dm.Metrics(), version, log)
@@ -253,6 +273,7 @@ func serve(ctx context.Context, configPath string, console bool) error {
 	}
 
 	if err := set.Serve(ctx); err != nil {
+		log.Error("listener: stopped", "error", err)
 		stop()
 		<-done
 		return err

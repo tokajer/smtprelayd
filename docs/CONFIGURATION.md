@@ -296,6 +296,9 @@ needed.
 ## 9. History and logging retention
 
 ```toml
+[service]
+timezone = "Europe/Vienna"   # optional; IANA name, or "UTC"/"Local"
+
 [log]
 file        = "smtprelayd.log"   # relative to data_dir; an absolute path or ".." is a startup error
 max_size_mb = 50
@@ -310,6 +313,14 @@ Every accepted message is journalled regardless of `retain_subjects` —
 envelope, client, route, listener, remote address, HELO, Message-ID,
 Content-Type, size, header count, and one row per delivery attempt with its
 verbatim SMTP response. The message body itself is never retained.
+
+`service.timezone` controls how timestamps are *displayed* — the JSON log
+lines' `time` field and every timestamp on the dashboard (queue, message
+detail, search, bounces, route list). The history database still stores in
+UTC either way, so the API's timestamps are unaffected. Leaving it unset
+keeps the current behaviour: log lines in the process's own local time,
+dashboard timestamps in UTC as stored. `check` rejects an unrecognised zone
+name at startup rather than falling back to it silently.
 
 ## 10. Global limits
 

@@ -10,7 +10,7 @@
 			<span class="chip">deferred <strong>{{.Deferred}}</strong></span>
 		</div>
 		{{if not .LastDelivery.IsZero}}
-		<div class="meta">last delivery {{.LastDelivery.Format "2006-01-02 15:04"}}</div>
+		<div class="meta">last delivery {{localtime .LastDelivery "2006-01-02 15:04"}}</div>
 		{{else}}
 		<div class="empty">no delivery yet</div>
 		{{end}}
@@ -26,7 +26,7 @@
 	{{range .RecentBounces}}
 	<li>
 		<a class="qid" href="/messages/{{.QueueID}}">{{.QueueID}}</a>
-		<div class="counts"><span class="chip">{{.Route}}</span><span class="chip">{{.ReceivedAt.Format "01-02 15:04"}}</span></div>
+		<div class="counts"><span class="chip">{{.Route}}</span><span class="chip">{{localtime .ReceivedAt "01-02 15:04"}}</span></div>
 	</li>
 	{{else}}
 	<li class="empty">none</li>

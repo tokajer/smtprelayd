@@ -15,7 +15,7 @@
 	<td class="num">{{.Delivered}}</td>
 	<td class="num">{{.Bounced}}</td>
 	<td class="num">{{.AuthFailures}}</td>
-	<td class="nowrap">{{if not .LastDelivery.IsZero}}{{.LastDelivery.Format "2006-01-02 15:04:05"}}{{else}}<span class="empty">never</span>{{end}}</td>
+	<td class="nowrap">{{if not .LastDelivery.IsZero}}{{localtime .LastDelivery "2006-01-02 15:04:05"}}{{else}}<span class="empty">never</span>{{end}}</td>
 	<td>{{if .HasToken}}{{.TokenAge}}{{else}}<span class="empty">n/a</span>{{end}}</td>
 </tr>
 {{else}}

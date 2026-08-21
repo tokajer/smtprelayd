@@ -40,6 +40,7 @@ type Service struct {
 	DataDir  string `toml:"data_dir"`
 	LogLevel string `toml:"log_level"`
 	Hostname string `toml:"hostname"`
+	Timezone string `toml:"timezone"`
 }
 
 type Log struct {

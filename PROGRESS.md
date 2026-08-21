@@ -19,7 +19,60 @@ fix below): the MSI installs without error, exactly one service registration
 remains (no duplicate), the on-disk binary is replaced, and the service keeps
 running afterwards. Uninstall remains unverified. Log rotation and Windows ACL
 verification at startup are complete.
-**Last session**: 2026-08-21 (twenty-sixth session) — Deployment support only,
+**Last session**: 2026-08-21 (twenty-seventh session) — Two small features
+added on request, no phase work. First, "ich möchte statt utc auch eine
+andere Zeitzone verwenden können": asked the operator up front whether the
+scope was the log file, the dashboard, or both, since the two draw from
+different sources (log lines are `slog`'s own `time.Now()`, dashboard
+timestamps come from the UTC-stored history database) — answer was both.
+New `service.timezone` (`internal/config/timezone.go`, `ParseTimezone`,
+IANA name or `UTC`/`Local`, empty keeps today's behaviour), validated at
+`Load()` time the same way `service.log_level` already is. `_ "time/tzdata"`
+is blank-imported in `cmd/smtprelayd/main.go`, caught before it became a
+silent Windows-only bug: this project ships one binary and Windows carries
+no on-disk IANA zoneinfo database at all, so without the embed
+`time.LoadLocation` would fail on every Windows install for any real zone
+name, working only on Linux hosts that happen to have `/usr/share/
+zoneinfo`. `internal/logging.Options` gained `Location *time.Location`;
+`newReplaceAttr` converts the `slog.TimeKey` attribute when set, then falls
+through to the existing redaction, since slog only takes one `ReplaceAttr`
+hook. The dashboard side went through a new `localtime` template func
+(`internal/web/web.go`) rather than converting at the store layer, so the
+history database and the JSON API stay in UTC exactly as before — only
+`queue.html`, `search.html`, `bounces.html`, `message.html`, `sidebar.html`
+and `routes.html`'s six raw `.Format` calls changed to `{{localtime ...}}`.
+`localtime` accepts both `time.Time` and `*time.Time` (`Attempt.NextAt` is a
+pointer, everything else is a value), since text/template calls are
+reflect-typed and would refuse a pointer where a `time.Time` parameter is
+declared. New test `TestLocationConvertsTheTimestamp`
+(`internal/logging/logging_test.go`) uses `Pacific/Kiritimati` (UTC+14)
+specifically because it can never coincide with the test host's own zone by
+accident.
+Second, "das logfile soll auch geschrieben werden wenn der Dienst nicht
+startet": traced the actual gap in `serve()` (`cmd/smtprelayd/main.go`) —
+once the logger is constructed, `spool.Open`, `store.Open`, `listener.New`,
+`web.New`, `delivery.New` and the listener's own `Serve` all returned their
+error bare, so a real startup failure (bind conflict, missing TLS cert,
+corrupt history database) reached stderr only, never the log file an
+operator actually opens. Each now gets a `log.Error(...)` before the
+`return`. Deliberately left alone, and recorded in `MEMORY.md` section 10 as
+a structural rather than missed case: a failure in `config.Load` (log path
+unknown yet) or `checkEnvironment` (must run, and fail closed, before
+anything — including the log file — touches the data directory) still
+cannot reach the log file, for the same reason `service.timezone`
+validation happens inside `Validate()` rather than after. Verified with the
+Go 1.25.13 toolchain at `~/sdk/go1.25.13` (not on `PATH` in this
+environment; invoked by full path) rather than reasoned about: `gofmt -l .`
+clean after one alignment fix, `go vet ./...` and `GOOS=windows GOARCH=amd64
+go build ./...` both clean, `go test -race ./...` green across every
+package including the new test, and `scripts/check-banned-imports.sh` clean
+for all three targets — confirming `time/tzdata` did not pull anything
+banned into the graph. `govulncheck`/`gosec` not run locally, not installed
+in this environment; same recurring gap as most sessions here, left for CI.
+`docs/CONFIGURATION.md` section 9 and `configs/smtprelayd.example.toml` both
+document `service.timezone`; `MEMORY.md` sections 7 and 10 updated for the
+timezone option and the startup-failure logging fix respectively.
+**Previous session**: 2026-08-21 (twenty-sixth session) — Deployment support only,
 no phase work, no code changed. Walked an operator through configuring the
 `m365` route's `oauth2.client_secret` on a live Windows install, starting
 from "wie mach ich in der config eine ms365 auth". Covered, in order: the

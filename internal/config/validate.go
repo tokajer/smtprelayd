@@ -48,6 +48,9 @@ func (c *Config) Validate() error {
 	if _, err := ParseLevel(c.Service.LogLevel); err != nil {
 		add("service.log_level: %v", err)
 	}
+	if _, err := ParseTimezone(c.Service.Timezone); err != nil {
+		add("service.timezone: %v", err)
+	}
 	if c.Service.Hostname == "" {
 		h, err := os.Hostname()
 		if err != nil || h == "" {
