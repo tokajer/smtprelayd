@@ -1,0 +1,70 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  WiX Burn bootstrapper wrapping smtprelayd.wxs's plain per-machine MSI.
+
+  Why this exists: msiexec.exe's own "MSI_LUA" compatibility shim forces
+  CLIENTUILEVEL=None for a UAC-split-token Administrator running a
+  maintenance operation (uninstall/repair) on an already admin-assigned
+  per-machine product, decided client-side, before the MSI is even opened,
+  so nothing in smtprelayd.wxs itself can affect it (see PROGRESS.md,
+  2026-08-21, twenty-ninth session). This bundle's own manifest requests
+  elevation once, up front; by the time it reaches the chained MsiPackage
+  below, the calling process is already fully elevated, so msiexec never
+  needs to invoke that shim, and the plain MSI's own UI (PurgeDataDlg,
+  ExitDialog) renders normally, including through Apps & Features, since
+  Windows registers *this* bundle's own uninstall command there once it is
+  what gets installed, not the raw MSI directly.
+
+  Built with WiX Toolset v3 (candle.exe -ext WixBalExtension, then light.exe
+  -ext WixBalExtension), the same runner-preinstalled toolset smtprelayd.wxs
+  already uses. No signing step exists in this project, so the usual
+  insignia.exe/burn.exe detach-reattach is not needed here; that is only
+  required to Authenticode-sign the Burn engine stub separately from the
+  outer bundle exe.
+
+  DisplayInternalUI="yes" on the chained MsiPackage is deliberate: it tells
+  Burn to let the wrapped MSI show its own authored UI (PurgeDataDlg,
+  ExitDialog/UserExit/FatalError) directly, rather than running it silently
+  behind Burn's own generic themed screens. The operator therefore still
+  sees this bundle's own brief license page first, then the already
+  hardware-verified MSI UI underneath, an accepted tradeoff (two short
+  screens back to back instead of one) in exchange for reusing the MSI's
+  own UI unchanged, rather than re-authoring the purge-data question against
+  Burn's more limited stock bootstrapper theme.
+
+  CLEANDATA is forwarded from the bundle's own command line into the
+  wrapped MSI's property table via <MsiProperty> below, so a scripted purge
+  still works the same way it always has, just against the bundle instead
+  of the raw MSI:
+    smtprelayd-<version>-amd64-setup.exe /uninstall /quiet CLEANDATA=1
+
+  Variables supplied at candle.exe time (-d<Name>=<Value>):
+    Version   Bundle version, same numeric value smtprelayd.wxs uses
+    MsiPath   path to the already-built smtprelayd-<version>-amd64.msi
+-->
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi"
+     xmlns:bal="http://schemas.microsoft.com/wix/BalExtension">
+
+  <Bundle Name="smtprelayd"
+          Version="$(var.Version)"
+          Manufacturer="Tokajer"
+          UpgradeCode="2ab0d134-9ff4-49c4-bf86-1c63c7f27540">
+
+    <BootstrapperApplicationRef Id="WixStandardBootstrapperApplication.HyperlinkLicense">
+      <bal:WixStandardBootstrapperApplication
+        LicenseUrl="https://github.com/tokajer/smtprelayd/blob/main/LICENSE"
+        SuppressOptionsUI="yes" />
+    </BootstrapperApplicationRef>
+
+    <!-- Overridable so an operator can pass CLEANDATA=1 on the bundle's own
+         command line exactly as before on the raw msiexec /x invocation. -->
+    <Variable Name="CLEANDATA" Type="string" Value="0" bal:Overridable="yes" />
+
+    <Chain>
+      <MsiPackage SourceFile="$(var.MsiPath)" DisplayInternalUI="yes" Vital="yes">
+        <MsiProperty Name="CLEANDATA" Value="[CLEANDATA]" />
+      </MsiPackage>
+    </Chain>
+
+  </Bundle>
+</Wix>

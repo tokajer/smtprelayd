@@ -152,6 +152,60 @@ collided with something already in the linked graph. `xmllint --noout`
 clean; still not build-verified — the next CI run is the real check, and at
 this point should be the last one needed for the Finish-dialog change
 specifically unless another undefined symbol turns up.
+**Same session, confirmed on hardware**: `light.exe` links clean and the MSI
+now shows a Finish dialog at the end of install ("dialog finish geht") —
+the Finish-dialog checklist item is closed. The `WixUI_Font_Bigger` guess
+(Tahoma 12pt, declared locally rather than sourced from a WiX fragment) is
+therefore also confirmed adequate, cosmetically. Uninstall's Finish dialog
+specifically, and the still-open `MSI_LUA`/`CLIENTUILEVEL` bootstrapper
+work, remain unstarted/unverified — see the checklist.
+**Same session, confirmed as expected, not a new bug**: "beim deinstall ist
+noch kein dialog" after the Finish-dialog fix above — exactly the
+`MSI_LUA`/`CLIENTUILEVEL` suppression already diagnosed and tracked, not a
+regression from the dialog work. Operator confirmed "Bootstrapper bauen" for
+this earlier in the session; started the same session, on request
+("weitermachen"): new `packaging/windows/smtprelayd-bundle.wxs`, a WiX Burn
+bundle chaining the existing, unchanged `smtprelayd.wxs` MSI as a single
+`MsiPackage`. New UpgradeCode `2ab0d134-9ff4-49c4-bf86-1c63c7f27540`
+(bundle-level, independent of the MSI's own `64270ec1-...` — Burn's own
+bundle-upgrade tracking is a separate mechanism from the wrapped product's
+`MajorUpgrade` element, which is untouched and still handles the MSI's own
+upgrade path). `DisplayInternalUI="yes"` on the `MsiPackage` deliberately:
+lets the already-verified MSI UI (`PurgeDataDlg`, `ExitDialog`) render as-is
+rather than being hidden behind Burn's own themed screens — the accepted
+tradeoff is a brief bundle-level license screen
+(`WixStandardBootstrapperApplication.HyperlinkLicense`, pointed at the
+repository's own `LICENSE` file on GitHub rather than embedding an RTF)
+shown first, then the MSI's own UI underneath, i.e. two short screens back
+to back instead of one. `CLEANDATA` is forwarded from a bundle-level
+`bal:Overridable` `Variable` into the wrapped MSI's property table via
+`<MsiProperty>`, so the documented scripted-purge workflow keeps working,
+now against the bundle: `smtprelayd-<version>-amd64-setup.exe /uninstall
+/quiet CLEANDATA=1`. `release.yml`'s `package-windows` job gained a second
+candle.exe/light.exe pair (`-ext WixBalExtension`) right after the existing
+MSI build, producing `dist\smtprelayd-<version>-amd64-setup.exe` — no
+`insignia.exe`/`burn.exe` detach-reattach needed, since this project signs
+nothing (that step exists only to Authenticode-sign the Burn engine stub
+separately from the outer bundle exe). The new file already hit, and had
+fixed before ever running it through CI, the exact double-hyphen-in-an-
+XML-comment mistake `MEMORY.md` tracks as a recurring one in this project
+(caught by `xmllint --noout`, four instances, all in prose describing the
+`MSI_LUA` background) — the same category of self-caught mistake as the
+twentieth/twenty-second sessions' WiX comments, just a new file this time.
+**Explicitly higher-risk than the Finish-dialog change**: Burn/`Bundle`
+syntax (`Variable`/`bal:Overridable`, `MsiProperty` forwarding,
+`WixStandardBootstrapperApplication` attributes) is less familiar terrain
+than plain `Product`/`UI` authoring, which itself still needed two rounds of
+real `light.exe` errors to get right this same session — this is reasoned
+from documentation, not from having built a Burn bundle against a working
+toolchain, so more than one CI round-trip pasted back here should be
+expected, same as the dialog work. Not yet attempted: an actual CI run, an
+install via the new bootstrapper, an Apps & Features uninstall through it
+(the actual scenario this whole bundle exists to fix), and whether the
+existing hardware-verified MSI upgrade/uninstall cycle still behaves once
+wrapped. `docs/` not yet updated to mention the new `-setup.exe` artifact or
+which of the two Windows artifacts an operator should use when — deferred
+until the bundle itself is confirmed working.
 **Previous session**: 2026-08-21 (twenty-eighth session) — Bug fix, no phase work.
 Reported as "nach /queue bleiben die gelöschten Einträge sichtbar. ist das
 gewollt?" Traced to a real gap, not a misunderstanding: `/queue`'s "active"
@@ -1723,27 +1777,37 @@ Unchanged, plus:
       — accepted on the reasoning/test-level evidence above, not on a
       hardware run; still genuinely unverified on real hardware, revisit if
       it becomes relevant again rather than treated as confirmed working.
-- [ ] MSI Finish/success dialog — added 2026-08-21 (twenty-ninth session),
-      `WixUIExtension`'s stock `ExitDialog`/`UserExit`/`FatalError` referenced
-      via `<UIRef Id="WixUI_ErrorProgressText" />` and three new `<Show>`
-      entries in `InstallUISequence` (`smtprelayd.wxs`), so both install and
-      uninstall end with a Finish screen instead of silently closing. No WiX
-      toolchain in this environment; only `xmllint --noout` clean, not
-      build-verified. Next release build and next install/uninstall on
-      hardware confirm it.
+- [x] MSI Finish/success dialog on install — added 2026-08-21 (twenty-ninth
+      session), `WixUIExtension`'s stock `ExitDialog`/`UserExit`/`FatalError`
+      referenced via `<UIRef Id="WixUI_Common" />` +
+      `<UIRef Id="WixUI_ErrorProgressText" />`, a `WixUI_Font_Bigger`
+      `TextStyle` declared locally (not supplied by either fragment,
+      confirmed by two rounds of `light.exe` ICE17/ICE31 errors), an explicit
+      `Finish`-button `Publish`, and three new `<Show>` entries in
+      `InstallUISequence` (`smtprelayd.wxs`). **Confirmed on hardware same
+      session** ("dialog finish geht") — `light.exe` links clean and a
+      Finish screen appears at the end of install. Uninstall's Finish
+      dialog specifically not yet separately confirmed (see the `MSI_LUA`
+      item below — uninstall via Apps & Features may still suppress it
+      entirely until the bootstrapper fix lands).
 - [ ] WiX Burn bootstrapper wrapping the `.msi` — scoped 2026-08-21 (twenty-
       ninth session) to fix the `MSI_LUA`/`CLIENTUILEVEL` UI suppression
       documented above: requests elevation once before `msiexec` runs, so
       Apps & Features uninstall (the operator's real trigger) is no longer
-      silently downgraded to no UI. Not started — deliberately staged after
-      the Finish-dialog change above so that smaller, self-contained change
-      can be verified on its own first. Will replace the shipped `.msi` with
-      a bootstrapper `.exe` registered in Apps & Features, add
-      `burn.exe`/`insignia.exe` steps to `release.yml`, and needs the full
-      install/upgrade/uninstall hardware cycle re-verified once built. Watch
-      for SmartScreen friction on the new unsigned `.exe` — flagged as a
-      possible regression versus today's unsigned `.msi`, not yet observed
-      either way.
+      silently downgraded to no UI. **Implemented same session**, not yet
+      run: new `packaging/windows/smtprelayd-bundle.wxs`
+      (`MsiPackage`/`DisplayInternalUI="yes"` chaining the existing,
+      unchanged MSI; `CLEANDATA` forwarded via a `bal:Overridable`
+      `Variable`), `release.yml` builds it alongside the `.msi` as
+      `dist\smtprelayd-<version>-amd64-setup.exe` (both artifacts ship; the
+      raw `.msi` stays for scripted/enterprise deployment). No
+      `burn.exe`/`insignia.exe` detach-reattach needed — this project signs
+      nothing. Only `xmllint --noout` clean so far; the actual `light.exe`
+      run, an install via the bootstrapper, an Apps & Features uninstall
+      through it, and the existing hardware-verified upgrade/uninstall cycle
+      surviving the wrap are all still outstanding. Watch for SmartScreen
+      friction on the new unsigned `.exe` — flagged as a possible regression
+      versus today's unsigned `.msi`, not yet observed either way.
 - [x] CI workflow that runs on every push/PR (`.github/workflows/ci.yml`):
       gofmt, vet, `go test -race`, the banned-import check and govulncheck,
       plus a cross-compile job for all three targets

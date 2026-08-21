@@ -159,6 +159,21 @@ jobs:
             "obj\smtprelayd.wixobj"
           if ($LASTEXITCODE -ne 0) { throw "light.exe failed" }
 
+      - name: Build bootstrapper with WiX Burn
+        shell: pwsh
+        run: |
+          $wixBin = Join-Path $env:WIX "bin"
+          $msiPath = "dist\smtprelayd-${{ needs.build.outputs.pkg_version }}-amd64.msi"
+          & "$wixBin\candle.exe" -ext WixBalExtension `
+            -dVersion="${{ needs.build.outputs.pkg_version }}" `
+            -dMsiPath="$msiPath" `
+            -out "obj\smtprelayd-bundle.wixobj" "packaging\windows\smtprelayd-bundle.wxs"
+          if ($LASTEXITCODE -ne 0) { throw "candle.exe (bundle) failed" }
+          & "$wixBin\light.exe" -ext WixBalExtension `
+            -out "dist\smtprelayd-${{ needs.build.outputs.pkg_version }}-amd64-setup.exe" `
+            "obj\smtprelayd-bundle.wixobj"
+          if ($LASTEXITCODE -ne 0) { throw "light.exe (bundle) failed" }
+
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: windows-installer
