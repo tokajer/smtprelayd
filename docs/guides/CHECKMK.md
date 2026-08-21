@@ -2,7 +2,7 @@
 
 `smtprelayd` exposes a Prometheus-format metrics endpoint specifically so
 that Checkmk can watch it. This guide covers enabling that endpoint,
-wiring it into Checkmk, and what to alert on. It assumes `docs/CONFIGURATION.md`
+wiring it into Checkmk, and what to alert on. It assumes `docs/guides/CONFIGURATION.md`
 section 8 (dashboard, API tokens, the metrics endpoint) has already been read.
 
 ## 1. What is exposed
@@ -37,7 +37,7 @@ section 3 is written for.
 **Beyond loopback:** only needed if the Checkmk site polls the relay
 remotely instead of through a local agent. `config.Validate` refuses such an
 address unless both a `[tls]` certificate and a `[[web.token]]` with at
-least `read` scope exist — see `docs/CONFIGURATION.md` section 8 for
+least `read` scope exist — see `docs/guides/CONFIGURATION.md` section 8 for
 provisioning one. Point the same integration at `https://<host>:<port>/metrics`
 with `Authorization: Bearer <token>`.
 
@@ -170,7 +170,7 @@ own metrics endpoint design assumed.
 
 `GET /api/v1/health` needs no authentication and returns process status,
 uptime, version and whether every route can currently authenticate
-(`docs/API.md`). A classic Checkmk `HTTP` service check
+(`docs/guides/API.md`). A classic Checkmk `HTTP` service check
 (`Setup > Hosts > <host> > check_http`/`check_httpx`) against that URL is a
 useful, independent complement to the metrics plugin: if `smtprelayd` itself
 is down, the metrics plugin already reports that (state 2, "could not

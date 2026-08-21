@@ -287,7 +287,7 @@ func serve(ctx context.Context, configPath string, console bool, ready chan<- er
 		as := api.New(cfg, st, sp, dm.Metrics(), version, log)
 
 		// The dashboard and the JSON API share one listener, per
-		// docs/PHASE4-PLAN.md: the api handler is mounted under /api/v1/
+		// docs/dev/PHASE4-PLAN.md: the api handler is mounted under /api/v1/
 		// with that prefix stripped, so its own routes are registered
 		// without it, and everything else falls through to the dashboard.
 		mux := http.NewServeMux()

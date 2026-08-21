@@ -58,7 +58,7 @@ func sourceAddr(r *http.Request) string {
 	return host
 }
 
-// Rate-limit tuning for repeated authentication failures, per docs/API.md:
+// Rate-limit tuning for repeated authentication failures, per docs/guides/API.md:
 // "5 failures per minute before exponential backoff."
 const (
 	failWindow        = time.Minute

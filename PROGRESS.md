@@ -80,7 +80,7 @@ nil-config no-op. What is genuinely still unreachable, and is structural:
 a config file that fails to parse at all, or fails its own trust check
 (`CheckConfigFile`) — `data_dir` is never known in either case, so those stay
 stderr/journald/Windows-Event-Log-only. `MEMORY.md` section 10 and
-`docs/CONFIGURATION.md` section 9 both updated to describe the narrower,
+`docs/guides/CONFIGURATION.md` section 9 both updated to describe the narrower,
 now-accurate gap.
 Verified with the Go 1.25.13 toolchain at `~/sdk/go1.25.13` (not on `PATH` in
 this environment; invoked by full path) rather than reasoned about:
@@ -91,7 +91,7 @@ green across every package including both new tests, and
 `time/tzdata` did not pull anything banned into the graph. `govulncheck`/
 `gosec` not run locally, not installed in this environment; same recurring
 gap as most sessions here, left for CI.
-`docs/CONFIGURATION.md` section 9 and `configs/smtprelayd.example.toml` both
+`docs/guides/CONFIGURATION.md` section 9 and `configs/smtprelayd.example.toml` both
 document `service.timezone`; `MEMORY.md` sections 7 and 10 updated for the
 timezone option and both startup-failure logging fixes.
 **Same session, further follow-up: the long-open "abort or only log" question
@@ -129,7 +129,7 @@ lasting longer than roughly the first 25 seconds of restart attempts
 exhausts the Linux unit's restart burst and leaves the service down until an
 operator intervenes (`systemctl reset-failed` and a manual start). That is
 what "verhindern" was asked to do, not a side effect to soften.
-`docs/MS365-AUTH.md`/`docs/CONFIGURATION.md` not touched: neither documents
+`docs/guides/MS365-AUTH.md`/`docs/guides/CONFIGURATION.md` not touched: neither documents
 today's lazy-fetch behaviour to begin with, so there was no stale claim to
 correct.
 Verified with the Go 1.25.13 toolchain: `gofmt -l .` clean, `go vet ./...`
@@ -215,6 +215,34 @@ configuration — no Windows machine in this environment — so the next
 deployment session should deliberately break `smtprelayd.toml` (or block the
 configured port) before starting the service and confirm the SCM now shows
 a failed start rather than a silently dead "running" one.
+**Same session, docs reorganised, no code changed.** Requested directly:
+"bitte noch die docs soweit aufräumen das anleitungen für enduser getrennt
+von den Findings usw sind." `docs/` had eleven files in one flat directory
+mixing operator-facing guides with this project's own working documents.
+Split into `docs/guides/` (`CONFIGURATION.md`, `MS365-AUTH.md`, `CHECKMK.md`,
+`API.md`, `SECURITY.md`, `img/`) and `docs/dev/` (`EXPLOIT-SURFACE.md`,
+`Findings.md`, `PHASE4-PLAN.md`, `PHASE5-CHECKLIST.md`,
+`SESSION-BOOTSTRAP.md`) via `git mv`, so history follows each file. The two
+judgement calls: `SECURITY.md` went to `guides/` rather than `dev/` — it is
+"binding" for whoever touches the code per `CLAUDE.md`, but README already
+framed it as a "deployment checklist" for whoever is running the relay, and
+that operator-facing framing is what a customer doing security due diligence
+before deploying actually wants; `EXPLOIT-SURFACE.md` went to `dev/` instead
+— it is explicitly the "code-level attack surface," addressed to whoever is
+about to edit `internal/listener` or `internal/rewrite`, not to an operator.
+Every reference to a moved file was then updated in one pass: README's
+Documentation section (split into the same two groups, operator guides
+first), `CLAUDE.md`'s security paragraph, `MEMORY.md`, this file's own
+current-state prose and its still-living Phases/Decision-log sections, and
+eleven Go source comments plus `scripts/check-banned-imports.sh` — all of
+these cite `docs/SECURITY.md`/`docs/API.md`/`docs/EXPLOIT-SURFACE.md` etc. as
+navigational pointers a reader is meant to follow right now, so a stale path
+left behind would be a real dead link, not a preserved historical fact.
+Verified with `grep` across the tree that no bare pre-move path survived
+anywhere. Verified with the Go 1.25.13 toolchain, since eleven `.go` files
+had a comment string changed: `gofmt -l .` clean, `go vet ./...` clean on
+both `GOOS`, `GOOS=windows GOARCH=amd64 go build ./...` clean, `go test ./...`
+green, `scripts/check-banned-imports.sh` clean for all three targets.
 **Previous session**: 2026-08-21 (twenty-sixth session) — Deployment support only,
 no phase work, no code changed. Walked an operator through configuring the
 `m365` route's `oauth2.client_secret` on a live Windows install, starting
@@ -237,7 +265,7 @@ Windows hardware" is now observed, not just reasoned from documented DPAPI
 semantics.
 **Same session, documentation follow-up.** First request: "bitte passe alle
 Dokus so an das es für alle eventualitäten eine Step by Step anleitung gibt
-... nicht für linux und Windows verschiedene." `docs/MS365-AUTH.md` gained a
+... nicht für linux und Windows verschiedene." `docs/guides/MS365-AUTH.md` gained a
 new "Configuring the relay, step by step" section — the route block, all
 three secret forms with Linux/Windows paths and commands inline rather than
 duplicated per OS, validate/apply/verify, and rotation — placed after
@@ -247,15 +275,15 @@ duplicated per OS, validate/apply/verify, and rotation — placed after
 edit done, by re-grepping the heading list). Second request, immediately
 after: the same treatment for every other configurable part, not only
 Microsoft 365 — "SMTPmit Auth + Zertifiket, Metriks bearer generiern usw.
-alles was unser tooll kann." New `docs/CONFIGURATION.md`: inbound
+alles was unser tooll kann." New `docs/guides/CONFIGURATION.md`: inbound
 listeners/the relay's own TLS certificate, client CIDR matching and all three
 sender-rewrite modes (reusing the example configuration's one-client-per-mode
 as the worked examples rather than inventing new ones), a generic smarthost
 route with `plain`/`login` SMTP AUTH and an `openssl`-based `ca_pin` recipe,
-a pointer to `docs/MS365-AUTH.md` for the Microsoft 365 route rather than
+a pointer to `docs/guides/MS365-AUTH.md` for the Microsoft 365 route rather than
 repeating it, multi-route recipient splitting, queue/bounce tuning, the
 dashboard and its theme, and — the concrete gap this closes, since
-`docs/API.md` documents the token contract but never how to provision one —
+`docs/guides/API.md` documents the token contract but never how to provision one —
 step-by-step bearer token generation (`openssl rand` → `sha256sum` →
 `[[web.token]]`) shared by the API and the metrics endpoint, plus the
 metrics endpoint's dual requirement (`[tls]` cert **and** a read-scope token
@@ -364,7 +392,7 @@ bullet — which claimed flatly "No `unsafe`" — is corrected to describe the
 real, narrow, explicitly-allowlisted exception instead, since that claim was
 already slightly stale before this session (the dormant trust_windows.go
 entry) and would have been actively false after it without the fix.
-`docs/SECURITY.md` §3 and `README.md`'s Configuration section both updated
+`docs/guides/SECURITY.md` §3 and `README.md`'s Configuration section both updated
 to list all three secret forms; `configs/smtprelayd.example.toml`'s
 `client_secret` comment now mentions `dpapi:`.
 **Build-verified same session, once a toolchain became available.** No Go
@@ -410,7 +438,7 @@ scoped to everything changed since the second review's fixes landed
 `purge-datadir` feature, the lumberjack swap and the Go toolchain pin — plus a
 re-check that the eleven previously closed findings and the banned-import
 rules had not regressed; none had. One finding, written up in full in
-`docs/Findings.md` under "targeted review, 2026-08-19": `purgeDataDir`
+`docs/dev/Findings.md` under "targeted review, 2026-08-19": `purgeDataDir`
 (`cmd/smtprelayd/verify_windows.go`), the deferred custom action behind the
 uninstaller's opt-in ProgramData purge, validated the resolved directory only
 by its basename and then recursed into it with `os.RemoveAll` as SYSTEM,
@@ -626,7 +654,7 @@ still typing, which is the standard htmx-polling footgun. CSP tightened from
 bare `default-src 'self'` to `default-src 'self'; script-src 'self'` to say
 explicitly that scripts load only from the dashboard's own origin; htmx's
 polling needs neither inline script nor `eval`, so nothing beyond that
-needed relaxing, and `docs/SECURITY.md`'s "no inline scripts" line stays
+needed relaxing, and `docs/guides/SECURITY.md`'s "no inline scripts" line stays
 true. Not build-verified — no Go toolchain is installed on this machine (a
 recurring gap in earlier sessions too, e.g. the fourteenth); `go build`,
 `go vet`, `go test ./...`, `gofmt`, `govulncheck` and `gosec` are all still
@@ -714,7 +742,7 @@ than leave the pin floating on the minor version. Verified locally:
 second security review closed**, and separately the **Windows MSI was installed
 on hardware and works**, which closes the 2026-08-11 installer defect that had
 made every fresh Windows install unstartable. Details of the MSI run are under
-Open defects and in `docs/PHASE5-CHECKLIST.md`; the rest of this entry is the
+Open defects and in `docs/dev/PHASE5-CHECKLIST.md`; the rest of this entry is the
 security work, requested as "alles umsetzen". Two findings needed a
 decision first and got one: `queue.failed_retention_hours` as a new key
 (finding 3, both halves — count *and* sweep, since counting alone turns a full
@@ -724,7 +752,7 @@ lowering `go.mod` (finding 9 — `golang.org/x/sys` v0.47.0 itself declares
 `go 1.25.0`, and that is the module the Windows DACL check needs, so lowering
 would have forced a dependency downgrade in the wrong place).
 The full write-up per finding, with the reasoning and the verification, is in
-`docs/Findings.md`; only what a later session needs to know is repeated here.
+`docs/dev/Findings.md`; only what a later session needs to know is repeated here.
 Two things worth carrying forward. **The smuggling fix is broader than the
 finding described**: `<LF>.<CRLF>` smuggles just as well as `<LF>.<LF>`, so
 `dotReader` tracks the *preceding* line's terminator as well as the dot line's
@@ -784,7 +812,7 @@ and `gosec` v2.28.0 all clean.
 **Previous session**: 2026-08-11 (seventeenth session) — Second full-tree security
 review, no phase work and **no code changed**. Requested as "prüfe mir das
 ganze auf Schwachstellen und Sicherheit". Eleven findings, all open, written
-up in `docs/Findings.md` with a checklist so they can be worked one at a time;
+up in `docs/dev/Findings.md` with a checklist so they can be worked one at a time;
 this file carries only the pointer under "Open security findings". Three were
 reproduced against the tree rather than reasoned about: a bare `<LF>.<LF>`
 ends DATA and the remainder is executed as SMTP commands (the smuggling shape
@@ -799,7 +827,7 @@ so a permanently failing message frees quota while still occupying the disk,
 and nothing ever prunes `spool/failed`. Baseline was clean: `gofmt`, `go vet`,
 `go test ./...` and `govulncheck` v1.1.4 (run locally this time, no
 vulnerabilities). What the review confirmed solid is recorded in
-`docs/Findings.md` too, so the next review starts from it instead of
+`docs/dev/Findings.md` too, so the next review starts from it instead of
 repeating it.
 **Previous session**: 2026-08-11 (sixteenth session) — Dashboard visual redesign
 plus a configurable colour theme, no phase work. Requested as "make the
@@ -829,7 +857,7 @@ from the configured surface and text rather than being a fixed neutral, so a
 warm palette does not get blue-grey table headers. Verified by rendering the
 real handler headless in Chrome across all six pages, in light, in dark, and
 under a custom amber palette, and the README screenshot
-(`docs/img/dashboard-queue.png`) was regenerated from the new dashboard.
+(`docs/guides/img/dashboard-queue.png`) was regenerated from the new dashboard.
 `gofmt`, `go vet` (both GOOS), `go test ./...` and both cross-builds clean;
 `scripts/check-banned-imports.sh` clean for all three targets.
 **Previous session**: 2026-08-11 (fifteenth session) — Message metadata journal, no
@@ -873,7 +901,7 @@ compile-checked. An MSI build and an install on hardware are still outstanding.
 `govulncheck`/`gosec` were not run locally (not installed on this machine; CI
 covers them).
 Same session, a documentation-hygiene pass, each item checked against the tree
-rather than against the session notes: `docs/PHASE5-CHECKLIST.md`'s
+rather than against the session notes: `docs/dev/PHASE5-CHECKLIST.md`'s
 "Follow-up implementation work" listed the Windows ACL check, the CI workflow
 and the log-rotation decision as open although all three shipped, and still
 said phase 4 had not started; phase 1's own Windows-ACL box contradicted
@@ -971,7 +999,7 @@ with the daemon's own bind error, and reports the `0.0.0.0:587` listener as an
 unverified note. The example config's placeholder is now marked as one.
 
 **Previous session**: 2026-08-11 (eleventh session) — Implemented phase 4e per
-`docs/PHASE4-PLAN.md` and `MEMORY.md` §8. `internal/bounce.Notifier` batches
+`docs/dev/PHASE4-PLAN.md` and `MEMORY.md` §8. `internal/bounce.Notifier` batches
 permanently-failed and expired messages (recorded via a new `RecordFail`
 call from `delivery.Manager.fail()` — the single choke point every "moved to
 spool/failed" path already went through, so no call site needed to change
@@ -1013,7 +1041,7 @@ generated; exactly one digest and the original message ended up in
 `-race` locally, this machine's `CGO_ENABLED=0`; unaffected on the CI
 runner).
 **Previous session**: 2026-08-10 (tenth session) — Implemented phase 4d per
-`docs/PHASE4-PLAN.md` and `docs/API.md`. `internal/api` serves the bearer-
+`docs/dev/PHASE4-PLAN.md` and `docs/guides/API.md`. `internal/api` serves the bearer-
 token-authenticated JSON API: `GET /health` (no auth), `GET /bounces`,
 `GET /messages`, `GET /messages/{id}`, `GET /queue` (read scope), and
 `POST /messages/{id}/requeue` / `DELETE /messages/{id}` (admin scope).
@@ -1034,7 +1062,7 @@ design. Resolved by giving the dashboard its own POST
 `/messages/{id}/requeue` and `/messages/{id}/delete` handlers directly in
 `internal/web`, protected by a new per-process HMAC CSRF token
 (`internal/web/csrf.go`) instead of a bearer token — matching
-`docs/PHASE4-PLAN.md`'s own text ("REST API calls... do not use CSRF") more
+`docs/dev/PHASE4-PLAN.md`'s own text ("REST API calls... do not use CSRF") more
 faithfully than its file-list suggestion of putting CSRF logic under
 `internal/api`. Both entry points call the same underlying `spool.Requeue`/
 `spool.Discard` (new methods — 4a/4b never gave the spool a way to act on a
@@ -1047,7 +1075,7 @@ the fixed string `"dashboard"` for the web path. Both `Requeue` and
 `Release`/`Remove` call, which could otherwise resurrect a message `Discard`
 just deleted. `internal/web` and `internal/api` are now mounted on the
 single `[web].address` listener the plan calls for, `/api/v1/` stripped
-before dispatch. Added `store.FindBounceSummaries` to match `docs/API.md`'s
+before dispatch. Added `store.FindBounceSummaries` to match `docs/guides/API.md`'s
 flattened bounce JSON shape (final class, attempt count, first/last attempt
 timestamp) — different from the dashboard's full-attempts-list shape. While
 building it, **found and fixed a real bug** in three existing "latest
@@ -1074,7 +1102,7 @@ at all while a missing or garbage CSRF token gets 403. `GOOS=windows`/
 `-race` locally, this machine's `CGO_ENABLED=0`; unaffected on the CI
 runner).
 **Previous session**: 2026-08-10 (ninth session) — Implemented phase 4c per
-`docs/PHASE4-PLAN.md`: `internal/web` is a server-rendered, JavaScript-free
+`docs/dev/PHASE4-PLAN.md`: `internal/web` is a server-rendered, JavaScript-free
 dashboard (`html/template` with strict auto-escaping, `embed.FS` for
 templates and CSS) with six pages — live queue (`/queue`, sortable by
 sent/status/client/route, showing only messages still in the spool), search
@@ -1116,7 +1144,7 @@ not just a literal string), an invalid queue ID returns 400, and `POST
 vet` clean, `go test ./...` green (no `-race` locally, this machine's
 `CGO_ENABLED=0`; unaffected on the CI runner).
 **Previous session**: 2026-08-10 (eighth session) — Implemented phase 4b per
-`docs/PHASE4-PLAN.md`: `internal/metrics.Registry` (hand-written Prometheus
+`docs/dev/PHASE4-PLAN.md`: `internal/metrics.Registry` (hand-written Prometheus
 text exposition, no `prometheus/client_golang` dependency per the existing
 decision) exposes `smtprelayd_queue_size{route,state}` (read live from a new
 `spool.QueueDepth`, which classifies each spooled message as queued or
@@ -1154,7 +1182,7 @@ a deliberately dead port, and watched it move to `state="deferred"` with
 `-race` locally, this machine's `CGO_ENABLED=0`; unaffected on the CI
 runner).
 **Previous session**: 2026-08-10 (seventh session) — Verified phase 4a end to end
-against `docs/PHASE4-PLAN.md`'s definition of done; most of it (schema, `Open`/
+against `docs/dev/PHASE4-PLAN.md`'s definition of done; most of it (schema, `Open`/
 `RecordMessage`/`RecordAttempt`/`RecordAudit`, `FindMessages`/`FindBounces`/
 `FindMessageByID`/`CountQueue`, `[history]` validation, wiring into
 `internal/listener/session.go` and `internal/delivery/delivery.go`,
@@ -1282,7 +1310,7 @@ run on upgrade and repair without anything having exercised it.
 ### Phase 1 — Minimum viable relay ✅ (untested against a live smarthost)
 
 - [x] `internal/config`: TOML schema, strict decoding, CIDR overlap detection,
-      fail-closed checks per `docs/SECURITY.md` section 2, `Secret` type that
+      fail-closed checks per `docs/guides/SECURITY.md` section 2, `Secret` type that
       refuses literal values and cannot be formatted into a log line
 - [x] `internal/spool`: durable queue, atomic rename, crash recovery,
       validated `ID` type with a private constructor
@@ -1324,7 +1352,11 @@ run on upgrade and repair without anything having exercised it.
 - [x] OAuth2 configuration validation: tenant character set, ASCII mailbox,
       resource scope, `secret_expires` format, scope defaulting
 - [x] Startup warning when the client secret expires within thirty days
-- [ ] `docs/MS365-AUTH.md` verified against a real tenant
+- [x] `docs/guides/MS365-AUTH.md` verified against a real tenant — closed
+      2026-08-21 ("ms schaut gut aus"), on the substance rather than a fresh
+      re-read of the doc: the twenty-sixth session already confirmed live
+      mail delivery through the M365 route, with both a `file:` and a
+      `dpapi:` client secret, against the operator's real tenant
 - [ ] Sovereign cloud authorities (`login.microsoftonline.us`, China) — needs a
       schema decision, deliberately not configurable today. **Deprioritised
       2026-08-21**: "US/china stellen wir auch hinten an, das MS365
@@ -1360,10 +1392,10 @@ route-level pacing from phase 2 remain separate and both apply. No decision
 needed; recorded so it is not rediscovered. It was written as an unticked
 checkbox until 2026-08-11, which made settled behaviour read as pending work.
 
-### Phase 4 — Observability ✅ (all of 4a–4e done, see `docs/PHASE4-PLAN.md`)
+### Phase 4 — Observability ✅ (all of 4a–4e done, see `docs/dev/PHASE4-PLAN.md`)
 
 Planned in five sub-phases (4a–4e), with implementation order determined by
-dependencies. Detailed plan in `docs/PHASE4-PLAN.md` (2026-08-10).
+dependencies. Detailed plan in `docs/dev/PHASE4-PLAN.md` (2026-08-10).
 - [x] 4a: `internal/store` (SQLite message and attempt history) — schema,
       `RecordMessage`/`RecordAttempt`/`RecordAudit`, retention cleanup with
       working FK cascade, `FindMessages`/`FindBounces`/`FindMessageByID`/
@@ -1414,7 +1446,7 @@ Unchanged, plus:
       the service wrapper row in `MEMORY.md` section 2)
 - [x] Linux systemd unit (`packaging/linux/smtprelayd.service`): capability
       bound to `CAP_NET_BIND_SERVICE` instead of root, the hardening
-      directives from `docs/SECURITY.md` section on process isolation
+      directives from `docs/guides/SECURITY.md` section on process isolation
 - [x] `.deb`/`.rpm` via nfpm (`packaging/linux/nfpm.yaml`), creates the
       `smtprelayd` system user/group and fixes ownership on
       `/etc/smtprelayd` and `/var/lib/smtprelayd` in a postinstall script;
@@ -1625,7 +1657,7 @@ un-stuffing correctly paired with `net/smtp`'s re-stuffing `DotWriter`.
 ## Known gaps from the 2026-08-11 security review, second pass
 
 A second full-tree review on 2026-08-11 produced eleven findings. **All eleven
-were fixed on 2026-08-12** and the work is recorded in `docs/Findings.md`,
+were fixed on 2026-08-12** and the work is recorded in `docs/dev/Findings.md`,
 which keeps each original finding verbatim with the fix, the reasoning and the
 verification above it. Nothing from that review is open.
 
@@ -1859,7 +1891,7 @@ tracked in the phase 5 checklist rather than here.
 | 2026-08-08 | No Postfix fork, no Windows-only build | A fork inherits the IPL/EPL licence and a process architecture that does not exist on Windows; dropping Linux would cost the CI and test platform for about a hundred lines of platform code |
 | 2026-08-08 | `kardianos/service` imported only from `service_windows.go` | Its Linux backend shells out to `systemctl` via `os/exec`, which is banned; the file-suffix build constraint keeps that code out of the linux/amd64 and linux/arm64 dependency graph entirely rather than trusting a code path to never run |
 | 2026-08-08 | `go.mod` bumped to `go 1.23.0` | Required by `kardianos/service` v1.3.0; "Go 1.22+" in `MEMORY.md` was a floor set for cross-compilation, not a ceiling, so raising it is not a restructuring decision |
-| 2026-08-08 | Windows service runs as the virtual account `NT SERVICE\smtprelayd`, never LocalSystem | No password to provision or rotate, and no manual local-account creation in the installer, while still meeting the "dedicated service account" requirement in `docs/EXPLOIT-SURFACE.md` |
+| 2026-08-08 | Windows service runs as the virtual account `NT SERVICE\smtprelayd`, never LocalSystem | No password to provision or rotate, and no manual local-account creation in the installer, while still meeting the "dedicated service account" requirement in `docs/dev/EXPLOIT-SURFACE.md` |
 | 2026-08-08 | `serve()` takes a `context.Context` instead of creating one internally | The Windows service path has no process to send SIGTERM to; the SCM's Stop() call needs a cancel function it can call directly, and the foreground/systemd path keeps its exact previous behaviour by passing `context.Background()` |
 | 2026-08-08 | The MSI runs `smtprelayd.exe install`/`uninstall` as deferred custom actions instead of WiX's own `ServiceInstall` element | The SCM registration (name, account, recovery action) is defined once in `service_windows.go`; a second, WiX-side definition of the same service would drift from it silently |
 | 2026-08-08 | Neither the `.deb`/`.rpm` postinstall script nor the MSI starts the service | A fresh install has no tenant, mailbox or client configuration yet; auto-starting would just crash-loop until someone edits the config, which is a worse first impression than a clear "now configure and start it" message |
@@ -1876,7 +1908,7 @@ tracked in the phase 5 checklist rather than here.
 | 2026-08-10 | Queue depth, token age and last-delivery-time gauges are read live at scrape time (from `spool.QueueDepth` and `authms365.TokenSource.TokenAge`) rather than maintained as incrementally-updated state | A gauge derived from the spool's own source of truth cannot drift from it; an incrementally maintained counter could, and nothing here is hot enough to make that reads-vs-writes tradeoff pay for itself |
 | 2026-08-10 | A credential-related retryable failure gets its own `smarthost.AuthError` type instead of reusing `TempError` | The retry behaviour must stay identical to any other temporary failure, but `smtprelayd_auth_failures_total` cannot tell a rejected secret from a dead smarthost without a distinct type to match on |
 | 2026-08-10 | Metrics counters are seeded at zero for every configured route at startup | A counter that only appears in the exposition after its first event is indistinguishable, to a scraper, from a route that does not exist yet |
-| 2026-08-10 | The metrics endpoint has no authentication and no TLS | Matches the existing decision for Checkmk polling recorded in `MEMORY.md` section 7; the listener is expected to bind to loopback like the dashboard, the same boundary `docs/SECURITY.md` already relies on |
+| 2026-08-10 | The metrics endpoint has no authentication and no TLS | Matches the existing decision for Checkmk polling recorded in `MEMORY.md` section 7; the listener is expected to bind to loopback like the dashboard, the same boundary `docs/guides/SECURITY.md` already relies on |
 | 2026-08-10 | The read-only config view writes `"[redacted]"` as a literal string for every secret field, never relying on `Secret.String()`'s own redaction | Two independent reasons a secret cannot leak survive a mistake in either one; the view also never calls `.Value()` at all, so there is no code path that even holds the plaintext in scope |
 | 2026-08-10 | `metrics.Registry.Status()` is the single source both `/metrics` and the dashboard's route status page read from | The two must never disagree about whether a route has delivered, is deferred, or has a cached token; a second, independently-computed snapshot is how that drifts |
 | 2026-08-10 | `web.Serve` serves HTTPS with `cfg.TLS`'s certificate when `[web].address` is non-loopback, mirroring the existing listener's own certificate loading | `internal/config` already refuses to start a non-loopback `[web]` address without a certificate configured; a validation that guards a setting the server then ignores is worse than not validating it at all |
@@ -1884,7 +1916,7 @@ tracked in the phase 5 checklist rather than here.
 | 2026-08-10 | The "latest attempt" join in `FindMessages`, `CountQueue` and `FindBounceSummaries` tiebreaks on the attempts table's autoincrement `id`, not `MAX(at_time)` | `at_time` has only second precision; two attempts landing in the same wall-clock second both matched `MAX(at_time)` and fanned the join out into duplicate rows for one message. `id` is unique by construction, so it cannot tie |
 | 2026-08-10 | The dashboard's requeue and delete actions are separate handlers in `internal/web`, protected by a per-process HMAC CSRF token, not a second consumer of the bearer-token-protected `/api/v1/*` endpoints | The running process holds only a token's SHA-256 digest, never its plaintext, so the dashboard cannot construct an `Authorization: Bearer` header for itself even in principle. Both entry points still call the same `spool.Requeue`/`spool.Discard`/`store.RecordAudit` |
 | 2026-08-10 | `spool.Requeue` and `spool.Discard` return `ErrBusy` for a leased message rather than acting on it | The delivery worker holding the lease will call `Release`, `Remove` or `Fail` on it when the attempt finishes; racing that could resurrect a message `Discard` just deleted, or overwrite a `Requeue`'s reset attempt counter |
-| 2026-08-10 | `smtprelayd_api_auth_failures_total` has no source-address label | Route names are a small, fixed, config-time set; a source address chosen by whoever is failing to authenticate is not, and labelling it would let an attacker grow the exposition without bound. The source address is still logged, per docs/API.md, on the line itself rather than as a metric label |
+| 2026-08-10 | `smtprelayd_api_auth_failures_total` has no source-address label | Route names are a small, fixed, config-time set; a source address chosen by whoever is failing to authenticate is not, and labelling it would let an attacker grow the exposition without bound. The source address is still logged, per docs/guides/API.md, on the line itself rather than as a metric label |
 | 2026-08-10 | The API's per-source rate limiter tracks failures in memory with opportunistic eviction, not a fixed-size cache or an external store | The load profile (an internal API surface, loopback by default) does not justify a dependency; eviction on write bounds memory against the one attack this exists to slow down (many failed attempts from a small number of sources) without bounding it against an unrelated one (many distinct sources), which is a cost accepted rather than solved here |
 | 2026-08-11 | A client may override only `bounce.notify`; setting `bounce.sender`, `.notify_route`, `.digest_minutes` or `.max_per_hour` on a client is a startup error | The notifier never reads those fields per client — the digest window, volume cap and notify route are shared — so accepting them there would silently do nothing, exactly the "looks configured but does nothing" trap strict decoding otherwise closes |
 | 2026-08-11 | `bounce.sender` is required whenever notifications are enabled, which no prior validation checked | A digest with no From header is a red flag to most receiving mail systems; better to fail at startup than to find out from a spam-filtered notification nobody saw |

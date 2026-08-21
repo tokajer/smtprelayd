@@ -2,7 +2,7 @@
 // Copyright (C) 2026 Tokajer
 
 // Package authms365 acquires and caches Microsoft 365 OAuth2 access tokens
-// using the client credentials flow described in docs/MS365-AUTH.md.
+// using the client credentials flow described in docs/guides/MS365-AUTH.md.
 package authms365
 
 import (

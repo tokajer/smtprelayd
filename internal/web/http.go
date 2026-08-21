@@ -16,7 +16,7 @@ import (
 )
 
 // Handler returns the dashboard's HTTP handler, wrapped with the security
-// headers docs/SECURITY.md requires for it: a strict CSP that allows scripts
+// headers docs/guides/SECURITY.md requires for it: a strict CSP that allows scripts
 // only from the dashboard's own origin (htmx, vendored under /static/, is
 // the only one and needs neither inline script nor eval), a frame-busting
 // header, MIME sniffing turned off, and a conservative referrer policy.

@@ -132,5 +132,5 @@ route is currently able to authenticate.
 Prefer `/metrics` on the metrics listener for monitoring — it needs no token
 and carries queue depth, bounce counters, authentication failures and OAuth
 token age. Use this API when the ticket text of an individual failure is
-needed, not just its count. See `docs/CHECKMK.md` for wiring `/metrics` into
+needed, not just its count. See `docs/guides/CHECKMK.md` for wiring `/metrics` into
 Checkmk, including ready-to-use agent plugins.

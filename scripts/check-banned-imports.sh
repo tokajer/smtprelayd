@@ -3,7 +3,7 @@
 # Copyright (C) 2026 Tokajer
 #
 # Enforces the dependency-graph half of the import ban in CLAUDE.md and
-# docs/SECURITY.md. The other half -- this module's own source -- is enforced
+# docs/guides/SECURITY.md. The other half -- this module's own source -- is enforced
 # by internal/buildpolicy, which also runs under `make test`.
 #
 # This exists because a transitive import can reintroduce a banned package on

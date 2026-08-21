@@ -7,7 +7,7 @@ forwards it to a smarthost — primarily Microsoft 365 using OAuth2 / XOAUTH2.
 Runs as a Windows service or a systemd unit from a single static binary, with
 no runtime dependencies and no cgo.
 
-![Dashboard queue view showing deferred messages from a printer client](docs/img/dashboard-queue.png)
+![Dashboard queue view showing deferred messages from a printer client](docs/guides/img/dashboard-queue.png)
 
 ## Features
 
@@ -84,7 +84,7 @@ Enabling `[web]` in the configuration serves a read-only dashboard (queue,
 search, bounces, per-message detail, route status, a redacted configuration
 view) and, on the same listener under `/api/v1/`, a bearer-token-authenticated
 JSON API for search, queue inspection, and admin actions (requeue, delete) —
-see `docs/API.md` for the full contract. The dashboard itself needs no token:
+see `docs/guides/API.md` for the full contract. The dashboard itself needs no token:
 it binds to loopback by default, the same trust boundary as the API's health
 endpoint.
 
@@ -132,25 +132,32 @@ holds a literal value; it is one of:
   machine's DPAPI key via `smtprelayd protect-secret`, so it is not stored in
   plaintext on disk at all
 
-Do not commit any of these referenced values. `docs/CONFIGURATION.md` is a
+Do not commit any of these referenced values. `docs/guides/CONFIGURATION.md` is a
 step-by-step guide to every configurable part — listeners and the relay's own
 TLS certificate, client policy and sender rewriting, a generic smarthost with
 SMTP AUTH, API/metrics bearer tokens, queue and bounce behaviour, Linux and
 Windows paths side by side throughout. For the Microsoft 365 route
-specifically, `docs/MS365-AUTH.md` walks through all three secret forms from
+specifically, `docs/guides/MS365-AUTH.md` walks through all three secret forms from
 Entra ID app registration onward.
 
 ## Documentation
 
+Guides for deploying, configuring and operating smtprelayd:
+
+- `docs/guides/CONFIGURATION.md` — step-by-step guide to every configurable part
+- `docs/guides/MS365-AUTH.md` — Entra ID and Exchange Online setup
+- `docs/guides/SECURITY.md` — threat model, hardening requirements, deployment checklist
+- `docs/guides/API.md` — HTTP API contract
+- `docs/guides/CHECKMK.md` — wiring `/metrics` into Checkmk, ready-to-use agent plugins
+
+For contributors and maintainers:
+
 - `MEMORY.md` — architecture decisions and rationale
 - `PROGRESS.md` — phase tracking
-- `docs/CONFIGURATION.md` — step-by-step guide to every configurable part
-- `docs/MS365-AUTH.md` — Entra ID and Exchange Online setup
-- `docs/SECURITY.md` — threat model, hardening requirements, deployment checklist
-- `docs/EXPLOIT-SURFACE.md` — privilege escalation and code-level attack surface
-- `docs/API.md` — HTTP API contract
-- `docs/CHECKMK.md` — wiring `/metrics` into Checkmk, ready-to-use agent plugins
-- `docs/SESSION-BOOTSTRAP.md` — how to start an assisted session cheaply
+- `docs/dev/EXPLOIT-SURFACE.md` — privilege escalation and code-level attack surface
+- `docs/dev/Findings.md` — security review history
+- `docs/dev/PHASE4-PLAN.md`, `docs/dev/PHASE5-CHECKLIST.md` — phase working documents
+- `docs/dev/SESSION-BOOTSTRAP.md` — how to start an assisted session cheaply
 
 ## Licence
 

@@ -63,7 +63,7 @@ func secureDataDir(configPath string) error {
 //
 // It also runs the same config.CheckDir symlink/reparse-point refusal
 // secureDataDir already runs through SecureDataDir, for the same reason
-// docs/EXPLOIT-SURFACE.md §1 gives for checking it at startup: this is the
+// docs/dev/EXPLOIT-SURFACE.md §1 gives for checking it at startup: this is the
 // one function in the tree that recurses into the data directory instead of
 // only reading or ACLing it, so a junction planted at this path — before a
 // fresh install or after an operator manually recreated it without the

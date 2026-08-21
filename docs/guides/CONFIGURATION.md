@@ -3,7 +3,7 @@
 Step-by-step recipes for every configurable part of smtprelayd. Start from
 `configs/smtprelayd.example.toml` — copy it to the path in the table below and
 edit in place; every recipe here assumes that starting point rather than an
-empty file. For the Microsoft 365 route specifically, `docs/MS365-AUTH.md` has
+empty file. For the Microsoft 365 route specifically, `docs/guides/MS365-AUTH.md` has
 its own complete walkthrough, from Entra ID app registration through secret
 provisioning — this guide covers everything else and points there instead of
 repeating it.
@@ -35,7 +35,7 @@ so an unassignable `address` is caught here rather than in a restart loop.
 
 A secret field (`client_secret`, `credentials.password`) is never a literal
 value — it is `${ENV_VAR}`, `file:<path>`, or (Windows only) `dpapi:<path>`.
-`docs/MS365-AUTH.md` step 2 walks through all three in detail; that walkthrough
+`docs/guides/MS365-AUTH.md` step 2 walks through all three in detail; that walkthrough
 applies to any secret field in the configuration, not only Microsoft 365's.
 
 ## 1. Inbound listeners and the relay's own TLS certificate
@@ -71,7 +71,7 @@ Steps:
    the private key deserves the same treatment: on Linux, owned by the
    `smtprelayd` user, mode `0600`; on Windows, put it inside the data
    directory so it inherits the protected ACL `SecureDataDir` sets there (see
-   `docs/MS365-AUTH.md`'s `file:` option for exactly how that inheritance
+   `docs/guides/MS365-AUTH.md`'s `file:` option for exactly how that inheritance
    works).
 3. Validate and apply (see above) — `check` fails immediately with
    `tls.LoadX509KeyPair`'s own error if the pair does not parse or does not
@@ -174,7 +174,7 @@ silently downgrades to cleartext.
 
 ## 4. Routes — Microsoft 365
 
-See `docs/MS365-AUTH.md` in full: Entra ID app registration, Exchange Online
+See `docs/guides/MS365-AUTH.md` in full: Entra ID app registration, Exchange Online
 mailbox permissions, the `[route.oauth2]` block, and all three ways to
 provision `client_secret` with Linux and Windows steps side by side.
 
@@ -244,7 +244,7 @@ the accent usually goes with pinning `mode`.
 ### API and metrics bearer tokens
 
 There is no `token new` helper yet — generate and register one by hand. The
-same `[[web.token]]` list authenticates both `/api/v1/*` (`docs/API.md`) and,
+same `[[web.token]]` list authenticates both `/api/v1/*` (`docs/guides/API.md`) and,
 when the metrics listener is bound beyond loopback, `/metrics` too.
 
 1. Generate a random token:
@@ -291,7 +291,7 @@ certificate (section 1) **and** a `[[web.token]]` with at least `read` scope
 drift apart. Prefer `/metrics` over the JSON API for monitoring: it needs no
 token when local and carries queue depth, bounce counters, auth failures and
 OAuth token age; use the API when the ticket text of one specific failure is
-needed. See `docs/CHECKMK.md` for wiring this endpoint into Checkmk.
+needed. See `docs/guides/CHECKMK.md` for wiring this endpoint into Checkmk.
 
 ## 9. History and logging retention
 

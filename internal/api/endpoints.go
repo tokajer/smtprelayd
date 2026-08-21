@@ -134,7 +134,7 @@ func (s *Server) handleBounces(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, resp)
 }
 
-// validMessageStatus allowlists the status values docs/API.md documents for
+// validMessageStatus allowlists the status values docs/guides/API.md documents for
 // /api/v1/messages. "active" (queued or deferred) is a convenience the web
 // dashboard's own /queue view uses internally; it is not part of the
 // published API contract, so it is not accepted here.

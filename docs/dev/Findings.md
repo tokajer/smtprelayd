@@ -469,7 +469,7 @@ and refuses it if `os.ModeSymlink` is set, which on Windows `os.Lstat` sets
 for NTFS junctions (mount-point reparse points) as well as true symbolic
 links. `purgeDataDir` was the one place in the tree that skipped it, despite
 being the one function that recurses into the directory rather than only
-reading or ACLing it — exactly the case `docs/EXPLOIT-SURFACE.md` §1 has in
+reading or ACLing it — exactly the case `docs/dev/EXPLOIT-SURFACE.md` §1 has in
 mind requiring the data directory "must not be a symlink," and §4's "refuse
 to follow symlinks anywhere under the data directory."
 

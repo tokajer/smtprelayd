@@ -53,7 +53,7 @@ libraries that do not exist understated it in the one direction that matters.
 | Config | TOML via `github.com/BurntSushi/toml` | Comments allowed, readable for operators |
 | History store | `modernc.org/sqlite` | **Pure Go**, no cgo, keeps Windows builds trivial. Its `modernc.org/libc` runtime imports `os/exec` on every GOOS for the C `system()`/`popen()` shims; the SQLite amalgamation never calls either (`system()` belongs to the sqlite3 CLI, not the library), so the code is linked but unreachable. Recorded decision, 2026-08-11: this is the **only** accepted `os/exec` importer, named explicitly in `scripts/check-banned-imports.sh` |
 | Logging | stdlib `log/slog` (JSON) + `gopkg.in/natefinch/lumberjack.v2` | Structured, rotating, no external agent. The import path settled on 2026-08-12 and the history is worth keeping straight: this row named the `gopkg.in/...v2` path while the code imported `github.com/natefinch/lumberjack v2.0.0+incompatible`, so on 2026-08-11 the row was corrected to describe the tree. The code then moved to the path the row had originally named — not a reversal but the other half of the same fix: the `gopkg.in` module is the properly versioned one with its own `go.mod`, and `+incompatible` dragged two test-only modules into the graph that nothing needed. The API is field-identical, so the change is one import line |
-| Dashboard | Go `html/template` + CSS, embedded via `embed.FS`, plus vendored htmx | No Node build step, ships inside the binary. The 2026-08-07 decision was `html/template` plus htmx; phase 4c needed no client-side behaviour, so htmx was left out and the dashboard carried no JavaScript through phase 4. **Added 2026-08-18**: htmx 2.0.4, vendored as a static file (`internal/web/static/htmx.min.js`, `embed.FS`, never fetched from a CDN — a loopback-only page should not depend on an outside host), so the live queue/bounces/routes/message views poll their own URL every 10s via `hx-get`/`hx-trigger`/`hx-select`/`hx-swap="outerHTML"` and refresh in place instead of requiring a manual reload. `/search`'s results table and the filter forms on `/search` and `/bounces` are deliberately excluded from polling — swapping that region on a timer would overwrite text the operator is still typing. CSP tightened to `default-src 'self'; script-src 'self'` (was bare `default-src 'self'`) to say explicitly that scripts load only from the dashboard's own origin; htmx needs neither inline script nor eval, so no CSP relaxation beyond that was needed. Its appearance is themeable from `[web.theme]` (2026-08-11): CSS custom properties, one generated override block appended to the stylesheet, hex colours only — see `docs/EXPLOIT-SURFACE.md` section 8. Light and dark come from `prefers-color-scheme` and a `data-theme` attribute, still without JavaScript |
+| Dashboard | Go `html/template` + CSS, embedded via `embed.FS`, plus vendored htmx | No Node build step, ships inside the binary. The 2026-08-07 decision was `html/template` plus htmx; phase 4c needed no client-side behaviour, so htmx was left out and the dashboard carried no JavaScript through phase 4. **Added 2026-08-18**: htmx 2.0.4, vendored as a static file (`internal/web/static/htmx.min.js`, `embed.FS`, never fetched from a CDN — a loopback-only page should not depend on an outside host), so the live queue/bounces/routes/message views poll their own URL every 10s via `hx-get`/`hx-trigger`/`hx-select`/`hx-swap="outerHTML"` and refresh in place instead of requiring a manual reload. `/search`'s results table and the filter forms on `/search` and `/bounces` are deliberately excluded from polling — swapping that region on a timer would overwrite text the operator is still typing. CSP tightened to `default-src 'self'; script-src 'self'` (was bare `default-src 'self'`) to say explicitly that scripts load only from the dashboard's own origin; htmx needs neither inline script nor eval, so no CSP relaxation beyond that was needed. Its appearance is themeable from `[web.theme]` (2026-08-11): CSS custom properties, one generated override block appended to the stylesheet, hex colours only — see `docs/dev/EXPLOIT-SURFACE.md` section 8. Light and dark come from `prefers-color-scheme` and a `data-theme` attribute, still without JavaScript |
 | TLS | stdlib `crypto/tls` | No OpenSSL linkage |
 
 ## 3. Component layout
@@ -168,7 +168,7 @@ is the primary path; PLAIN and LOGIN exist only for non-Microsoft smarthosts.
 
 Alternatives considered and rejected for now: High Volume Email
 (`smtp-hve.office365.com`) and IP-based connector / direct send. Both are
-documented in `docs/MS365-AUTH.md` in case requirements change.
+documented in `docs/guides/MS365-AUTH.md` in case requirements change.
 
 ## 7. Observability
 
@@ -203,7 +203,7 @@ Three layers, deliberately separate:
    a certificate, and the loader refuses the address unless both exist.
    The dashboard got the opposite treatment for the opposite reason: it has no
    credential it could present, so a non-loopback `[web].address` is refused
-   outright. See `docs/SECURITY.md` section 7.
+   outright. See `docs/guides/SECURITY.md` section 7.
 
 Dashboard features: live queue view, message search by sender, recipient,
 subject, status and time range, per-attempt delivery history, route status,
@@ -272,12 +272,12 @@ ticketing or reporting.
 - Cursor-based pagination, RFC 3339 timestamps throughout.
 - The API and the dashboard share the same listener and the same store.
 
-See `docs/API.md` for the endpoint contract.
+See `docs/guides/API.md` for the endpoint contract.
 
 ## 9. Security posture
 
 Security is a primary design driver, not a later hardening pass. The full
-threat model and the binding requirements live in `docs/SECURITY.md`; that
+threat model and the binding requirements live in `docs/guides/SECURITY.md`; that
 document is authoritative and must be read before touching the listener, the
 rewriting code or the API.
 
@@ -326,7 +326,7 @@ The load-bearing principles:
 - **The service account is the escalation target.** Configuration file,
   executable directory and data directory ownership are verified at startup
   and abort on failure, because each of them lets an unprivileged local user
-  steer a privileged process. See `docs/EXPLOIT-SURFACE.md`.
+  steer a privileged process. See `docs/dev/EXPLOIT-SURFACE.md`.
 - **No dynamic behaviour.** No cgo, no `os/exec`, no plugins, no auto-update.
   Command injection and updater escalation are made structurally impossible
   rather than defended against. In the dependency graph the single accepted

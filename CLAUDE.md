@@ -36,9 +36,9 @@ primarily Microsoft 365 via OAuth2 / XOAUTH2.
 
 ## Security
 
-`docs/SECURITY.md` and `docs/EXPLOIT-SURFACE.md` are binding. Read them before
-working on the listener, the rewriting code, the configuration loader, the
-spool, the installer or the API. Do not weaken anything in
+`docs/guides/SECURITY.md` and `docs/dev/EXPLOIT-SURFACE.md` are binding. Read
+them before working on the listener, the rewriting code, the configuration
+loader, the spool, the installer or the API. Do not weaken anything in
 it without an explicit decision recorded in `MEMORY.md`. In particular: never
 introduce an option to disable TLS certificate verification, never allow an
 unmatched source to relay, and never log or echo a secret.

@@ -9,7 +9,7 @@ detailed architecture.
 
 Phase 4 adds three layers of observability (event log, history, metrics),
 a web dashboard and a JSON API, all already decided in `MEMORY.md` §7/§8
-and `docs/API.md`. The config schema exists (`[bounce]`, `[web]`,
+and `docs/guides/API.md`. The config schema exists (`[bounce]`, `[web]`,
 `[metrics]`, `[history]` in `smtprelayd.example.toml`), four placeholder
 packages exist (`internal/store`, `internal/web`, `internal/metrics`,
 `internal/api` each with `doc.go` only), but the implementation order
@@ -64,7 +64,7 @@ store (4a: SQLite history)
   cascaded `attempts`/`audit` rows older than `[history].retention_days`.
 - **Subject retention**: `[history].retain_subjects` controls whether the
   `subject` column is populated (if false, store empty string). Personal
-  data sensitivity per `docs/SECURITY.md` §7.
+  data sensitivity per `docs/guides/SECURITY.md` §7.
 
 **Integration points**:
 - `internal/delivery.attempt()`: after a delivery outcome is decided,
@@ -198,7 +198,7 @@ search.
 - `embed.FS` for templates and static assets (CSS, no JS for now).
 - `html/template` with strict auto-escaping; all user input (sender,
   recipient, subject, SMTP responses from `store`) is escaped by default.
-- No inline scripts. Security headers per `docs/SECURITY.md` §7:
+- No inline scripts. Security headers per `docs/guides/SECURITY.md` §7:
   - `Content-Security-Policy: default-src 'self'; frame-ancestors 'none'`
   - `X-Content-Type-Options: nosniff`
   - `X-Frame-Options: DENY`
@@ -207,7 +207,7 @@ search.
   addresses (existing validation in `validate.go`).
 - Subject retention: if `[history].retain_subjects == false`, subjects are
   displayed as `[redacted]`, not suppressed from the view.
-- Message bodies are never retrieved or displayed (per `docs/EXPLOIT-SURFACE.md` §8).
+- Message bodies are never retrieved or displayed (per `docs/dev/EXPLOIT-SURFACE.md` §8).
 - Pagination: limit results to 100 per page (cursor-based offset via LIMIT/OFFSET
   in SQL, opaque cursor passed as query parameter).
 
@@ -261,7 +261,7 @@ changing actions (requeue, delete) and audit logging.
 - `cmd/smtprelayd/main.go` — wire both web and api to the same HTTP server
   (shared listener, shared store, same root logger)
 
-**Endpoints** (per `docs/API.md`):
+**Endpoints** (per `docs/guides/API.md`):
 - `GET /api/v1/bounces` — filter by time, recipient, client, route, class
 - `GET /api/v1/messages` — same filters plus status (queued/deferred/
   delivered/bounced)
@@ -280,7 +280,7 @@ changing actions (requeue, delete) and audit logging.
 - Bearer tokens: constant-time comparison (`crypto/subtle.ConstantTimeCompare`)
   against `Web.Tokens[i].SHA256`. No plaintext token is ever stored or displayed
   (existing config schema `Web.Token.SHA256` is the only persisted form).
-- Failed auth attempts are logged and counted in metrics. Per `docs/SECURITY.md` §7:
+- Failed auth attempts are logged and counted in metrics. Per `docs/guides/SECURITY.md` §7:
   rate-limit per source address (e.g., 5 failures per minute before exponential
   backoff). Use a simple in-memory token-bucket per source IP.
 - CSRF: Dashboard state-changing forms (requeue/delete) generate a cryptographic
@@ -312,7 +312,7 @@ changing actions (requeue, delete) and audit logging.
   returns valid JSON; admin action with wrong scope (read token) is rejected.
 
 **Definition of done**:
-- [ ] All endpoints from `docs/API.md` return correct JSON responses.
+- [ ] All endpoints from `docs/guides/API.md` return correct JSON responses.
 - [ ] Bearer token auth works: valid token → 200, no/bad token → 401,
       read scope on admin endpoint → 403.
 - [ ] Pagination is correct: `limit`, `cursor` parameters work; results
@@ -438,8 +438,8 @@ with loop prevention, volume capping, and no state-changing re-delivery.
 ## References
 
 - `MEMORY.md` §7 (Observability), §8 (Bounce handling)
-- `docs/API.md` (endpoint contract)
-- `docs/SECURITY.md` §7 (Dashboard and API security)
-- `docs/EXPLOIT-SURFACE.md` §8 (Dashboard and API injection surface)
-- `docs/MS365-AUTH.md` (not directly relevant to Phase 4)
+- `docs/guides/API.md` (endpoint contract)
+- `docs/guides/SECURITY.md` §7 (Dashboard and API security)
+- `docs/dev/EXPLOIT-SURFACE.md` §8 (Dashboard and API injection surface)
+- `docs/guides/MS365-AUTH.md` (not directly relevant to Phase 4)
 - `CLAUDE.md` (code style, testing, commit message format)

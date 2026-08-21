@@ -36,7 +36,7 @@ func ValidTenantID(s string) bool { return tenantID.MatchString(s) }
 // "no quota". No filesystem this reaches is anywhere near it.
 const maxSpoolGB = 1 << 30
 
-// Validate enforces every rule from docs/SECURITY.md that can be decided
+// Validate enforces every rule from docs/guides/SECURITY.md that can be decided
 // without touching the network. Ambiguity is an error, never a warning.
 func (c *Config) Validate() error {
 	var errs []string

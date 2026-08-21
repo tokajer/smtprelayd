@@ -13,7 +13,7 @@ const (
 	maxLimit     = 1000
 )
 
-// pageCursor is the opaque pagination state docs/API.md calls "cursor":
+// pageCursor is the opaque pagination state docs/guides/API.md calls "cursor":
 // base64-encoded JSON carrying the next offset and the limit that produced
 // it, so a client does not need to remember or resend its own limit.
 type pageCursor struct {

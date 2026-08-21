@@ -21,7 +21,7 @@ func windowsServiceConfig() *kservice.Config {
 		Description: "Accepts SMTP submissions from trusted internal devices and forwards them to a smarthost.",
 		Arguments:   []string{"run"},
 		// A virtual service account needs no password and no manual account
-		// creation, and is never LocalSystem. See docs/EXPLOIT-SURFACE.md.
+		// creation, and is never LocalSystem. See docs/dev/EXPLOIT-SURFACE.md.
 		UserName: `NT SERVICE\smtprelayd`,
 		Option: kservice.KeyValue{
 			"StartType": kservice.ServiceStartAutomatic,

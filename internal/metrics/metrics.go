@@ -96,7 +96,7 @@ func (r *Registry) AuthFailure(route string) {
 // APIAuthFailure records a rejected bearer token on the HTTP API. It has no
 // source-address label deliberately: an attacker choosing that label's
 // values would otherwise be able to grow the exposition without bound. The
-// source address is still logged, per docs/API.md; only the metric itself
+// source address is still logged, per docs/guides/API.md; only the metric itself
 // stays a single counter.
 func (r *Registry) APIAuthFailure() {
 	r.mu.Lock()

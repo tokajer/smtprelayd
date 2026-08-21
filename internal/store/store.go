@@ -345,7 +345,7 @@ func (s *Store) RecordAudit(tokenName, sourceAddr, action, queueID, details stri
 
 // FindAuditByQueueID returns audit entries for one queue ID, most recent
 // first. Not otherwise exposed via the API in this phase ("available for
-// future audit dashboard" per docs/PHASE4-PLAN.md); used directly by tests
+// future audit dashboard" per docs/dev/PHASE4-PLAN.md); used directly by tests
 // to confirm an admin action was actually recorded.
 func (s *Store) FindAuditByQueueID(queueID string) ([]AuditEntry, error) {
 	rows, err := s.db.Query(`

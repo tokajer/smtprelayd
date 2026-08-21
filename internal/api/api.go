@@ -18,7 +18,7 @@ import (
 )
 
 // Server serves the bearer-token-authenticated JSON API described in
-// docs/API.md. It shares the dashboard's listener and its store, spool and
+// docs/guides/API.md. It shares the dashboard's listener and its store, spool and
 // metrics registry; nothing here owns them.
 type Server struct {
 	cfg     *config.Config
@@ -46,7 +46,7 @@ type tokenNameKey struct{}
 // Handler returns the API's HTTP handler, mounted by the caller under
 // /api/v1/ (see cmd/smtprelayd, which strips that prefix before dispatch,
 // so patterns here are registered without it). GET /health is the only
-// endpoint reachable without a bearer token, per docs/API.md.
+// endpoint reachable without a bearer token, per docs/guides/API.md.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", s.handleHealth)
@@ -67,7 +67,7 @@ func jsonHeaders(next http.Handler) http.Handler {
 }
 
 // auth wraps a handler with bearer-token validation, the failed-attempt rate
-// limiter and the scope check, per docs/API.md: constant-time comparison,
+// limiter and the scope check, per docs/guides/API.md: constant-time comparison,
 // failures logged with the source address and counted in /metrics, missing
 // or malformed token yields 401, insufficient scope yields 403.
 func (s *Server) auth(need string, next http.HandlerFunc) http.HandlerFunc {

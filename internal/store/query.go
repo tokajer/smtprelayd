@@ -519,7 +519,7 @@ func (s *Store) FindBounces(filter BounceFilter) ([]*Message, error) {
 }
 
 // BounceSummary is the flattened view of a bounce the HTTP API returns
-// (docs/API.md): the final attempt's class and SMTP response plus a total
+// (docs/guides/API.md): the final attempt's class and SMTP response plus a total
 // attempt count, rather than the full attempt history FindMessageByID gives.
 type BounceSummary struct {
 	QueueID      string    `json:"queue_id"`

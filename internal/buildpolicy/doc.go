@@ -2,7 +2,7 @@
 // Copyright (C) 2026 Tokajer
 
 // Package buildpolicy holds no code. It exists to carry the test that enforces
-// the constructs CLAUDE.md and docs/SECURITY.md ban outright, so that the ban
+// the constructs CLAUDE.md and docs/guides/SECURITY.md ban outright, so that the ban
 // is a build failure rather than a review convention.
 //
 // The test covers this module's own source. The full dependency graph, where a

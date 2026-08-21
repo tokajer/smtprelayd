@@ -168,7 +168,7 @@ sudo systemctl restart smtprelayd
 ```
 
 **Option B — `file:<path>`.** Works on both platforms. Plaintext at rest; the
-protection is access control, not encryption — see `docs/SECURITY.md` §3.
+protection is access control, not encryption — see `docs/guides/SECURITY.md` §3.
 
 - The file holds the secret and nothing else — no trailing label, a trailing
   newline is stripped automatically.
