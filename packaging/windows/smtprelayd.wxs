@@ -164,7 +164,18 @@
     <UI>
       <TextStyle Id="DefaultFont" FaceName="Tahoma" Size="8" />
       <Property Id="DefaultUIFont" Value="DefaultFont" />
+      <!-- WixUI_Common supplies the shared Binary (dialog background bitmap)
+           and TextStyle (WixUI_Font_Bigger etc.) entries ExitDialog/
+           FatalError/UserExit reference internally; WixUI_ErrorProgressText
+           is the separate fragment for the Error/ActionText tables. Neither
+           pulls the other in, both are needed. -->
+      <UIRef Id="WixUI_Common" />
       <UIRef Id="WixUI_ErrorProgressText" />
+      <!-- ExitDialog's own Finish button ships with no ControlEvent wired
+           (WiX leaves that to whichever top-level wizard consumes it, since
+           different wizards want different finish behaviour); we only need
+           it to close the dialog. -->
+      <Publish Dialog="ExitDialog" Control="Finish" Event="EndDialog" Value="Return">1</Publish>
       <Dialog Id="PurgeDataDlg" Width="270" Height="105" Title="smtprelayd Setup" NoMinimize="yes">
         <Control Id="Question" Type="Text" X="20" Y="15" Width="230" Height="45" NoPrefix="yes"
                  Text="Also delete the data directory (%ProgramData%\SMTPRelayd: spool and message history)? This cannot be undone." />

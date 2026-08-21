@@ -118,6 +118,24 @@ first before the bigger, harder-to-verify Burn/Bundle rework begins. One
 caveat flagged to the operator, not yet acted on: an unsigned bootstrapper
 `.exe` may draw more SmartScreen friction than the current unsigned `.msi`
 does today, worth watching for once that work starts.
+**Same session, real `light.exe` build failure from CI, fixed from the pasted
+log rather than reasoned about**: `WixUI_ErrorProgressText` alone was not
+enough. Seven ICE17/ICE31 errors, all pointing the same direction: the
+`ExitDialog`/`FatalError`/`UserExit` dialogs (from
+`wix\src\ext\UIExtension\wixlib\*.wxs`) reference a shared
+`Binary Id="WixUI_Bmp_Dialog"` and `TextStyle Id="WixUI_Font_Bigger"` that
+live in the separate `WixUI_Common` fragment, not in
+`WixUI_ErrorProgressText` — the two fragments are siblings, neither pulls
+the other in, and only the latter was referenced. Also, `ExitDialog`'s
+`Finish` button ships with no `ControlEvent` wired at all (ICE17: "a 'Do
+Nothing' button") — deliberately, since WiX leaves that wiring to whichever
+top-level wizard fragment consumes `ExitDialog`, and this project isn't
+using one of those. Fixed by adding `<UIRef Id="WixUI_Common" />` alongside
+the existing `WixUI_ErrorProgressText` reference, and one explicit
+`<Publish Dialog="ExitDialog" Control="Finish" Event="EndDialog"
+Value="Return">1</Publish>` to close the dialog on click. `xmllint --noout`
+clean again; still not build-verified beyond that, same gap as above — the
+next CI run is what actually confirms `light.exe` links clean this time.
 **Previous session**: 2026-08-21 (twenty-eighth session) — Bug fix, no phase work.
 Reported as "nach /queue bleiben die gelöschten Einträge sichtbar. ist das
 gewollt?" Traced to a real gap, not a misunderstanding: `/queue`'s "active"
