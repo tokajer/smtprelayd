@@ -10,24 +10,42 @@ approach Microsoft still recommends for unattended SMTP submission.
 
 ### Entra ID setup
 
-1. Register an application in Entra ID. Record the tenant ID and client ID.
-2. Create a client secret. Note its expiry — the relay must surface an alert
-   before it lapses.
+1. Register an application in Entra ID (**Entra ID → App registrations → New
+   registration**). On its **Overview** page, record:
+   - **Application (client) ID** — this becomes `client_id` in the
+     configuration, and `-AppId` below.
+   - **Directory (tenant) ID** — this becomes `tenant_id` in the
+     configuration.
+2. Create a client secret (**Certificates & secrets → Client secrets → New
+   client secret**). Note its expiry — the relay must surface an alert before
+   it lapses.
 3. Add the **application** permission `SMTP.SendAsApp` under
    *Office 365 Exchange Online*. Not a delegated permission.
 4. Grant admin consent.
 
 ### Exchange Online setup
 
+The two commands below need the **service principal's** Object ID — not the
+Object ID already recorded from the App registration's own Overview page.
+Every app registration has two distinct objects in Entra ID, each with its
+own Object ID, and confusing them is the single most common mistake in this
+setup:
+
+| | Where to find it | Used as |
+|---|---|---|
+| Application (client) ID | App registrations → your app → Overview | `-AppId` below, and `client_id` in the configuration |
+| **Service principal Object ID** (what this step needs) | **Entra ID → Enterprise applications** → search for the same app name → Overview → *Object ID* | `-ObjectId` and `-User` below |
+| Application object ID | App registrations → your app → Overview → *Object ID* | not used anywhere in this setup — easy to grab by mistake since it is right next to the client ID |
+
 Register the service principal and grant it access to the sending mailbox:
 
 ```powershell
 Connect-ExchangeOnline
 
-New-ServicePrincipal -AppId <client-id> -ObjectId <enterprise-app-object-id>
+New-ServicePrincipal -AppId <client-id> -ObjectId <service-principal-object-id>
 
 Add-MailboxPermission -Identity "relay@example.at" `
-    -User <enterprise-app-object-id> -AccessRights FullAccess
+    -User <service-principal-object-id> -AccessRights FullAccess
 ```
 
 Ensure SMTP AUTH is enabled for the mailbox:
