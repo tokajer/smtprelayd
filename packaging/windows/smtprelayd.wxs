@@ -165,12 +165,18 @@
       <TextStyle Id="DefaultFont" FaceName="Tahoma" Size="8" />
       <Property Id="DefaultUIFont" Value="DefaultFont" />
       <!-- WixUI_Common supplies the shared Binary (dialog background bitmap)
-           and TextStyle (WixUI_Font_Bigger etc.) entries ExitDialog/
-           FatalError/UserExit reference internally; WixUI_ErrorProgressText
-           is the separate fragment for the Error/ActionText tables. Neither
-           pulls the other in, both are needed. -->
+           entries ExitDialog/FatalError/UserExit reference internally;
+           WixUI_ErrorProgressText is the separate fragment for the
+           Error/ActionText tables. Neither pulls the other in, both are
+           needed. WixUI_Common does not, in turn, supply WixUI_Font_Bigger
+           (confirmed by light.exe: ICE31 "undefined TextStyle" for all
+           three dialogs' Title control even with WixUI_Common referenced) —
+           declared directly here rather than guessing at a third fragment
+           reference; only the title text's rendered size depends on this
+           value, nothing functional. -->
       <UIRef Id="WixUI_Common" />
       <UIRef Id="WixUI_ErrorProgressText" />
+      <TextStyle Id="WixUI_Font_Bigger" FaceName="Tahoma" Size="12" />
       <!-- ExitDialog's own Finish button ships with no ControlEvent wired
            (WiX leaves that to whichever top-level wizard consumes it, since
            different wizards want different finish behaviour); we only need

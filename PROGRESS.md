@@ -136,6 +136,22 @@ the existing `WixUI_ErrorProgressText` reference, and one explicit
 Value="Return">1</Publish>` to close the dialog on click. `xmllint --noout`
 clean again; still not build-verified beyond that, same gap as above — the
 next CI run is what actually confirms `light.exe` links clean this time.
+**Same session, second real `light.exe` failure from a second pasted CI
+log**: the Binary/"do nothing button" errors were gone (confirming
+`WixUI_Common` and the `Finish` `Publish` fix above both landed correctly),
+but three ICE31 errors remained — `FatalError.Title`, `UserExit.Title` and
+`ExitDialog.Title` all "uses undefined TextStyle WixUI_Font_Bigger,"
+meaning `WixUI_Common` does not, in fact, supply that TextStyle despite
+supplying the `Binary` entries the same three dialogs also need. Rather than
+guess a third fragment reference against another CI round-trip, declared
+`<TextStyle Id="WixUI_Font_Bigger" FaceName="Tahoma" Size="12" />` directly
+in `smtprelayd.wxs`'s own `<UI>` block — the exact face/size only affects
+how big the dialog title text renders, nothing functional, and light.exe
+would have reported a duplicate-symbol error instead of "undefined" if this
+collided with something already in the linked graph. `xmllint --noout`
+clean; still not build-verified — the next CI run is the real check, and at
+this point should be the last one needed for the Finish-dialog change
+specifically unless another undefined symbol turns up.
 **Previous session**: 2026-08-21 (twenty-eighth session) — Bug fix, no phase work.
 Reported as "nach /queue bleiben die gelöschten Einträge sichtbar. ist das
 gewollt?" Traced to a real gap, not a misunderstanding: `/queue`'s "active"
