@@ -240,10 +240,16 @@ reached through the *interactive* Modify page — an explicit `/uninstall` on
 the bundle's command line (exactly the test command used to capture the
 diagnostic logs) skips straight to execution and never shows it, so
 `CLEANDATA=1` on the command line remains the only scripted path, unchanged.
-Not build-verified — same recurring gap, and now a third distinct WiX
-dialect in one session (Product/UI dialogs, then Bundle/Chain, now
-Theme/.thm) with correspondingly less confidence than either earlier
-change; expect at least one more real `light.exe` round-trip.
+**Confirmed on hardware the same session, first try, no further `light.exe`
+round-trip needed**: "unisnstall funktioniert sauber auch das auswahlfeld
+kommt für das programmdata beide fälle funktionieren" — the Modify page's
+`CLEANDATA` checkbox renders through the bundle on an interactive Apps &
+Features uninstall, and both the checked and unchecked cases behave
+correctly. The three-fragment WiX-source fetch (`HyperlinkTheme.xml`,
+`WixStandardBootstrapperApplication.cpp`, the customize doc) paid off:
+unlike the two-round Product/UI dialog fix and the Bundle/Chain wiring
+earlier this session, working from the real upstream source instead of
+memory got this one right on the first pass.
 
 Second, unrelated to the above and unrelated to the bundle at all: asked
 "Zum Service" directly, the operator answered "ich habe den dienst
@@ -281,6 +287,20 @@ turned out to be untested rather than false-but-known. Not yet fixed; needs
 a decision on scope (Go code in a different area than this session's
 packaging work, needs its own test coverage per `CLAUDE.md`'s definition of
 done, and the exact Win32 failure is still unconfirmed) before touching it.
+**Retested the same session, on the rebuilt bundle with the Modify-page
+checkbox above**: "ja auch das passt" — the service stopped correctly this
+time. No Go code changed between the two tests, only the WiX bundle/theme
+files, so this is not a fix; most consistent with the suspected
+`kardianos/service` `stopWait` bug being intermittent/timing-dependent
+rather than a fast, reliably-reproducing failure — it simply did not
+trigger on this run. **Closed by the operator regardless**: "service stop
+passt auch ist erledigt" — not pursuing further. Recorded here precisely so
+a future session does not mistake this for a code fix: no Go code changed,
+the underlying `kardianos/service` v1.3.0 `stopWait` for-loop bug (the
+timeout `break` only exits the `select`, not the loop) is still present and
+unfixed in the vendored code, and the one clean retest does not rule out
+the same intermittent failure recurring later. Revisit only if it
+resurfaces.
 **Previous session**: 2026-08-21 (twenty-eighth session) — Bug fix, no phase work.
 Reported as "nach /queue bleiben die gelöschten Einträge sichtbar. ist das
 gewollt?" Traced to a real gap, not a misunderstanding: `/queue`'s "active"
@@ -1865,24 +1885,28 @@ Unchanged, plus:
       dialog specifically not yet separately confirmed (see the `MSI_LUA`
       item below — uninstall via Apps & Features may still suppress it
       entirely until the bootstrapper fix lands).
-- [ ] WiX Burn bootstrapper wrapping the `.msi` — scoped 2026-08-21 (twenty-
+- [x] WiX Burn bootstrapper wrapping the `.msi` — scoped 2026-08-21 (twenty-
       ninth session) to fix the `MSI_LUA`/`CLIENTUILEVEL` UI suppression
       documented above: requests elevation once before `msiexec` runs, so
       Apps & Features uninstall (the operator's real trigger) is no longer
-      silently downgraded to no UI. **Implemented same session**, not yet
-      run: new `packaging/windows/smtprelayd-bundle.wxs`
-      (`MsiPackage`/`DisplayInternalUI="yes"` chaining the existing,
-      unchanged MSI; `CLEANDATA` forwarded via a `bal:Overridable`
-      `Variable`), `release.yml` builds it alongside the `.msi` as
-      `dist\smtprelayd-<version>-amd64-setup.exe` (both artifacts ship; the
-      raw `.msi` stays for scripted/enterprise deployment). No
+      silently downgraded to no UI. New `packaging/windows/
+      smtprelayd-bundle.wxs` (`MsiPackage` chaining the existing, unchanged
+      MSI) plus `packaging/windows/smtprelayd-bundle-theme.xml` (a fetched
+      copy of WiX's stock `HyperlinkTheme.xml` with a `CLEANDATA` checkbox
+      added to the Modify page — `DisplayInternalUI="yes"` alone turned out
+      not to surface the MSI's own dialogs, since Burn only ever grants a
+      chained package Basic UI; the purge-data question had to move into
+      the bundle's own UI instead). `release.yml` builds it alongside the
+      `.msi` as `dist\smtprelayd-<version>-amd64-setup.exe` (both artifacts
+      ship; the raw `.msi` stays for scripted/enterprise deployment). No
       `burn.exe`/`insignia.exe` detach-reattach needed — this project signs
-      nothing. Only `xmllint --noout` clean so far; the actual `light.exe`
-      run, an install via the bootstrapper, an Apps & Features uninstall
-      through it, and the existing hardware-verified upgrade/uninstall cycle
-      surviving the wrap are all still outstanding. Watch for SmartScreen
-      friction on the new unsigned `.exe` — flagged as a possible regression
-      versus today's unsigned `.msi`, not yet observed either way.
+      nothing. **Confirmed on hardware same session**: install, and an
+      interactive Apps & Features uninstall showing the Modify page's
+      `CLEANDATA` checkbox, both checked and unchecked, "beide fälle
+      funktionieren." Not yet confirmed: the existing hardware-verified MSI
+      upgrade cycle surviving the wrap, and SmartScreen friction on the new
+      unsigned `.exe` (flagged as a possible regression versus today's
+      unsigned `.msi`, not yet observed either way).
 - [x] CI workflow that runs on every push/PR (`.github/workflows/ci.yml`):
       gofmt, vet, `go test -race`, the banned-import check and govulncheck,
       plus a cross-compile job for all three targets
