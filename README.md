@@ -149,6 +149,7 @@ Entra ID app registration onward.
 - `docs/SECURITY.md` — threat model, hardening requirements, deployment checklist
 - `docs/EXPLOIT-SURFACE.md` — privilege escalation and code-level attack surface
 - `docs/API.md` — HTTP API contract
+- `docs/CHECKMK.md` — wiring `/metrics` into Checkmk, ready-to-use agent plugins
 - `docs/SESSION-BOOTSTRAP.md` — how to start an assisted session cheaply
 
 ## Licence

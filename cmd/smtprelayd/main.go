@@ -163,6 +163,7 @@ func run(cmd, configPath string, console bool, outPath string) error {
 func serve(ctx context.Context, configPath string, console bool) error {
 	cfg, err := config.Load(configPath)
 	if err != nil {
+		logStartupFailure(configPath, cfg, err)
 		return err
 	}
 	if err := checkEnvironment(cfg); err != nil {
@@ -281,6 +282,35 @@ func serve(ctx context.Context, configPath string, console bool) error {
 	<-done
 	log.Info("stopped", "queued", sp.Len())
 	return nil
+}
+
+// logStartupFailure makes a best-effort attempt to also put a config.Load
+// failure into <data_dir>/smtprelayd-error.log. Without this, a
+// configuration that fails validation (a typo'd service.timezone, say) is
+// reported correctly by `check` on stdout, but `run` failing the same check
+// left nothing behind except stderr — invisible on a Windows service with no
+// console, and easy to miss in journalctl too.
+//
+// A fixed filename rather than cfg.Log.File is deliberate: the configuration
+// that just failed to validate is exactly the one value that cannot be
+// trusted to name its own error log. Nothing is written unless
+// checkEnvironment first proves the data directory is safe to write into —
+// config.Load failing is precisely the case where that has not been checked
+// yet, so this must run its own gate rather than assume one already ran.
+func logStartupFailure(configPath string, cfg *config.Config, cause error) {
+	if cfg == nil || cfg.Service.DataDir == "" {
+		return
+	}
+	if err := checkEnvironment(cfg); err != nil {
+		return
+	}
+	path := filepath.Join(cfg.Service.DataDir, "smtprelayd-error.log")
+	log, closer, err := logging.New(logging.Options{File: path})
+	if err != nil {
+		return
+	}
+	defer closer.Close()
+	log.Error("startup failed", "config", configPath, "error", cause)
 }
 
 // checkEnvironment refuses to start when the data directory or the directory

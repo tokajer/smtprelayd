@@ -1,0 +1,207 @@
+#!/bin/sh
+# Checkmk local check for smtprelayd's /metrics endpoint.
+#
+# Install:
+#   cp smtprelayd_metrics /usr/lib/check_mk_agent/local/smtprelayd_metrics
+#   chmod 0755 /usr/lib/check_mk_agent/local/smtprelayd_metrics
+# then run service discovery on the host in Checkmk.
+#
+# Configuration is via environment variables, all optional; set them in
+# /etc/check_mk/smtprelayd_metrics.env and source it, or export them from
+# wherever the site already manages agent plugin environment.
+#
+# See docs/CHECKMK.md in the smtprelayd repository for the full guide.
+#
+# Requires: sh, curl, awk, date (all present on any host that runs the
+# Checkmk Linux agent itself).
+
+set -eu
+
+URL="${SMTPRELAYD_METRICS_URL:-http://127.0.0.1:9025/metrics}"
+TOKEN="${SMTPRELAYD_METRICS_TOKEN:-}"
+
+QUEUE_WARN="${SMTPRELAYD_QUEUE_WARN:-200}"
+QUEUE_CRIT="${SMTPRELAYD_QUEUE_CRIT:-1000}"
+DEFERRED_WARN="${SMTPRELAYD_DEFERRED_WARN:-50}"
+DEFERRED_CRIT="${SMTPRELAYD_DEFERRED_CRIT:-200}"
+BOUNCE_WARN="${SMTPRELAYD_BOUNCE_WARN:-1}"
+BOUNCE_CRIT="${SMTPRELAYD_BOUNCE_CRIT:-5}"
+AUTHFAIL_WARN="${SMTPRELAYD_AUTHFAIL_WARN:-1}"
+AUTHFAIL_CRIT="${SMTPRELAYD_AUTHFAIL_CRIT:-3}"
+TOKEN_AGE_WARN="${SMTPRELAYD_TOKEN_AGE_WARN:-3300}"
+TOKEN_AGE_CRIT="${SMTPRELAYD_TOKEN_AGE_CRIT:-3600}"
+API_AUTHFAIL_WARN="${SMTPRELAYD_API_AUTHFAIL_WARN:-1}"
+API_AUTHFAIL_CRIT="${SMTPRELAYD_API_AUTHFAIL_CRIT:-5}"
+NOTIFYFAIL_WARN="${SMTPRELAYD_NOTIFYFAIL_WARN:-1}"
+NOTIFYFAIL_CRIT="${SMTPRELAYD_NOTIFYFAIL_CRIT:-3}"
+
+STATE_DIR="${SMTPRELAYD_STATE_DIR:-/var/lib/check_mk_agent/state}"
+STATE_FILE="$STATE_DIR/smtprelayd_metrics.prev"
+
+mkdir -p "$STATE_DIR" 2>/dev/null || true
+
+if [ -n "$TOKEN" ]; then
+    RAW=$(curl -fsS --max-time 10 -H "Authorization: Bearer $TOKEN" "$URL" 2>/dev/null) || RAW=""
+else
+    RAW=$(curl -fsS --max-time 10 "$URL" 2>/dev/null) || RAW=""
+fi
+
+if [ -z "$RAW" ]; then
+    echo "2 smtprelayd_metrics - could not reach $URL"
+    exit 0
+fi
+
+echo "0 smtprelayd_metrics - reachable ($URL)"
+
+NOW=$(date +%s)
+PREV_CONTENT=""
+[ -r "$STATE_FILE" ] && PREV_CONTENT=$(cat "$STATE_FILE")
+
+printf '%s\n' "$RAW" | awk \
+    -v now="$NOW" \
+    -v prev_raw="$PREV_CONTENT" \
+    -v statefile="$STATE_FILE" \
+    -v queue_warn="$QUEUE_WARN" -v queue_crit="$QUEUE_CRIT" \
+    -v deferred_warn="$DEFERRED_WARN" -v deferred_crit="$DEFERRED_CRIT" \
+    -v bounce_warn="$BOUNCE_WARN" -v bounce_crit="$BOUNCE_CRIT" \
+    -v authfail_warn="$AUTHFAIL_WARN" -v authfail_crit="$AUTHFAIL_CRIT" \
+    -v tokenage_warn="$TOKEN_AGE_WARN" -v tokenage_crit="$TOKEN_AGE_CRIT" \
+    -v apiauthfail_warn="$API_AUTHFAIL_WARN" -v apiauthfail_crit="$API_AUTHFAIL_CRIT" \
+    -v notifyfail_warn="$NOTIFYFAIL_WARN" -v notifyfail_crit="$NOTIFYFAIL_CRIT" \
+'
+function trim(s) { gsub(/^[ \t\r]+|[ \t\r]+$/, "", s); return s }
+
+function levels(val, warn, crit,   s) {
+    s = warn ";" crit
+    return s
+}
+
+# Emits one Checkmk local-check line. dir=1 means higher is worse (the
+# common case); dir=-1 is unused here but kept for symmetry.
+function report(state, service, perf, text) {
+    gsub(/ /, "_", service)
+    printf "%d %s %s %s\n", state, service, (perf == "" ? "-" : perf), text
+}
+
+function worse(a, b) { return a > b ? a : b }
+
+function stateFor(val, warn, crit) {
+    if (val + 0 >= crit + 0) return 2
+    if (val + 0 >= warn + 0) return 1
+    return 0
+}
+
+BEGIN {
+    n = split(prev_raw, lines, "\n")
+    for (i = 1; i <= n; i++) {
+        if (lines[i] == "") continue
+        split(lines[i], kv, " ")
+        prev[kv[1]] = kv[2]
+    }
+}
+
+/^#/ { next }
+NF == 0 { next }
+{
+    line = $0
+    b1 = index(line, "{")
+    route = ""
+    if (b1 == 0) {
+        split(line, f, " ")
+        name = f[1]; val = f[2]
+    } else {
+        b2 = index(line, "}")
+        name = substr(line, 1, b1 - 1)
+        labelstr = substr(line, b1 + 1, b2 - b1 - 1)
+        rest = substr(line, b2 + 2)
+        split(rest, f, " ")
+        val = f[1]
+        m = split(labelstr, pairs, ",")
+        for (i = 1; i <= m; i++) {
+            eq = index(pairs[i], "=")
+            k = substr(pairs[i], 1, eq - 1)
+            v = substr(pairs[i], eq + 2, length(pairs[i]) - eq - 2)
+            if (k == "route") route = v
+            if (k == "state") lblstate = v
+        }
+    }
+
+    if (route != "" && !(route in seen)) { seen[route] = 1; routes[++nroutes] = route }
+
+    if (name == "smtprelayd_queue_size" && lblstate == "queued")   queued[route] = val
+    if (name == "smtprelayd_queue_size" && lblstate == "deferred") deferredq[route] = val
+    if (name == "smtprelayd_delivered_total")        delivered[route] = val
+    if (name == "smtprelayd_bounced_total")           bounced[route] = val
+    if (name == "smtprelayd_deferred_total")          deferredtot[route] = val
+    if (name == "smtprelayd_auth_failures_total")     authfail[route] = val
+    if (name == "smtprelayd_oauth_token_age_seconds") { tokenage[route] = val; hastoken[route] = 1 }
+    if (name == "smtprelayd_last_delivery_time")      lastdelivery[route] = val
+    if (name == "smtprelayd_delivery_rate_per_minute") rate[route] = val
+    if (name == "smtprelayd_api_auth_failures_total") apiauthfail = val
+    if (name == "smtprelayd_notification_failures_total") notifyfail = val
+
+    lblstate = ""
+}
+
+END {
+    for (r = 1; r <= nroutes; r++) {
+        route = routes[r]
+
+        q = queued[route] + 0
+        dq = deferredq[route] + 0
+        qstate = worse(stateFor(q, queue_warn, queue_crit), stateFor(dq, deferred_warn, deferred_crit))
+        perf = "queued=" q ";" levels(q, queue_warn, queue_crit) "|deferred=" dq ";" levels(dq, deferred_warn, deferred_crit)
+        report(qstate, "SMTP_Queue_" route, perf, q " queued, " dq " deferred")
+
+        d = delivered[route] + 0
+        b = bounced[route] + 0
+        dt = deferredtot[route] + 0
+        rt = rate[route] + 0
+        bprev = ("bounced:" route in prev) ? prev["bounced:" route] + 0 : b
+        bdelta = b - bprev
+        if (bdelta < 0) bdelta = b   # counter reset (service restart): treat total as the delta once
+        dstate = stateFor(bdelta, bounce_warn, bounce_crit)
+        perf = "delivered=" d "c|bounced=" b "c|deferred_total=" dt "c|rate_per_min=" rt
+        report(dstate, "SMTP_Delivery_" route, perf, bdelta " new bounce(s) since last check, " rt " msg/min, " d " delivered total")
+
+        af = authfail[route] + 0
+        afprev = ("authfail:" route in prev) ? prev["authfail:" route] + 0 : af
+        afdelta = af - afprev
+        if (afdelta < 0) afdelta = af
+        astate = stateFor(afdelta, authfail_warn, authfail_crit)
+        if (route in hastoken) {
+            age = tokenage[route] + 0
+            tstate = stateFor(age, tokenage_warn, tokenage_crit)
+            astate = worse(astate, tstate)
+            perf = "auth_failures=" af "c|token_age=" age "s;" levels(age, tokenage_warn, tokenage_crit)
+            text = afdelta " new auth failure(s) since last check, token age " age "s"
+        } else {
+            perf = "auth_failures=" af "c"
+            text = afdelta " new auth failure(s) since last check, no OAuth2 token cached (non-XOAUTH2 route or none issued yet)"
+        }
+        report(astate, "SMTP_Auth_" route, perf, text)
+
+        if (route in lastdelivery) {
+            age = now - lastdelivery[route]
+            report(0, "SMTP_Last_Delivery_" route, "age=" age "s", age " s since the last successful delivery")
+        }
+
+        printf "bounced:%s %d\n", route, b > statefile
+        printf "authfail:%s %d\n", route, af > statefile
+    }
+
+    aaf = apiauthfail + 0
+    aafprev = ("api_auth_failures" in prev) ? prev["api_auth_failures"] + 0 : aaf
+    aafdelta = aaf - aafprev
+    if (aafdelta < 0) aafdelta = aaf
+    report(stateFor(aafdelta, apiauthfail_warn, apiauthfail_crit), "SMTP_API_Auth_Failures", "api_auth_failures=" aaf "c", aafdelta " new rejected bearer token(s) since last check")
+    printf "api_auth_failures %d\n", aaf > statefile
+
+    nf = notifyfail + 0
+    nfprev = ("notification_failures" in prev) ? prev["notification_failures"] + 0 : nf
+    nfdelta = nf - nfprev
+    if (nfdelta < 0) nfdelta = nf
+    report(stateFor(nfdelta, notifyfail_warn, notifyfail_crit), "SMTP_Notification_Failures", "notification_failures=" nf "c", nfdelta " new bounce-digest delivery failure(s) since last check")
+    printf "notification_failures %d\n", nf > statefile
+}
+'

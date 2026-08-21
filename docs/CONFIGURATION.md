@@ -291,7 +291,7 @@ certificate (section 1) **and** a `[[web.token]]` with at least `read` scope
 drift apart. Prefer `/metrics` over the JSON API for monitoring: it needs no
 token when local and carries queue depth, bounce counters, auth failures and
 OAuth token age; use the API when the ticket text of one specific failure is
-needed.
+needed. See `docs/CHECKMK.md` for wiring this endpoint into Checkmk.
 
 ## 9. History and logging retention
 
@@ -321,6 +321,14 @@ UTC either way, so the API's timestamps are unaffected. Leaving it unset
 keeps the current behaviour: log lines in the process's own local time,
 dashboard timestamps in UTC as stored. `check` rejects an unrecognised zone
 name at startup rather than falling back to it silently.
+
+**If the service fails to start** because of a configuration error (a bad
+`service.timezone` value, for example), `run` writes it to
+`<data_dir>/smtprelayd-error.log` in addition to stderr/journalctl/the
+Windows Event Log — deliberately a separate file from `log.file`, since a
+configuration that just failed to validate cannot be trusted to correctly
+name its own error log. `smtprelayd -config <file> check` still gives the
+fastest turnaround for that same error, printed directly to stdout.
 
 ## 10. Global limits
 

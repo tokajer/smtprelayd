@@ -55,23 +55,45 @@ once the logger is constructed, `spool.Open`, `store.Open`, `listener.New`,
 error bare, so a real startup failure (bind conflict, missing TLS cert,
 corrupt history database) reached stderr only, never the log file an
 operator actually opens. Each now gets a `log.Error(...)` before the
-`return`. Deliberately left alone, and recorded in `MEMORY.md` section 10 as
-a structural rather than missed case: a failure in `config.Load` (log path
-unknown yet) or `checkEnvironment` (must run, and fail closed, before
-anything — including the log file — touches the data directory) still
-cannot reach the log file, for the same reason `service.timezone`
-validation happens inside `Validate()` rather than after. Verified with the
-Go 1.25.13 toolchain at `~/sdk/go1.25.13` (not on `PATH` in this
-environment; invoked by full path) rather than reasoned about: `gofmt -l .`
-clean after one alignment fix, `go vet ./...` and `GOOS=windows GOARCH=amd64
-go build ./...` both clean, `go test -race ./...` green across every
-package including the new test, and `scripts/check-banned-imports.sh` clean
-for all three targets — confirming `time/tzdata` did not pull anything
-banned into the graph. `govulncheck`/`gosec` not run locally, not installed
-in this environment; same recurring gap as most sessions here, left for CI.
+`return`.
+**Same session, immediate follow-up from the operator hitting exactly the
+remaining gap**: a typo'd `service.timezone` ("sEurope/Vienna") made `run`
+fail with nothing at all in the log — `check` reported it correctly on
+stdout, but that gap had just been recorded in `MEMORY.md` as "structural"
+without checking whether it really had to be. It did not, for this class of
+failure: `config.Load` (`internal/config/config.go`) now returns the
+decoded `*Config` alongside the error for every failure past a successful
+TOML decode (unknown keys, secret resolution, `Validate()`), not `nil` —
+`data_dir` is already known at that point even when a later field is what
+actually failed, and every existing caller already returns immediately on a
+non-nil error without touching the config, so this is additive, not a
+behaviour change for anyone else. New `main.logStartupFailure`
+(`cmd/smtprelayd/main.go`) uses that to write the failure into
+`<data_dir>/smtprelayd-error.log` — a fixed name, deliberately not
+`cfg.Log.File`, since the configuration that just failed validation is
+exactly the one value that cannot be trusted to name its own error log —
+but only after running `checkEnvironment` itself first, since a `config.Load`
+failure is precisely the case where the data directory has not been vetted
+safe to write into yet; it cannot assume an earlier call already did that.
+Two new tests in `cmd/smtprelayd/startup_test.go` cover the write and the
+nil-config no-op. What is genuinely still unreachable, and is structural:
+a config file that fails to parse at all, or fails its own trust check
+(`CheckConfigFile`) — `data_dir` is never known in either case, so those stay
+stderr/journald/Windows-Event-Log-only. `MEMORY.md` section 10 and
+`docs/CONFIGURATION.md` section 9 both updated to describe the narrower,
+now-accurate gap.
+Verified with the Go 1.25.13 toolchain at `~/sdk/go1.25.13` (not on `PATH` in
+this environment; invoked by full path) rather than reasoned about:
+`gofmt -l .` clean after one alignment fix, `go vet ./...` and
+`GOOS=windows GOARCH=amd64 go build ./...` both clean, `go test -race ./...`
+green across every package including both new tests, and
+`scripts/check-banned-imports.sh` clean for all three targets — confirming
+`time/tzdata` did not pull anything banned into the graph. `govulncheck`/
+`gosec` not run locally, not installed in this environment; same recurring
+gap as most sessions here, left for CI.
 `docs/CONFIGURATION.md` section 9 and `configs/smtprelayd.example.toml` both
 document `service.timezone`; `MEMORY.md` sections 7 and 10 updated for the
-timezone option and the startup-failure logging fix respectively.
+timezone option and both startup-failure logging fixes.
 **Previous session**: 2026-08-21 (twenty-sixth session) — Deployment support only,
 no phase work, no code changed. Walked an operator through configuring the
 `m365` route's `oauth2.client_secret` on a live Windows install, starting

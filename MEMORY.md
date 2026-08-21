@@ -347,13 +347,25 @@ The load-bearing principles:
   `store.Open`, `listener.New`, `web.New`, `delivery.New` and the listener's
   own `Serve` all now call `log.Error` in `cmd/smtprelayd/main.go`'s `serve()`
   before returning, so any of those failing writes its reason into
-  `smtprelayd.log` before the process exits. One gap remains and is
-  structural, not an oversight: a failure in `config.Load` or
-  `checkEnvironment` happens before the log path is even known (`Load`) or
-  before the data directory's ACL has been verified safe to write into
-  (`checkEnvironment` must run — and fail closed — before anything touches
-  that directory, including the log file). Those two stay stderr/journald/
-  Windows-Event-Log-only, exactly as before.
+  `smtprelayd.log` before the process exits.
+- **A `config.Load` failure is now also written to disk**, in
+  `<data_dir>/smtprelayd-error.log` — added 2026-08-21 same session, from a
+  concrete report: a typo'd `service.timezone` made `run` fail with nothing
+  in the log, even though `check` reported it correctly on stdout.
+  `config.Load` now returns the decoded `*Config` alongside the error once
+  the file itself has decoded (only a totally unparsable file or a failed
+  trust check still returns nil), which is enough to know `data_dir` even
+  when a later field is what actually failed validation.
+  `main.logStartupFailure` uses that to write the failure, but only after
+  running `checkEnvironment` itself first — `config.Load` failing is
+  precisely the case where the directory has not been vetted yet, so this
+  cannot assume an earlier call already did. Deliberately a fixed filename
+  rather than `cfg.Log.File`: the configuration that just failed to validate
+  is exactly the one value that cannot be trusted to name its own error log.
+  What remains unreachable, and is structural rather than an oversight: a
+  totally unparsable config file, or one that fails its own trust check
+  (`CheckConfigFile`) — `data_dir` is never known in either case. Those stay
+  stderr/journald/Windows-Event-Log-only.
 - Never store state next to the binary.
 - Configuration reload without restart: SIGHUP on Linux, a service control code
   or a dashboard action on Windows. Listener socket changes require a restart

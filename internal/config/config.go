@@ -346,6 +346,15 @@ func Defaults() *Config {
 
 // Load reads, resolves and validates a configuration file. It fails closed:
 // any error returned here must abort startup.
+//
+// Once the file itself has been decoded, an error return still carries the
+// decoded Config alongside it rather than nil. It must never be used to run
+// the service — that is what the error is for — but service.data_dir and
+// log.file have already been through the decoder even when a later field
+// (e.g. an unparsable service.timezone) is what actually failed validation,
+// which is enough for a caller to make a best-effort attempt at logging the
+// failure to disk. Every existing caller already returns immediately on a
+// non-nil error without touching the Config, so this is additive.
 func Load(path string) (*Config, error) {
 	if path == "" {
 		return nil, errors.New("config: no configuration file given")
@@ -364,22 +373,22 @@ func Load(path string) (*Config, error) {
 		for _, k := range un {
 			keys = append(keys, k.String())
 		}
-		return nil, fmt.Errorf("config: unknown key(s): %s", strings.Join(keys, ", "))
+		return c, fmt.Errorf("config: unknown key(s): %s", strings.Join(keys, ", "))
 	}
 	c.Path = path
 
 	for i := range c.Routes {
 		r := &c.Routes[i]
 		if err := r.OAuth2.ClientSecret.resolve("route " + r.Name + " oauth2.client_secret"); err != nil {
-			return nil, err
+			return c, err
 		}
 		if err := r.Credentials.Password.resolve("route " + r.Name + " credentials.password"); err != nil {
-			return nil, err
+			return c, err
 		}
 	}
 
 	if err := c.Validate(); err != nil {
-		return nil, err
+		return c, err
 	}
 	return c, nil
 }
