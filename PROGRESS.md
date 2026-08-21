@@ -1305,7 +1305,9 @@ run on upgrade and repair without anything having exercised it.
       installer and done there (`config.CheckDataDirACL`); listed again under
       phase 5 rather than only here
 - [ ] MIME nesting depth bound (no MIME parsing exists yet; the header limits
-      cover the current surface)
+      cover the current surface). **Deprioritised 2026-08-21**: "Mime-Nesting
+      auch [hinten anstellen]" — no current pressure since there is no MIME
+      parsing to bound yet; revisit if MIME parsing is ever added.
 
 ### Phase 2 — Microsoft 365 ✅ (untested against a live tenant)
 
@@ -1324,7 +1326,11 @@ run on upgrade and repair without anything having exercised it.
 - [x] Startup warning when the client secret expires within thirty days
 - [ ] `docs/MS365-AUTH.md` verified against a real tenant
 - [ ] Sovereign cloud authorities (`login.microsoftonline.us`, China) — needs a
-      schema decision, deliberately not configurable today
+      schema decision, deliberately not configurable today. **Deprioritised
+      2026-08-21**: "US/china stellen wir auch hinten an, das MS365
+      funktioniert!" — the standard commercial cloud authority is what is
+      actually deployed and working; revisit only if a sovereign-cloud tenant
+      is ever needed.
 
 ### Phase 3 — Client policy and rewriting ✅ (compiles clean, untested against a live tenant)
 
@@ -1463,7 +1469,11 @@ Unchanged, plus:
       `smtprelayd.toml` (or occupy a configured listener port) on
       `ATAXVM-STSC`, start the service, and confirm `services.msc`/
       `Get-Service` shows it stopped with an error — not silently "running" —
-      and that the reason is in `smtprelayd.log`/`smtprelayd-error.log`
+      and that the reason is in `smtprelayd.log`/`smtprelayd-error.log`.
+      **Deprioritised 2026-08-21**: "das windows startup verhalten passt auch"
+      — accepted on the reasoning/test-level evidence above, not on a
+      hardware run; still genuinely unverified on real hardware, revisit if
+      it becomes relevant again rather than treated as confirmed working.
 - [x] CI workflow that runs on every push/PR (`.github/workflows/ci.yml`):
       gofmt, vet, `go test -race`, the banned-import check and govulncheck,
       plus a cross-compile job for all three targets
@@ -1775,7 +1785,18 @@ tracked in the phase 5 checklist rather than here.
   required for notifications to be enabled once this is carried into the
   live configuration and `notify_route` is confirmed to name an actual
   configured route there.
-- Should downstream bounces be ingested from the relay mailbox via Graph?
+- ~~Should downstream bounces be ingested from the relay mailbox via Graph?~~
+  **Decided 2026-08-21**: keep as a possible future feature, not a current
+  priority — "als mögliches feature planen, aber nicht Hauptfokus." Effort was
+  scoped in conversation and judged comparable to a full phase (Phase 2 or
+  4e), not a session task: a new `Mail.Read` Graph consent beyond the
+  existing `SMTP.SendAsApp`, DSN detection and Message-ID correlation back to
+  a queue ID, a new attack surface (the relay would parse inbound mail
+  content for the first time, likely warranting its own security review),
+  a config schema change needing sign-off, and new store/dashboard support
+  for a distinct failure class. Revisit only if a concrete operational need
+  shows up (e.g. recurring reports of mail operators cannot see failed in
+  the dashboard).
 - ~~Should the API listener be exposed beyond localhost?~~ **Answered
   2026-08-11 by implication**: the API shares the dashboard's listener, which
   is now loopback-only, so the API is too until that login exists. The API
@@ -1788,9 +1809,11 @@ tracked in the phase 5 checklist rather than here.
   the `-wal` sidecar carries committed rows the `.db` alone does not, so a
   backup copying only the main file loses the most recent ones — acceptable
   for a metadata journal, and it would not be for the spool.
-- A Postfix `main.cf` importer (`smtprelayd import-postfix`) was raised as a
-  migration path. Scoped as a one-shot converter with an explicit report of
-  what could not be translated, never a runtime parser. Not yet planned into a
+- ~~A Postfix `main.cf` importer (`smtprelayd import-postfix`)~~ **Declined
+  2026-08-21**: "das postfix thema lassen wir sein." Not pursued; revisit
+  only if raised again. Originally scoped as a one-shot converter with an
+  explicit report of what could not be translated, never a runtime parser.
+  Was never planned into a
   phase.
 
 ## Decision log
