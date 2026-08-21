@@ -26,6 +26,9 @@
 	<dt>Last response</dt><dd>{{if .Message.LastCode}}{{.Message.LastCode}} {{.Message.LastErr}}{{else}}<span class="empty">(no attempt yet)</span>{{end}}</dd>
 </dl>
 
+{{if or (eq .Message.Status "delivered") (eq .Message.Status "removed")}}
+<p class="empty">This message has already {{if eq .Message.Status "delivered"}}been delivered{{else}}been removed from the queue{{end}}; there is nothing left in the spool to requeue or delete.</p>
+{{else}}
 <div class="actions">
 	<form method="post" action="/messages/{{.Message.QueueID}}/requeue">
 		<input type="hidden" name="csrf" value="{{.RequeueToken}}">
@@ -36,6 +39,7 @@
 		<button type="submit" class="danger">Delete from queue (history is kept)</button>
 	</form>
 </div>
+{{end}}
 
 <h2>Delivery attempts</h2>
 <div class="table-wrap">

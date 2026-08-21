@@ -71,6 +71,29 @@ real HTTP POST through the CSRF-protected form): before the fix, the message
 sat in `/queue` as "deferred" after being deleted; after, `/queue` no longer
 lists it, the message page shows status "removed", `/search?status=removed`
 finds it, and `/search?status=active` does not.
+**Same session, immediate follow-up on a rough edge noted while fixing the
+above, then requested directly ("ja bitte den fix einbauen")**: the message
+detail page's Requeue/Delete buttons rendered unconditionally regardless of
+`.Message.Status`, so a message already in a terminal state offered two
+actions guaranteed to fail. Not new — it applied to "delivered" and "bounced"
+before this session too — but the new "removed" status made a third
+guaranteed-404 case, prompting the fix rather than leaving it for later.
+Scoped precisely to the two statuses where the spool file is provably gone
+for good: `spool.Remove` (delivered) and `spool.Discard` (removed) both
+unconditionally delete the on-disk message, unlike a permanent/expired
+failure, which `m.fail` moves into `spool/failed` and leaves requeueable
+until `queue.failed_retention_hours` expires it — so "bounced" still shows
+the actions, deliberately unchanged. `internal/web/templates/message.html`
+now wraps the actions `<div>` in `{{if or (eq .Message.Status "delivered")
+(eq .Message.Status "removed")}}`, showing an explanatory `<p class="empty">`
+instead; `web.go`'s token generation was left as-is since generating an
+unused CSRF token is cheap and duplicating the status check in Go would only
+be one more place for the two conditions to drift apart. New
+`TestMessagePageHidesActionsForTerminalStatus` in `internal/web/web_test.go`
+covers both statuses. Verified the same way as the parent fix: full toolchain
+check clean, plus a second live-instance run (fresh temp config, real SMTP
+submission, real CSRF-protected delete POST) confirming the buttons are
+present before delete and gone after, replaced by the explanatory text.
 **Previous session**: 2026-08-21 (twenty-seventh session) — Two small features
 added on request, no phase work. First, "ich möchte statt utc auch eine
 andere Zeitzone verwenden können": asked the operator up front whether the

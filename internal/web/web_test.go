@@ -340,6 +340,40 @@ func TestMessagePageIncludesCSRFTokens(t *testing.T) {
 	}
 }
 
+// TestMessagePageHidesActionsForTerminalStatus guards against a click-through
+// to a guaranteed 404: once a message has been delivered or removed, both
+// spool.Remove and spool.Discard have already deleted its spool files for
+// good, so Requeue and Delete can never succeed again.
+func TestMessagePageHidesActionsForTerminalStatus(t *testing.T) {
+	cfg := testConfig(t, "")
+	srv, st, _ := testServer(t, cfg)
+	recipients, _ := json.Marshal([]string{"user@example.com"})
+	now := time.Now()
+
+	for _, tc := range []struct {
+		id, class string
+	}{
+		{"TERMDELIVERED222", "delivered"},
+		{"TERMREMOVED22222", "removed"},
+	} {
+		if err := st.RecordMessage(store.MessageRecord{QueueID: tc.id, Client: "printers", Route: "m365", EnvelopeFrom: "relay@example.com", Recipients: string(recipients), Subject: "s", Listener: "smtp", RemoteAddr: "10.10.5.5", ReceivedAt: now, ExpiresAt: now.Add(time.Hour)}); err != nil {
+			t.Fatal(err)
+		}
+		if err := st.RecordAttempt(tc.id, 1, 0, "", tc.class, nil); err != nil {
+			t.Fatal(err)
+		}
+
+		body := get(t, srv.Handler(), "/messages/"+tc.id).Body.String()
+		if strings.Contains(body, `action="/messages/`+tc.id+`/requeue"`) ||
+			strings.Contains(body, `action="/messages/`+tc.id+`/delete"`) {
+			t.Fatalf("status %q: requeue/delete forms still rendered:\n%s", tc.class, body)
+		}
+		if !strings.Contains(body, "nothing left in the spool") {
+			t.Fatalf("status %q: expected explanatory text, got:\n%s", tc.class, body)
+		}
+	}
+}
+
 func postForm(h http.Handler, target, csrf string) *httptest.ResponseRecorder {
 	r := httptest.NewRequest(http.MethodPost, target, strings.NewReader(url.Values{"csrf": {csrf}}.Encode()))
 	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
