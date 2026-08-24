@@ -110,6 +110,52 @@ Not yet verified: real mail actually arriving on schedule and a real
 permanent failure actually surfacing through the bounce digest — both
 require a live route and a live tenant, so this is compile/vet/test/security
 clean, not yet hardware/production confirmed.
+**Same session, immediate follow-up**: "kann ich auch mehrere canary
+hinterlegen um mehrere routes zu testen?" — the singleton design above did
+not support it; asked directly whether to restructure before touching
+anything already built and verified the same session ("Ja, umbauen"), since
+nothing had been committed yet and the schema was cheap to change while
+still true. `[canary]` (one table) became `[[canary]]` (zero or more,
+mirroring `[[route]]`/`[[client]]`'s own list-of-tables idiom exactly, which
+this codebase already uses everywhere else for "N independently configured
+things"), each entry gaining a required `Name`. The one design question this
+raised with no direct `[bounce]` precedent to copy: `Name` must be unique
+both among canaries and against every configured client name — `Envelope.
+Client` already doubles as the canary's own bounce-digest grouping key and
+now also its metrics label, and a collision with a real client's name would
+silently reroute that canary's failures to the client's own `[client.bounce]
+notify` override instead of the global list, which is confusing enough to
+reject at load time rather than document as a gotcha.
+`internal/metrics.Registry`'s two canary fields moved from a bare
+counter/timestamp to `map[string]uint64`/`map[string]time.Time` keyed by
+name, seeded with zero values for every configured canary the same way
+routes already are, and `smtprelayd_canary_failures_total`/
+`smtprelayd_canary_last_delivery_time` gained a `name` label in the
+exposition. `internal/delivery.Manager` now constructs one `canary.Runner`
+per `[[canary]]` entry itself (mirroring how it already constructs
+`bounce.Notifier`, not something `main.go` did directly before this), so
+`main.go` only loops over `dm.Canaries()` starting one goroutine each — a
+smaller, more consistent `main.go` than the version that shipped an hour
+earlier. Caught while wiring the metrics snapshot back up, before it was
+ever exercised under `-race`: the two new per-name maps were first read
+straight off the Registry inside `text()`'s lock-free section, aliasing the
+live map instead of copying it — exactly the bug `cloneCounts` already
+exists in this file to prevent for the route-keyed maps, just not yet
+applied to the two new ones. Fixed the same way, before any test ran, not
+found by one.
+Re-verified in full after the restructure, same toolchain and same checks as
+above: `gofmt -l .` clean, `go vet ./...` clean, `go build ./...` and
+`GOOS=windows GOARCH=amd64 go build ./...` and `GOOS=linux GOARCH=arm64 go
+build ./...` all clean, `go test ./...` and `go test -race ./...` green
+(new tests added: two canaries enqueue under distinct names and route to
+their own configured routes; per-name canary metrics stay independent;
+config rejects a missing name, a duplicate name, and a name colliding with
+a client), `scripts/check-banned-imports.sh` clean for all three targets,
+`govulncheck` v1.6.0 clean, `gosec` v2.28.0 `-severity=medium` clean (0
+issues, 55 files). `configs/smtprelayd.example.toml`, `docs/guides/
+CONFIGURATION.md` section 7 and `docs/guides/CHECKMK.md`'s metrics table all
+updated for the `[[canary]]`/`name=` shape; `MEMORY.md` section 8's canary
+subsection likewise.
 **Previous session**: 2026-08-21 (twenty-ninth session) — MSI installer UI
 investigation, no code change. Reported as "der windows installer zeigt jetzt
 nur mehr den admin promt und beim installieren ist kein progress zu sehen,

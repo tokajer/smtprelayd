@@ -20,10 +20,11 @@ import (
 // history is needed, and persisting counters would outlive the retry state
 // they describe.
 type Registry struct {
-	spool  *spool.Spool
-	tokens map[string]*authms365.TokenSource // route -> token source, xoauth2 routes only
-	routes []string                          // sorted, for deterministic exposition
-	start  time.Time
+	spool       *spool.Spool
+	tokens      map[string]*authms365.TokenSource // route -> token source, xoauth2 routes only
+	routes      []string                          // sorted, for deterministic exposition
+	canaryNames []string                          // sorted, for deterministic exposition
+	start       time.Time
 
 	mu                  sync.Mutex
 	delivered           map[string]uint64
@@ -33,33 +34,42 @@ type Registry struct {
 	lastDelivery        map[string]time.Time
 	apiAuthFailure      uint64
 	notificationFailure uint64
-	canaryFailure       uint64
-	lastCanaryDelivery  time.Time
+	canaryFailure       map[string]uint64
+	lastCanaryDelivery  map[string]time.Time
 }
 
 // New builds a registry seeded with zero counters for every configured
-// route, so a route that has never delivered still reports 0 instead of
-// being absent from the exposition until its first event.
-func New(sp *spool.Spool, routes []string, tokens map[string]*authms365.TokenSource) *Registry {
+// route and every configured canary, so one that has never delivered still
+// reports 0 instead of being absent from the exposition until its first
+// event.
+func New(sp *spool.Spool, routes, canaryNames []string, tokens map[string]*authms365.TokenSource) *Registry {
 	sorted := append([]string(nil), routes...)
 	sort.Strings(sorted)
+	sortedCanaries := append([]string(nil), canaryNames...)
+	sort.Strings(sortedCanaries)
 
 	r := &Registry{
-		spool:        sp,
-		tokens:       tokens,
-		routes:       sorted,
-		start:        time.Now(),
-		delivered:    map[string]uint64{},
-		bounced:      map[string]uint64{},
-		deferredCnt:  map[string]uint64{},
-		authFailures: map[string]uint64{},
-		lastDelivery: map[string]time.Time{},
+		spool:              sp,
+		tokens:             tokens,
+		routes:             sorted,
+		canaryNames:        sortedCanaries,
+		start:              time.Now(),
+		delivered:          map[string]uint64{},
+		bounced:            map[string]uint64{},
+		deferredCnt:        map[string]uint64{},
+		authFailures:       map[string]uint64{},
+		lastDelivery:       map[string]time.Time{},
+		canaryFailure:      map[string]uint64{},
+		lastCanaryDelivery: map[string]time.Time{},
 	}
 	for _, name := range sorted {
 		r.delivered[name] = 0
 		r.bounced[name] = 0
 		r.deferredCnt[name] = 0
 		r.authFailures[name] = 0
+	}
+	for _, name := range sortedCanaries {
+		r.canaryFailure[name] = 0
 	}
 	return r
 }
@@ -118,28 +128,30 @@ func (r *Registry) NotificationFailure() {
 	r.notificationFailure++
 }
 
-// CanaryDelivered records a canary probe message's own successful delivery,
-// and when it happened. This, not a counter, is the signal worth alerting
-// on: a monitoring system watching for the timestamp going stale catches a
-// route that has silently stopped delivering even though the canary keeps
-// being queued.
-func (r *Registry) CanaryDelivered() {
+// CanaryDelivered records one canary's own successful delivery, and when it
+// happened. This, not a counter, is the signal worth alerting on: a
+// monitoring system watching for the timestamp going stale catches a route
+// that has silently stopped delivering even though its canary keeps being
+// queued. name is the canary's own name (spool.Envelope.Client on the
+// message that was delivered), not the route it happened to test — the two
+// can differ if more than one canary shares a route.
+func (r *Registry) CanaryDelivered(name string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.lastCanaryDelivery = time.Now()
+	r.lastCanaryDelivery[name] = time.Now()
 }
 
-// CanaryFailure records a canary probe message's own delivery attempt
-// failing, whether permanently, by expiry, or deferred for retry. Kept out
-// of the triggering route's own delivered/bounced/deferred/auth-failure
-// counters for the same reason NotificationFailure is: a canary is
-// diagnostic traffic, not client traffic, and folding it into route metrics
-// would make them noisier without adding anything this dedicated counter
-// does not already say more precisely.
-func (r *Registry) CanaryFailure() {
+// CanaryFailure records one canary's own delivery attempt failing, whether
+// permanently, by expiry, or deferred for retry. Kept out of the triggering
+// route's own delivered/bounced/deferred/auth-failure counters for the same
+// reason NotificationFailure is: a canary is diagnostic traffic, not client
+// traffic, and folding it into route metrics would make them noisier
+// without adding anything this dedicated counter does not already say more
+// precisely.
+func (r *Registry) CanaryFailure(name string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.canaryFailure++
+	r.canaryFailure[name]++
 }
 
 // Uptime reports how long this registry — and with it, the process — has
@@ -216,8 +228,11 @@ func (r *Registry) text() string {
 	r.mu.Lock()
 	apiAuthFailure := r.apiAuthFailure
 	notificationFailure := r.notificationFailure
-	canaryFailure := r.canaryFailure
-	lastCanaryDelivery := r.lastCanaryDelivery
+	canaryFailure := cloneCounts(r.canaryFailure)
+	lastCanaryDelivery := make(map[string]time.Time, len(r.lastCanaryDelivery))
+	for k, v := range r.lastCanaryDelivery {
+		lastCanaryDelivery[k] = v
+	}
 	r.mu.Unlock()
 
 	var b strings.Builder
@@ -290,14 +305,18 @@ func (r *Registry) text() string {
 	b.WriteString("# TYPE smtprelayd_notification_failures_total counter\n")
 	fmt.Fprintf(&b, "smtprelayd_notification_failures_total %d\n", notificationFailure)
 
-	b.WriteString("# HELP smtprelayd_canary_failures_total Canary probe delivery attempts that failed, permanently, by expiry, or deferred for retry.\n")
+	b.WriteString("# HELP smtprelayd_canary_failures_total Canary probe delivery attempts that failed, permanently, by expiry, or deferred for retry, by canary name.\n")
 	b.WriteString("# TYPE smtprelayd_canary_failures_total counter\n")
-	fmt.Fprintf(&b, "smtprelayd_canary_failures_total %d\n", canaryFailure)
+	for _, name := range r.canaryNames {
+		fmt.Fprintf(&b, "smtprelayd_canary_failures_total{name=%s} %d\n", label(name), canaryFailure[name])
+	}
 
-	b.WriteString("# HELP smtprelayd_canary_last_delivery_time Unix timestamp of the last successful canary probe delivery. Absent until the first one, or if no canary is configured.\n")
+	b.WriteString("# HELP smtprelayd_canary_last_delivery_time Unix timestamp of the last successful delivery, by canary name. Absent until that canary's first successful delivery.\n")
 	b.WriteString("# TYPE smtprelayd_canary_last_delivery_time gauge\n")
-	if !lastCanaryDelivery.IsZero() {
-		fmt.Fprintf(&b, "smtprelayd_canary_last_delivery_time %d\n", lastCanaryDelivery.Unix())
+	for _, name := range r.canaryNames {
+		if ts, ok := lastCanaryDelivery[name]; ok && !ts.IsZero() {
+			fmt.Fprintf(&b, "smtprelayd_canary_last_delivery_time{name=%s} %d\n", label(name), ts.Unix())
+		}
 	}
 
 	return b.String()

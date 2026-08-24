@@ -119,13 +119,35 @@ max_per_hour = 12
 func TestCanaryRequiresSharedSettingsWhenEnabled(t *testing.T) {
 	bounce := "[bounce]\nnotify = [\"ops@example.at\"]\nsender = \"bounce@example.at\"\nnotify_route = \"m365\"\ndigest_minutes = 15\nmax_per_hour = 12\n"
 	for name, extra := range map[string]string{
-		"invalid recipient":     bounce + "[canary]\nrecipient = \"not-an-address\"\nsender = \"canary@example.at\"\nroute = \"m365\"\ninterval_minutes = 1440\n",
-		"no sender":             bounce + "[canary]\nrecipient = \"ops@example.at\"\nroute = \"m365\"\ninterval_minutes = 1440\n",
-		"invalid sender":        bounce + "[canary]\nrecipient = \"ops@example.at\"\nsender = \"not-an-address\"\nroute = \"m365\"\ninterval_minutes = 1440\n",
-		"no route":              bounce + "[canary]\nrecipient = \"ops@example.at\"\nsender = \"canary@example.at\"\ninterval_minutes = 1440\n",
-		"unknown route":         bounce + "[canary]\nrecipient = \"ops@example.at\"\nsender = \"canary@example.at\"\nroute = \"nope\"\ninterval_minutes = 1440\n",
-		"no interval":           bounce + "[canary]\nrecipient = \"ops@example.at\"\nsender = \"canary@example.at\"\nroute = \"m365\"\ninterval_minutes = 0\n",
-		"bounce not configured": "[canary]\nrecipient = \"ops@example.at\"\nsender = \"canary@example.at\"\nroute = \"m365\"\ninterval_minutes = 1440\n",
+		"no name":               bounce + "[[canary]]\nrecipient = \"ops@example.at\"\nsender = \"canary@example.at\"\nroute = \"m365\"\ninterval_minutes = 1440\n",
+		"invalid recipient":     bounce + "[[canary]]\nname = \"m365-daily\"\nrecipient = \"not-an-address\"\nsender = \"canary@example.at\"\nroute = \"m365\"\ninterval_minutes = 1440\n",
+		"no sender":             bounce + "[[canary]]\nname = \"m365-daily\"\nrecipient = \"ops@example.at\"\nroute = \"m365\"\ninterval_minutes = 1440\n",
+		"invalid sender":        bounce + "[[canary]]\nname = \"m365-daily\"\nrecipient = \"ops@example.at\"\nsender = \"not-an-address\"\nroute = \"m365\"\ninterval_minutes = 1440\n",
+		"no route":              bounce + "[[canary]]\nname = \"m365-daily\"\nrecipient = \"ops@example.at\"\nsender = \"canary@example.at\"\ninterval_minutes = 1440\n",
+		"unknown route":         bounce + "[[canary]]\nname = \"m365-daily\"\nrecipient = \"ops@example.at\"\nsender = \"canary@example.at\"\nroute = \"nope\"\ninterval_minutes = 1440\n",
+		"no interval":           bounce + "[[canary]]\nname = \"m365-daily\"\nrecipient = \"ops@example.at\"\nsender = \"canary@example.at\"\nroute = \"m365\"\ninterval_minutes = 0\n",
+		"bounce not configured": "[[canary]]\nname = \"m365-daily\"\nrecipient = \"ops@example.at\"\nsender = \"canary@example.at\"\nroute = \"m365\"\ninterval_minutes = 1440\n",
+		"duplicate name": bounce + `[[canary]]
+name = "m365-daily"
+recipient = "ops@example.at"
+sender = "canary@example.at"
+route = "m365"
+interval_minutes = 1440
+
+[[canary]]
+name = "m365-daily"
+recipient = "ops2@example.at"
+sender = "canary@example.at"
+route = "m365"
+interval_minutes = 60
+`,
+		"name collides with a client": bounce + `[[canary]]
+name = "printers"
+recipient = "ops@example.at"
+sender = "canary@example.at"
+route = "m365"
+interval_minutes = 1440
+`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			if _, err := Load(write(t, baseConfig+extra)); err == nil {
@@ -144,7 +166,8 @@ notify_route = "m365"
 digest_minutes = 15
 max_per_hour = 12
 
-[canary]
+[[canary]]
+name = "m365-daily"
 recipient = "ops@example.at"
 sender = "canary@example.at"
 route = "m365"
@@ -152,6 +175,43 @@ interval_minutes = 1440
 `
 	if _, err := Load(write(t, body)); err != nil {
 		t.Fatalf("fully configured canary section was rejected: %v", err)
+	}
+}
+
+func TestMultipleCanariesWithDistinctNamesAreAccepted(t *testing.T) {
+	body := baseConfig + `
+[[route]]
+name = "legacy"
+host = "legacy.example"
+auth = "none"
+
+[bounce]
+notify = ["ops@example.at"]
+sender = "bounce@example.at"
+notify_route = "m365"
+digest_minutes = 15
+max_per_hour = 12
+
+[[canary]]
+name = "m365-daily"
+recipient = "ops@example.at"
+sender = "canary@example.at"
+route = "m365"
+interval_minutes = 1440
+
+[[canary]]
+name = "legacy-daily"
+recipient = "ops@example.at"
+sender = "canary@example.at"
+route = "legacy"
+interval_minutes = 1440
+`
+	cfg, err := Load(write(t, body))
+	if err != nil {
+		t.Fatalf("two distinctly named canaries were rejected: %v", err)
+	}
+	if len(cfg.Canaries) != 2 {
+		t.Fatalf("got %d canaries, want 2", len(cfg.Canaries))
 	}
 }
 

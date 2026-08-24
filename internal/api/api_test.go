@@ -60,7 +60,7 @@ func testServer(t *testing.T) (*Server, *store.Store, *spool.Spool) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	reg := metrics.New(sp, []string{"m365", "legacy"}, nil)
+	reg := metrics.New(sp, []string{"m365", "legacy"}, nil, nil)
 	return New(cfg, st, sp, reg, "test", discardLog()), st, sp
 }
 

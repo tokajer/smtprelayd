@@ -221,34 +221,40 @@ this list for that client only.
 ### Canary
 
 ```toml
-[canary]
-recipient        = "ops@example.at"   # empty (the default) disables the canary
+[[canary]]
+name             = "m365-daily"       # unique; also the bounce-digest grouping key
+recipient        = "ops@example.at"
 sender           = "canary@example.at"
 route            = "m365"
 interval_minutes = 1440               # 1440 = daily
 ```
 A periodic synthetic message the relay composes and sends itself, so an
 operator (or a monitoring system) notices a working delivery path even
-without real traffic. Enabled precisely when `recipient` is set — the same
-idiom `[bounce].notify` uses, no separate on/off switch to fall out of sync
-with the fields it would gate.
+without real traffic. Zero or more `[[canary]]` blocks may be configured —
+one per route worth watching independently, each with its own name,
+recipient, sender and interval; no block at all disables the feature
+entirely. `name` must be unique, both among canaries and against every
+configured `[[client]]` name (section 2): it is the same grouping key the
+bounce digest already uses, so a collision would silently route a canary's
+failures to that client's own `[client.bounce] notify` override instead of
+the global list.
 
 A failed canary is reported through `[bounce]` above rather than a second
-alerting mechanism, so **`[bounce].notify` must be configured for `[canary]`
-to be accepted at all** — a canary with nowhere to report a failure to would
+alerting mechanism, so **`[bounce].notify` must be configured whenever any
+`[[canary]]` is** — a canary with nowhere to report a failure to would
 silently do nothing useful on the one path that matters. It does not,
-however, share `[bounce]`'s digest window or volume cap: a canary send is
+however, share `[bounce]`'s digest window or volume cap: each canary send is
 its own message, on its own schedule.
 
 Also exposed on `/metrics` (section 8) for automated monitoring rather than
-only a human noticing a missing email:
-- `smtprelayd_canary_last_delivery_time` — a gauge, the Unix timestamp of the
-  last successful canary delivery. Absent until the first one. The useful
-  alert is "this has not advanced in longer than `interval_minutes` plus a
-  margin", which catches a route silently failing even while the canary
-  keeps being queued.
-- `smtprelayd_canary_failures_total` — a counter, incremented on any failed
-  or deferred canary delivery attempt.
+only a human noticing a missing email, labeled by `name`:
+- `smtprelayd_canary_last_delivery_time{name="..."}` — a gauge, the Unix
+  timestamp of that canary's last successful delivery. Absent until its
+  first one. The useful alert is "this has not advanced in longer than
+  `interval_minutes` plus a margin", which catches a route silently failing
+  even while the canary keeps being queued.
+- `smtprelayd_canary_failures_total{name="..."}` — a counter, incremented on
+  any failed or deferred delivery attempt for that canary.
 
 Neither counts toward the sending route's own `smtprelayd_delivered_total`,
 `smtprelayd_bounced_total`, `smtprelayd_deferred_total` or

@@ -194,14 +194,16 @@ notify_route    = "m365"                   # route used to send notifications
 digest_minutes  = 15                       # batch failures into one message
 max_per_hour    = 12                       # cap, excess is recorded but not mailed
 
-# A periodic synthetic test message, so an operator notices a working
-# delivery path even without real traffic. Enabled by setting "recipient";
-# a permanent failure is reported through [bounce] above, so bounce.notify
-# must be configured too. Also visible in /metrics as
-# smtprelayd_canary_last_delivery_time (a gauge; alert if it goes stale) and
-# smtprelayd_canary_failures_total (a counter).
-[canary]
-recipient         = ""                     # empty disables the canary
+# Zero or more periodic synthetic test messages, so an operator notices a
+# working delivery path even without real traffic -- one [[canary]] per
+# route worth watching independently; remove the block below for none. A
+# permanent failure is reported through [bounce] above, so bounce.notify
+# must be configured whenever any canary is. Also visible in /metrics,
+# labeled by name: smtprelayd_canary_last_delivery_time (a gauge; alert if
+# it goes stale) and smtprelayd_canary_failures_total (a counter).
+[[canary]]
+name              = "m365-daily"           # must be unique, also the bounce-digest grouping key
+recipient         = "ops@example.at"
 sender            = "canary@example.at"
 route             = "m365"
 interval_minutes  = 1440                   # 1440 = daily

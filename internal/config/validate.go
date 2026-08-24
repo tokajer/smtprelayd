@@ -548,31 +548,50 @@ func (c *Config) Validate() error {
 		}
 	}
 
-	if c.Canary.Recipient != "" {
-		if !ValidAddress(c.Canary.Recipient) {
-			add("canary.recipient %q is not a valid email address", c.Canary.Recipient)
-		}
-		if c.Canary.Sender == "" {
-			add("canary.sender is required when canary.recipient is set")
-		} else if !ValidAddress(c.Canary.Sender) {
-			add("canary.sender %q is not a valid email address", c.Canary.Sender)
-		}
-		if c.Canary.Route == "" {
-			add("canary.route is required when canary.recipient is set")
-		} else if !routeNames[c.Canary.Route] {
-			add("canary.route %q references an unknown route", c.Canary.Route)
-		}
-		if c.Canary.IntervalMinutes <= 0 {
-			add("canary.interval_minutes must be positive when canary.recipient is set")
-		}
+	if len(c.Canaries) > 0 {
 		// The canary's whole purpose is to report a failure through the
 		// bounce digest (see internal/canary): without bounce.notify, that
 		// failure would have nowhere to go, and the feature would silently
 		// do nothing useful on the one path an operator actually cares
 		// about. Failing closed here is cheaper than a canary an operator
-		// believes is being watched but is not.
+		// believes is being watched but is not. Checked once, not per
+		// canary: it is one shared dependency, not a per-entry one.
 		if len(c.Bounce.Notify) == 0 {
-			add("canary.recipient is set but bounce.notify is empty; canary failures are reported through the bounce digest, so bounce.notify must be configured too")
+			add("[[canary]] is configured but bounce.notify is empty; canary failures are reported through the bounce digest, so bounce.notify must be configured too")
+		}
+	}
+	canaryNames := map[string]bool{}
+	for i, cn := range c.Canaries {
+		if cn.Name == "" {
+			add("canary[%d]: name is required", i)
+		} else if canaryNames[cn.Name] {
+			add("canary[%d]: name %q is used by more than one [[canary]]", i, cn.Name)
+		} else if clientNames[cn.Name] {
+			// Client is what the bounce digest groups by, for a canary the
+			// same as for a real client's messages (internal/bounce's
+			// recipientsFor). A canary sharing a client's name would have
+			// its failures silently routed to that client's own bounce
+			// override instead of the global list, which is confusing
+			// enough to reject outright rather than document as a gotcha.
+			add("canary[%d]: name %q is also a configured client name; canary names must not collide with client names", i, cn.Name)
+		} else {
+			canaryNames[cn.Name] = true
+		}
+		if !ValidAddress(cn.Recipient) {
+			add("canary[%d] %q: recipient %q is not a valid email address", i, cn.Name, cn.Recipient)
+		}
+		if cn.Sender == "" {
+			add("canary[%d] %q: sender is required", i, cn.Name)
+		} else if !ValidAddress(cn.Sender) {
+			add("canary[%d] %q: sender %q is not a valid email address", i, cn.Name, cn.Sender)
+		}
+		if cn.Route == "" {
+			add("canary[%d] %q: route is required", i, cn.Name)
+		} else if !routeNames[cn.Route] {
+			add("canary[%d] %q: route %q references an unknown route", i, cn.Name, cn.Route)
+		}
+		if cn.IntervalMinutes <= 0 {
+			add("canary[%d] %q: interval_minutes must be positive", i, cn.Name)
 		}
 	}
 

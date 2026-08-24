@@ -19,7 +19,7 @@ import (
 )
 
 func TestNewSeedsZeroCountersForConfiguredRoutes(t *testing.T) {
-	r := New(nil, []string{"m365", "legacy"}, nil)
+	r := New(nil, []string{"m365", "legacy"}, nil, nil)
 	text := r.text()
 	for _, want := range []string{
 		`smtprelayd_delivered_total{route="legacy"} 0`,
@@ -35,7 +35,7 @@ func TestNewSeedsZeroCountersForConfiguredRoutes(t *testing.T) {
 }
 
 func TestCountersIncrementPerRoute(t *testing.T) {
-	r := New(nil, []string{"m365"}, nil)
+	r := New(nil, []string{"m365"}, nil, nil)
 	r.Delivered("m365")
 	r.Delivered("m365")
 	r.Bounced("m365")
@@ -59,7 +59,7 @@ func TestCountersIncrementPerRoute(t *testing.T) {
 }
 
 func TestLastDeliveryTimeAbsentBeforeFirstDelivery(t *testing.T) {
-	r := New(nil, []string{"m365"}, nil)
+	r := New(nil, []string{"m365"}, nil, nil)
 	text := r.text()
 	if strings.Contains(text, `smtprelayd_last_delivery_time{route="m365"}`) {
 		t.Error("last_delivery_time present before any delivery")
@@ -77,7 +77,7 @@ func TestQueueSizeReflectsSpool(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	r := New(sp, []string{"m365"}, nil)
+	r := New(sp, []string{"m365"}, nil, nil)
 	text := r.text()
 	if !strings.Contains(text, `smtprelayd_queue_size{route="m365",state="queued"} 1`) {
 		t.Errorf("queue size not reflected:\n%s", text)
@@ -85,7 +85,7 @@ func TestQueueSizeReflectsSpool(t *testing.T) {
 }
 
 func TestStatusSnapshotMatchesCounters(t *testing.T) {
-	r := New(nil, []string{"m365", "legacy"}, nil)
+	r := New(nil, []string{"m365", "legacy"}, nil, nil)
 	r.Delivered("m365")
 	r.Bounced("m365")
 	r.Deferred("legacy")
@@ -107,7 +107,7 @@ func TestStatusSnapshotMatchesCounters(t *testing.T) {
 }
 
 func TestRouteLabelIsEscaped(t *testing.T) {
-	r := New(nil, []string{`evil"route`}, nil)
+	r := New(nil, []string{`evil"route`}, nil, nil)
 	text := r.text()
 	if !strings.Contains(text, `smtprelayd_delivered_total{route="evil\"route"} 0`) {
 		t.Errorf("route label not escaped:\n%s", text)
@@ -115,7 +115,7 @@ func TestRouteLabelIsEscaped(t *testing.T) {
 }
 
 func TestServeHTTPRejectsNonGet(t *testing.T) {
-	r := New(nil, nil, nil)
+	r := New(nil, nil, nil, nil)
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/metrics", nil)
 	r.ServeHTTP(rec, req)
@@ -124,42 +124,45 @@ func TestServeHTTPRejectsNonGet(t *testing.T) {
 	}
 }
 
-func TestCanaryFailureIsUnlabeledAndDoesNotTouchRouteMetrics(t *testing.T) {
-	r := New(nil, []string{"m365"}, nil)
-	r.CanaryFailure()
-	r.CanaryFailure()
+func TestCanaryFailureIsLabeledByNameAndDoesNotTouchRouteMetrics(t *testing.T) {
+	r := New(nil, []string{"m365"}, []string{"m365-daily"}, nil)
+	r.CanaryFailure("m365-daily")
+	r.CanaryFailure("m365-daily")
 
 	text := r.text()
-	if !strings.Contains(text, "smtprelayd_canary_failures_total 2") {
-		t.Errorf("expected an unlabeled counter at 2:\n%s", text)
+	if !strings.Contains(text, `smtprelayd_canary_failures_total{name="m365-daily"} 2`) {
+		t.Errorf("expected a counter labeled by name at 2:\n%s", text)
 	}
 	if !strings.Contains(text, `smtprelayd_bounced_total{route="m365"} 0`) {
 		t.Errorf("canary failures leaked into route-level bounced_total:\n%s", text)
 	}
 }
 
-func TestCanaryDeliveredSetsLastDeliveryTimeNotRouteDelivered(t *testing.T) {
-	// The metric is unlabeled, so its value line and its HELP/TYPE comment
-	// lines share the same prefix; only a line actually starting with the
-	// metric name (not "# HELP ...") counts as the value being present.
-	hasValueLine := func(text string) bool {
-		for _, line := range strings.Split(text, "\n") {
-			if strings.HasPrefix(line, "smtprelayd_canary_last_delivery_time ") {
-				return true
-			}
-		}
-		return false
-	}
+func TestCanaryFailureCountsAreIndependentPerName(t *testing.T) {
+	r := New(nil, nil, []string{"a", "b"}, nil)
+	r.CanaryFailure("a")
+	r.CanaryFailure("a")
+	r.CanaryFailure("b")
 
-	r := New(nil, []string{"m365"}, nil)
 	text := r.text()
-	if hasValueLine(text) {
+	if !strings.Contains(text, `smtprelayd_canary_failures_total{name="a"} 2`) {
+		t.Errorf("canary a: want 2:\n%s", text)
+	}
+	if !strings.Contains(text, `smtprelayd_canary_failures_total{name="b"} 1`) {
+		t.Errorf("canary b: want 1:\n%s", text)
+	}
+}
+
+func TestCanaryDeliveredSetsLastDeliveryTimeNotRouteDelivered(t *testing.T) {
+	r := New(nil, []string{"m365"}, []string{"m365-daily"}, nil)
+	text := r.text()
+	if strings.Contains(text, `smtprelayd_canary_last_delivery_time{name="m365-daily"}`) {
 		t.Error("canary_last_delivery_time present before any canary delivery")
 	}
 
-	r.CanaryDelivered()
+	r.CanaryDelivered("m365-daily")
 	text = r.text()
-	if !hasValueLine(text) {
+	if !strings.Contains(text, `smtprelayd_canary_last_delivery_time{name="m365-daily"}`) {
 		t.Errorf("canary_last_delivery_time missing after a canary delivery:\n%s", text)
 	}
 	if !strings.Contains(text, `smtprelayd_delivered_total{route="m365"} 0`) {
@@ -168,7 +171,7 @@ func TestCanaryDeliveredSetsLastDeliveryTimeNotRouteDelivered(t *testing.T) {
 }
 
 func TestAPIAuthFailureIsUnlabeled(t *testing.T) {
-	r := New(nil, []string{"m365"}, nil)
+	r := New(nil, []string{"m365"}, nil, nil)
 	r.APIAuthFailure()
 	r.APIAuthFailure()
 	text := r.text()
@@ -178,7 +181,7 @@ func TestAPIAuthFailureIsUnlabeled(t *testing.T) {
 }
 
 func TestUptimeAdvances(t *testing.T) {
-	r := New(nil, nil, nil)
+	r := New(nil, nil, nil, nil)
 	if r.Uptime() < 0 {
 		t.Fatalf("Uptime is negative: %v", r.Uptime())
 	}
@@ -196,7 +199,7 @@ func TestStatusIncludesOldestQueued(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	r := New(sp, []string{"m365"}, nil)
+	r := New(sp, []string{"m365"}, nil, nil)
 	status := r.Status()
 	if len(status) != 1 || !status[0].OldestQueued.Equal(old) {
 		t.Fatalf("got %+v, want OldestQueued %v", status, old)
@@ -204,7 +207,7 @@ func TestStatusIncludesOldestQueued(t *testing.T) {
 }
 
 func TestServeHTTPServesText(t *testing.T) {
-	r := New(nil, []string{"m365"}, nil)
+	r := New(nil, []string{"m365"}, nil, nil)
 	r.Delivered("m365")
 
 	rec := httptest.NewRecorder()

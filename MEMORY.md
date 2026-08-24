@@ -274,26 +274,30 @@ ticketing or reporting.
 
 See `docs/guides/API.md` for the endpoint contract.
 
-### Canary probe
+### Canary probes
 
-Optional (`[canary]`, disabled unless `recipient` is set): a synthetic test
-message the relay composes and enqueues itself, on a configurable interval,
-through a configured route — so a working delivery path is noticed even
-without real traffic, and a silently broken one (expired credential, changed
-smarthost policy) does not go unnoticed just because no client happened to
-send anything.
+Optional, zero or more `[[canary]]` entries: a synthetic test message the
+relay composes and enqueues itself, on a configurable interval, through a
+configured route — so a working delivery path is noticed even without real
+traffic, and a silently broken one (expired credential, changed smarthost
+policy) does not go unnoticed just because no client happened to send
+anything. One entry per route worth watching independently; each carries its
+own `name`, unique among canaries and against every configured client name.
 
 Deliberately reuses the bounce mechanism above for alerting rather than
 introducing a second one: a canary failure is recorded through the same
-`RecordFail` path a real client message's failure would be, so it reaches
-`[bounce].notify` through the existing digest — which is also why enabling
-`[canary]` requires `[bounce].notify` to be configured too, checked at load
-time. What a canary does *not* share with a bounce notification is loop
-prevention: a notification's own failure is deliberately never reported (that
-is exactly how a notification loop would start), but a canary's failure is
-the one thing this feature exists to report, so that exemption does not
-apply to it. Canary traffic is kept out of its route's own delivered/bounced/
-deferred/auth-failure metrics either way, with its own pair instead
+`RecordFail` path a real client message's failure would be, keyed by the
+canary's own `name` exactly as a real client's messages are keyed by client
+name — so it reaches `[bounce].notify` (or that name's own override, which
+is exactly why the name must not collide with a real client's) through the
+existing digest. This is also why configuring any `[[canary]]` at all
+requires `[bounce].notify` to be configured too, checked at load time. What
+a canary does *not* share with a bounce notification is loop prevention: a
+notification's own failure is deliberately never reported (that is exactly
+how a notification loop would start), but a canary's failure is the one
+thing this feature exists to report, so that exemption does not apply to it.
+Canary traffic is kept out of its route's own delivered/bounced/deferred/
+auth-failure metrics either way, with its own pair instead, labeled by name
 (`smtprelayd_canary_last_delivery_time`, `smtprelayd_canary_failures_total`)
 — see `docs/guides/CONFIGURATION.md` section 7 and `docs/guides/CHECKMK.md`.
 

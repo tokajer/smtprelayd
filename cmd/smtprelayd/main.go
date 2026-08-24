@@ -25,7 +25,6 @@ import (
 	_ "time/tzdata"
 
 	"github.com/tokajer/smtprelayd/internal/api"
-	"github.com/tokajer/smtprelayd/internal/canary"
 	"github.com/tokajer/smtprelayd/internal/config"
 	"github.com/tokajer/smtprelayd/internal/delivery"
 	"github.com/tokajer/smtprelayd/internal/listener"
@@ -270,7 +269,9 @@ func serve(ctx context.Context, configPath string, console bool, ready chan<- er
 		close(done)
 	}()
 	go dm.Notifier().Run(ctx)
-	go canary.New(cfg, sp, st, log).Run(ctx)
+	for _, c := range dm.Canaries() {
+		go c.Run(ctx)
+	}
 
 	if cfg.Metrics.Enabled {
 		go func() {

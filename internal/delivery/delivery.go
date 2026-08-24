@@ -15,6 +15,7 @@ import (
 
 	"github.com/tokajer/smtprelayd/internal/authms365"
 	"github.com/tokajer/smtprelayd/internal/bounce"
+	"github.com/tokajer/smtprelayd/internal/canary"
 	"github.com/tokajer/smtprelayd/internal/config"
 	"github.com/tokajer/smtprelayd/internal/delivery/smarthost"
 	"github.com/tokajer/smtprelayd/internal/metrics"
@@ -40,6 +41,7 @@ type Manager struct {
 	log      *slog.Logger
 	metrics  *metrics.Registry
 	notifier *bounce.Notifier
+	canaries []*canary.Runner
 
 	// routes holds the per-route concurrency budget, limits the per-route
 	// messages per minute, tokens the OAuth2 source for xoauth2 routes.
@@ -85,7 +87,12 @@ func New(cfg *config.Config, sp *spool.Spool, log *slog.Logger, st *store.Store)
 		authTokens[r.Name] = ts
 		m.warnSecretExpiry(r)
 	}
-	m.metrics = metrics.New(sp, routeNames, authTokens)
+	canaryNames := make([]string, 0, len(cfg.Canaries))
+	for _, c := range cfg.Canaries {
+		canaryNames = append(canaryNames, c.Name)
+		m.canaries = append(m.canaries, canary.New(cfg, c, sp, st, log))
+	}
+	m.metrics = metrics.New(sp, routeNames, canaryNames, authTokens)
 	m.notifier = bounce.New(cfg, sp, st, log)
 	return m, nil
 }
@@ -102,6 +109,13 @@ func (m *Manager) Metrics() *metrics.Registry {
 // returns immediately.
 func (m *Manager) Notifier() *bounce.Notifier {
 	return m.notifier
+}
+
+// Canaries returns one Runner per configured [[canary]] entry, for the
+// caller to run each as its own background goroutine. Empty if none are
+// configured.
+func (m *Manager) Canaries() []*canary.Runner {
+	return m.canaries
 }
 
 // warnSecretExpiry surfaces an expiring client secret at startup. Until the
@@ -276,7 +290,7 @@ func (m *Manager) attempt(ctx context.Context, meta *spool.Meta) {
 		case isNotification:
 			// A bounce digest's own delivery is not relay traffic.
 		case isCanary:
-			m.metrics.CanaryDelivered()
+			m.metrics.CanaryDelivered(meta.Envelope.Client)
 		default:
 			m.metrics.Delivered(meta.Envelope.Route)
 		}
@@ -291,7 +305,7 @@ func (m *Manager) attempt(ctx context.Context, meta *spool.Meta) {
 		case isNotification:
 			m.metrics.NotificationFailure()
 		case isCanary:
-			m.metrics.CanaryFailure()
+			m.metrics.CanaryFailure(meta.Envelope.Client)
 		default:
 			m.metrics.Bounced(meta.Envelope.Route)
 		}
@@ -305,7 +319,7 @@ func (m *Manager) attempt(ctx context.Context, meta *spool.Meta) {
 		case isNotification:
 			m.metrics.NotificationFailure()
 		case isCanary:
-			m.metrics.CanaryFailure()
+			m.metrics.CanaryFailure(meta.Envelope.Client)
 		default:
 			m.metrics.Bounced(meta.Envelope.Route)
 		}
@@ -326,7 +340,7 @@ func (m *Manager) attempt(ctx context.Context, meta *spool.Meta) {
 		case isNotification:
 			m.metrics.NotificationFailure()
 		case isCanary:
-			m.metrics.CanaryFailure()
+			m.metrics.CanaryFailure(meta.Envelope.Client)
 		default:
 			m.metrics.Deferred(meta.Envelope.Route)
 			if isAuthFailure(err) {

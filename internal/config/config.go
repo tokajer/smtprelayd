@@ -27,7 +27,7 @@ type Config struct {
 	Routes    []Route    `toml:"route"`
 	Queue     Queue      `toml:"queue"`
 	Bounce    Bounce     `toml:"bounce"`
-	Canary    Canary     `toml:"canary"`
+	Canaries  []Canary   `toml:"canary"`
 	Web       Web        `toml:"web"`
 	Metrics   Metrics    `toml:"metrics"`
 	History   History    `toml:"history"`
@@ -147,15 +147,19 @@ type Bounce struct {
 	MaxPerHour    int      `toml:"max_per_hour"`
 }
 
-// Canary configures a periodic synthetic test message, sent through Route to
-// Recipient, so an operator notices a working delivery path even without
-// real traffic. It is "enabled" precisely when Recipient is non-empty, the
-// same idiom Bounce uses for Notify: no separate boolean to fall out of sync
-// with the fields it would gate. A permanent failure is reported through the
-// existing bounce digest (see internal/canary), which is why enabling this
-// also requires bounce.notify to be configured — otherwise a failing canary
-// would have nowhere to report to.
+// Canary configures one periodic synthetic test message, sent through Route
+// to Recipient, so an operator notices a working delivery path even without
+// real traffic. Zero or more may be configured, one per route worth
+// watching independently; Name distinguishes them in the bounce digest
+// (which groups by it, same as a real client) and as a metrics label, and
+// must be unique both among canaries and against every configured client
+// name, so a canary's failures are never mistaken for, or routed to the
+// notify override of, an unrelated client. A permanent failure is reported
+// through the existing bounce digest (see internal/canary), which is why
+// configuring any canary at all also requires bounce.notify to be
+// configured — otherwise a failing canary would have nowhere to report to.
 type Canary struct {
+	Name            string `toml:"name"`
 	Sender          string `toml:"sender"`
 	Recipient       string `toml:"recipient"`
 	Route           string `toml:"route"`
@@ -348,7 +352,6 @@ func Defaults() *Config {
 			FailedRetentionHours: 168,
 		},
 		Bounce:  Bounce{DigestMinutes: 15, MaxPerHour: 12},
-		Canary:  Canary{IntervalMinutes: 1440},
 		Web:     Web{Address: "127.0.0.1:8025", Theme: Theme{Mode: "auto"}},
 		Metrics: Metrics{Address: "127.0.0.1:9025", Path: "/metrics"},
 		History: History{RetentionDays: 90, RetainSubjects: true},
