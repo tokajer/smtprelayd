@@ -33,6 +33,8 @@ type Registry struct {
 	lastDelivery        map[string]time.Time
 	apiAuthFailure      uint64
 	notificationFailure uint64
+	canaryFailure       uint64
+	lastCanaryDelivery  time.Time
 }
 
 // New builds a registry seeded with zero counters for every configured
@@ -116,6 +118,30 @@ func (r *Registry) NotificationFailure() {
 	r.notificationFailure++
 }
 
+// CanaryDelivered records a canary probe message's own successful delivery,
+// and when it happened. This, not a counter, is the signal worth alerting
+// on: a monitoring system watching for the timestamp going stale catches a
+// route that has silently stopped delivering even though the canary keeps
+// being queued.
+func (r *Registry) CanaryDelivered() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.lastCanaryDelivery = time.Now()
+}
+
+// CanaryFailure records a canary probe message's own delivery attempt
+// failing, whether permanently, by expiry, or deferred for retry. Kept out
+// of the triggering route's own delivered/bounced/deferred/auth-failure
+// counters for the same reason NotificationFailure is: a canary is
+// diagnostic traffic, not client traffic, and folding it into route metrics
+// would make them noisier without adding anything this dedicated counter
+// does not already say more precisely.
+func (r *Registry) CanaryFailure() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.canaryFailure++
+}
+
 // Uptime reports how long this registry — and with it, the process — has
 // been running. Used by the API's health endpoint so it does not need its
 // own separate start-time bookkeeping.
@@ -190,6 +216,8 @@ func (r *Registry) text() string {
 	r.mu.Lock()
 	apiAuthFailure := r.apiAuthFailure
 	notificationFailure := r.notificationFailure
+	canaryFailure := r.canaryFailure
+	lastCanaryDelivery := r.lastCanaryDelivery
 	r.mu.Unlock()
 
 	var b strings.Builder
@@ -261,6 +289,16 @@ func (r *Registry) text() string {
 	b.WriteString("# HELP smtprelayd_notification_failures_total Bounce-digest notification messages that themselves failed to deliver.\n")
 	b.WriteString("# TYPE smtprelayd_notification_failures_total counter\n")
 	fmt.Fprintf(&b, "smtprelayd_notification_failures_total %d\n", notificationFailure)
+
+	b.WriteString("# HELP smtprelayd_canary_failures_total Canary probe delivery attempts that failed, permanently, by expiry, or deferred for retry.\n")
+	b.WriteString("# TYPE smtprelayd_canary_failures_total counter\n")
+	fmt.Fprintf(&b, "smtprelayd_canary_failures_total %d\n", canaryFailure)
+
+	b.WriteString("# HELP smtprelayd_canary_last_delivery_time Unix timestamp of the last successful canary probe delivery. Absent until the first one, or if no canary is configured.\n")
+	b.WriteString("# TYPE smtprelayd_canary_last_delivery_time gauge\n")
+	if !lastCanaryDelivery.IsZero() {
+		fmt.Fprintf(&b, "smtprelayd_canary_last_delivery_time %d\n", lastCanaryDelivery.Unix())
+	}
 
 	return b.String()
 }

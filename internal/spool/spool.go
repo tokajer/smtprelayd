@@ -45,6 +45,16 @@ type Envelope struct {
 	// listener ever wrote, so decoding an older meta file defaults it to
 	// false.
 	Notification bool `json:"notification,omitempty"`
+
+	// Canary marks a message the canary runner composed itself: diagnostic
+	// traffic, not a client's. Kept separate from Notification because the
+	// two must diverge in the delivery manager -- a canary's outcome still
+	// belongs in the bounce digest (RecordFail gates on Notification alone,
+	// so leaving this true would silently opt a failing canary out of the
+	// alerting it exists to feed), but like Notification it must stay out of
+	// its route's own delivered/bounced/deferred counters, which describe
+	// client traffic and would otherwise be muddied by a probe.
+	Canary bool `json:"canary,omitempty"`
 }
 
 // Meta is the persisted state of a queued message.

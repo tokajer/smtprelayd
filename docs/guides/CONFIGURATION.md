@@ -200,7 +200,9 @@ counts against `limits.spool_max_gb` for as long as they sit there — only the
 spool copy is deleted when it expires, the history row and every attempt
 survive under `history.retention_days`.
 
-## 7. Bounce notifications
+## 7. Bounce notifications and the canary probe
+
+### Bounce notifications
 
 ```toml
 [bounce]
@@ -215,6 +217,44 @@ after `max_lifetime_hours`) — a bounce Microsoft 365 generates after it
 already accepted the message lands in the rewritten sender's own mailbox and
 is invisible here. A client's `[client.bounce] notify` (section 2) overrides
 this list for that client only.
+
+### Canary
+
+```toml
+[canary]
+recipient        = "ops@example.at"   # empty (the default) disables the canary
+sender           = "canary@example.at"
+route            = "m365"
+interval_minutes = 1440               # 1440 = daily
+```
+A periodic synthetic message the relay composes and sends itself, so an
+operator (or a monitoring system) notices a working delivery path even
+without real traffic. Enabled precisely when `recipient` is set — the same
+idiom `[bounce].notify` uses, no separate on/off switch to fall out of sync
+with the fields it would gate.
+
+A failed canary is reported through `[bounce]` above rather than a second
+alerting mechanism, so **`[bounce].notify` must be configured for `[canary]`
+to be accepted at all** — a canary with nowhere to report a failure to would
+silently do nothing useful on the one path that matters. It does not,
+however, share `[bounce]`'s digest window or volume cap: a canary send is
+its own message, on its own schedule.
+
+Also exposed on `/metrics` (section 8) for automated monitoring rather than
+only a human noticing a missing email:
+- `smtprelayd_canary_last_delivery_time` — a gauge, the Unix timestamp of the
+  last successful canary delivery. Absent until the first one. The useful
+  alert is "this has not advanced in longer than `interval_minutes` plus a
+  margin", which catches a route silently failing even while the canary
+  keeps being queued.
+- `smtprelayd_canary_failures_total` — a counter, incremented on any failed
+  or deferred canary delivery attempt.
+
+Neither counts toward the sending route's own `smtprelayd_delivered_total`,
+`smtprelayd_bounced_total`, `smtprelayd_deferred_total` or
+`smtprelayd_auth_failures_total` — a canary is diagnostic traffic, not
+client traffic, and mixing the two would make the route's own health metrics
+noisier without adding anything these two do not already say more precisely.
 
 ## 8. Dashboard, API tokens, and the metrics endpoint
 

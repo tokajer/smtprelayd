@@ -27,6 +27,7 @@ type Config struct {
 	Routes    []Route    `toml:"route"`
 	Queue     Queue      `toml:"queue"`
 	Bounce    Bounce     `toml:"bounce"`
+	Canary    Canary     `toml:"canary"`
 	Web       Web        `toml:"web"`
 	Metrics   Metrics    `toml:"metrics"`
 	History   History    `toml:"history"`
@@ -144,6 +145,21 @@ type Bounce struct {
 	NotifyRoute   string   `toml:"notify_route"`
 	DigestMinutes int      `toml:"digest_minutes"`
 	MaxPerHour    int      `toml:"max_per_hour"`
+}
+
+// Canary configures a periodic synthetic test message, sent through Route to
+// Recipient, so an operator notices a working delivery path even without
+// real traffic. It is "enabled" precisely when Recipient is non-empty, the
+// same idiom Bounce uses for Notify: no separate boolean to fall out of sync
+// with the fields it would gate. A permanent failure is reported through the
+// existing bounce digest (see internal/canary), which is why enabling this
+// also requires bounce.notify to be configured — otherwise a failing canary
+// would have nowhere to report to.
+type Canary struct {
+	Sender          string `toml:"sender"`
+	Recipient       string `toml:"recipient"`
+	Route           string `toml:"route"`
+	IntervalMinutes int    `toml:"interval_minutes"`
 }
 
 type Web struct {
@@ -332,6 +348,7 @@ func Defaults() *Config {
 			FailedRetentionHours: 168,
 		},
 		Bounce:  Bounce{DigestMinutes: 15, MaxPerHour: 12},
+		Canary:  Canary{IntervalMinutes: 1440},
 		Web:     Web{Address: "127.0.0.1:8025", Theme: Theme{Mode: "auto"}},
 		Metrics: Metrics{Address: "127.0.0.1:9025", Path: "/metrics"},
 		History: History{RetentionDays: 90, RetainSubjects: true},

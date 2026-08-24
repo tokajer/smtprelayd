@@ -116,6 +116,45 @@ max_per_hour = 12
 	}
 }
 
+func TestCanaryRequiresSharedSettingsWhenEnabled(t *testing.T) {
+	bounce := "[bounce]\nnotify = [\"ops@example.at\"]\nsender = \"bounce@example.at\"\nnotify_route = \"m365\"\ndigest_minutes = 15\nmax_per_hour = 12\n"
+	for name, extra := range map[string]string{
+		"invalid recipient":     bounce + "[canary]\nrecipient = \"not-an-address\"\nsender = \"canary@example.at\"\nroute = \"m365\"\ninterval_minutes = 1440\n",
+		"no sender":             bounce + "[canary]\nrecipient = \"ops@example.at\"\nroute = \"m365\"\ninterval_minutes = 1440\n",
+		"invalid sender":        bounce + "[canary]\nrecipient = \"ops@example.at\"\nsender = \"not-an-address\"\nroute = \"m365\"\ninterval_minutes = 1440\n",
+		"no route":              bounce + "[canary]\nrecipient = \"ops@example.at\"\nsender = \"canary@example.at\"\ninterval_minutes = 1440\n",
+		"unknown route":         bounce + "[canary]\nrecipient = \"ops@example.at\"\nsender = \"canary@example.at\"\nroute = \"nope\"\ninterval_minutes = 1440\n",
+		"no interval":           bounce + "[canary]\nrecipient = \"ops@example.at\"\nsender = \"canary@example.at\"\nroute = \"m365\"\ninterval_minutes = 0\n",
+		"bounce not configured": "[canary]\nrecipient = \"ops@example.at\"\nsender = \"canary@example.at\"\nroute = \"m365\"\ninterval_minutes = 1440\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := Load(write(t, baseConfig+extra)); err == nil {
+				t.Fatalf("%s: incomplete canary config was accepted", name)
+			}
+		})
+	}
+}
+
+func TestCanaryFullyConfiguredIsAccepted(t *testing.T) {
+	body := baseConfig + `
+[bounce]
+notify = ["ops@example.at"]
+sender = "bounce@example.at"
+notify_route = "m365"
+digest_minutes = 15
+max_per_hour = 12
+
+[canary]
+recipient = "ops@example.at"
+sender = "canary@example.at"
+route = "m365"
+interval_minutes = 1440
+`
+	if _, err := Load(write(t, body)); err != nil {
+		t.Fatalf("fully configured canary section was rejected: %v", err)
+	}
+}
+
 func TestClientBounceOverrideOnlyAllowsNotify(t *testing.T) {
 	body := strings.Replace(baseConfig, "route = \"m365\"\n", "route = \"m365\"\n\n[client.bounce]\nnotify = [\"printer-ops@example.at\"]\n", 1) + `
 [bounce]

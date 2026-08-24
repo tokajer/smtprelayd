@@ -22,6 +22,8 @@ text exposition format:
 | `smtprelayd_delivery_rate_per_minute` | gauge | `route` | `delivered_total` / process uptime, not a rolling window (see `internal/metrics/metrics.go`) |
 | `smtprelayd_api_auth_failures_total` | counter | — | Rejected bearer tokens on `/api/v1/*` and `/metrics` itself |
 | `smtprelayd_notification_failures_total` | counter | — | Bounce-digest notification messages that themselves failed to send |
+| `smtprelayd_canary_last_delivery_time` | gauge | — | Unix timestamp of the last successful canary probe delivery; absent until the first one, or if `[canary]` is not configured. Alert on this going stale, not on the counter below — a route can stop delivering silently while the canary keeps being queued |
+| `smtprelayd_canary_failures_total` | counter | — | Canary probe delivery attempts that failed, permanently, by expiry, or deferred for retry |
 
 Every route configured at startup is seeded with zero counters, so a route
 that has never delivered still appears rather than being silently absent.

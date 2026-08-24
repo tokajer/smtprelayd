@@ -86,6 +86,30 @@ func TestFailRecordsRealClientFailureButNotANotificationsOwn(t *testing.T) {
 	}
 }
 
+// TestFailRecordsACanarysOwnFailureUnlikeANotifications is the companion
+// regression test to the one above: a canary message must still reach
+// RecordFail on failure, unlike a bounce notification, since reporting a
+// failed canary through the bounce digest is the entire point of it. Only
+// route-level metrics attribution treats Canary like Notification; the
+// RecordFail gate in fail() checks Notification alone, deliberately.
+func TestFailRecordsACanarysOwnFailureUnlikeANotifications(t *testing.T) {
+	m, sp := testManager(t)
+
+	env := spool.Envelope{From: "canary@example.at", To: []string{"ops@example.at"}, Route: "m365", Client: "smtprelayd-canary", Received: time.Now(), Canary: true}
+	if _, err := sp.Enqueue(env, strings.NewReader("x"), 0, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	meta, ok := sp.Claim(time.Now())
+	if !ok {
+		t.Fatal("claim failed")
+	}
+	m.fail(meta, "smarthost rejected the canary")
+
+	if got := m.Notifier().Pending(); got != 1 {
+		t.Fatalf("pending = %d after a canary's own failure, want 1 (reported like a real failure)", got)
+	}
+}
+
 // fakeTokenSource stands in for authms365.TokenSource so VerifyTokens can be
 // tested without reaching the real login.microsoftonline.com: authms365.New
 // hardcodes that authority and has no seam for a test server.

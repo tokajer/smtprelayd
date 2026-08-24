@@ -259,15 +259,25 @@ func (m *Manager) attempt(ctx context.Context, meta *spool.Meta) {
 	// itself, not client traffic: its outcome is kept out of the relay's own
 	// delivered/bounced/deferred counters (which would otherwise mix the
 	// two) and out of RecordFail (which is how a notification loop would
-	// start) further down in fail().
+	// start) further down in fail(). A canary message is the same kind of
+	// diagnostic traffic and is kept out of the route counters the same way,
+	// but deliberately not out of RecordFail: unlike a notification, a
+	// canary's whole purpose is to be reported through the bounce digest if
+	// it fails, so RecordFail's gate in fail() checks Notification alone.
 	isNotification := meta.Envelope.Notification
+	isCanary := meta.Envelope.Canary
 
 	meta.Attempts++
 	switch {
 	case err == nil:
 		log.Info("delivered", "attempts", meta.Attempts, "duration_ms", elapsed.Milliseconds(),
 			"recipients", len(meta.Envelope.To))
-		if !isNotification {
+		switch {
+		case isNotification:
+			// A bounce digest's own delivery is not relay traffic.
+		case isCanary:
+			m.metrics.CanaryDelivered()
+		default:
 			m.metrics.Delivered(meta.Envelope.Route)
 		}
 		_ = m.store.RecordAttempt(meta.ID.String(), meta.Attempts, 0, "", "delivered", nil)
@@ -277,9 +287,12 @@ func (m *Manager) attempt(ctx context.Context, meta *spool.Meta) {
 
 	case isPermanent(err):
 		log.Warn("permanent delivery failure", "attempts", meta.Attempts, "error", err.Error())
-		if isNotification {
+		switch {
+		case isNotification:
 			m.metrics.NotificationFailure()
-		} else {
+		case isCanary:
+			m.metrics.CanaryFailure()
+		default:
 			m.metrics.Bounced(meta.Envelope.Route)
 		}
 		code, resp := extractSMTPError(err)
@@ -288,9 +301,12 @@ func (m *Manager) attempt(ctx context.Context, meta *spool.Meta) {
 
 	case time.Now().After(meta.Expires):
 		log.Warn("message expired in queue", "attempts", meta.Attempts, "error", err.Error())
-		if isNotification {
+		switch {
+		case isNotification:
 			m.metrics.NotificationFailure()
-		} else {
+		case isCanary:
+			m.metrics.CanaryFailure()
+		default:
 			m.metrics.Bounced(meta.Envelope.Route)
 		}
 		code, resp := extractSMTPError(err)
@@ -306,9 +322,12 @@ func (m *Manager) attempt(ctx context.Context, meta *spool.Meta) {
 		}
 		log.Info("delivery deferred", "attempts", meta.Attempts,
 			"retry_in_s", int(delay.Seconds()), "error", err.Error())
-		if isNotification {
+		switch {
+		case isNotification:
 			m.metrics.NotificationFailure()
-		} else {
+		case isCanary:
+			m.metrics.CanaryFailure()
+		default:
 			m.metrics.Deferred(meta.Envelope.Route)
 			if isAuthFailure(err) {
 				m.metrics.AuthFailure(meta.Envelope.Route)

@@ -19,7 +19,98 @@ fix below): the MSI installs without error, exactly one service registration
 remains (no duplicate), the on-disk binary is replaced, and the service keeps
 running afterwards. Uninstall remains unverified. Log rotation and Windows ACL
 verification at startup are complete.
-**Last session**: 2026-08-21 (twenty-ninth session) — MSI installer UI
+**Last session**: 2026-08-24 (thirtieth session) — New feature, real phase-5
+adjacent work (not a numbered phase item, added on direct request). Started
+as "ein auto test wäre noch gut, dass täglich ein testmail geschickt wird."
+Researched before designing: `smtprelayd selftest` is an active local
+open-relay check only, never sends real mail anywhere, so it was the wrong
+starting point; `internal/bounce`'s digest notifier turned out to be the
+right template both for scheduling (a `time.Ticker` goroutine started from
+`serve()`, stopped on context cancellation — an established internal pattern,
+not something needing OS-level cron/Task Scheduler) and for composing and
+enqueueing a message directly into the spool, bypassing the listener
+entirely (`Notifier.send`, `internal/bounce/notifier.go`). Three scope
+questions asked and answered before writing code, since this is both a new
+feature (`CLAUDE.md`: "no speculative features") and a config schema change
+(same file: "needs confirmation first"): actively warn on failure rather
+than a canary-only "you'll notice it's missing" design; scheduling built
+into the daemon rather than a new CLI subcommand plus external timers; the
+success recipient configurable separately from `[bounce].notify`.
+
+New `internal/canary` package (`Runner.Run`/`Runner.send`, closely mirroring
+`bounce.Notifier`'s shape) composes and enqueues one message every
+`[canary].interval_minutes` through `[canary].route` to `[canary].recipient`.
+The one deliberate divergence from the bounce-notifier template, and the
+reason a straight copy would not have worked: `spool.Envelope.Notification`
+bundles two behaviours together in `internal/delivery` — it keeps a
+message's outcome out of its route's own metrics, *and* it stops
+`fail()` from calling `bounce.Notifier.RecordFail` (loop prevention for the
+notifier's own mail). A canary needs the first but explicitly not the
+second: a failing canary's entire purpose is to be reported through the
+existing bounce digest, not to loop-guard against reporting itself. New
+`spool.Envelope.Canary bool`, a second, independent flag, lets
+`internal/delivery/delivery.go`'s `attempt()` route a canary's
+delivered/permanent-failure/expired/deferred outcome to new dedicated
+metrics while leaving `fail()`'s `RecordFail` gate checking `Notification`
+alone — so a canary rides the existing alerting path unchanged, exactly as
+asked, and required no changes to `internal/bounce` at all.
+
+**Same session, "vergiss das nicht in den metrics"**: read `internal/metrics`
+before designing this: `NotificationFailure()` was already the precedent for
+"diagnostic traffic must not muddy a route's own delivered/bounced/deferred/
+auth-failure counters," so `CanaryDelivered()` (records only a timestamp —
+the useful signal is staleness, not a count) and `CanaryFailure()` (a plain
+counter, covering permanent, expired and deferred alike, again mirroring how
+`NotificationFailure` does not distinguish the three) were added the same
+way and wired into `attempt()`'s three-way switch. Exposed on `/metrics` as
+`smtprelayd_canary_last_delivery_time` (gauge, absent until the first
+success) and `smtprelayd_canary_failures_total` (counter), both unlabeled
+like the existing api/notification failure counters, since there is only
+ever one canary. `docs/guides/CHECKMK.md`'s metrics table and
+`docs/guides/CONFIGURATION.md` section 7 (renamed "Bounce notifications and
+the canary probe," bounce and canary now `###` subsections rather than
+inserting a new numbered `##` section and renumbering everything after it)
+both updated. Not done, flagged as a natural follow-up rather than
+in-scope for what was asked: extending the bundled Checkmk local-check
+scripts (`contrib/checkmk/smtprelayd_metrics` / `.ps1`) to alert on the two
+new metrics — the metrics themselves were the ask, the bundled check script
+is a separate, non-trivial AWK/PowerShell change on top.
+
+Config: new `[canary]` (`sender`, `recipient`, `route`, `interval_minutes`),
+"enabled" precisely when `recipient` is non-empty — the same no-separate-
+boolean idiom `[bounce].notify` already uses. Validation
+(`internal/config/validate.go`) mirrors `[bounce]`'s required-together-when-
+enabled block closely, plus one cross-section rule with no `[bounce]`
+precedent to copy: `canary.recipient` set with `bounce.notify` empty is
+rejected at load time, fail-closed, since a canary with nowhere to report a
+failure to would silently not do the one thing it exists for.
+`configs/smtprelayd.example.toml` documents it, disabled by default
+(`recipient = ""`).
+
+**Verified for real this session, not just reasoned about** — a working Go
+toolchain was found already installed in this environment
+(`~/sdk/go1.25.13`, from an earlier session's install, not on `PATH`), the
+first session able to run the full `CLAUDE.md` definition of done against
+Go code rather than deferring it to CI: `gofmt -l .` clean, `go vet ./...`
+clean, `go build ./...` and `GOOS=windows GOARCH=amd64 go build ./...` both
+clean, `go test ./...` and `go test -race ./...` green across every
+package including the new `internal/canary` tests and the new
+`internal/delivery`/`internal/metrics`/`internal/config` cases,
+`scripts/check-banned-imports.sh` clean for all three targets, `govulncheck`
+v1.6.0 (no vulnerabilities) and `gosec` v2.28.0 `-severity=medium` (0 issues
+across 55 files) both run successfully for the first time in this
+environment rather than left as the recurring "not installed here" gap. One
+self-caught test bug on the way, not a production one: the first version of
+`TestCanaryDeliveredSetsLastDeliveryTimeNotRouteDelivered` checked for the
+bare metric name as a substring, which also matches the `# HELP`/`# TYPE`
+comment lines for an unlabeled metric — fixed to check for an actual value
+line before it was ever reported passing.
+
+Not yet verified: real mail actually arriving on schedule and a real
+permanent failure actually surfacing through the bounce digest — both
+require a live route and a live tenant, so this is compile/vet/test/security
+clean, not yet hardware/production confirmed.
+**Previous session**: 2026-08-21 (twenty-ninth session) — MSI installer UI
 investigation, no code change. Reported as "der windows installer zeigt jetzt
 nur mehr den admin promt und beim installieren ist kein progress zu sehen,
 auch beim deinstallieren nichts zu sehen und keine Abfrage," this time on a

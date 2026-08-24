@@ -548,6 +548,34 @@ func (c *Config) Validate() error {
 		}
 	}
 
+	if c.Canary.Recipient != "" {
+		if !ValidAddress(c.Canary.Recipient) {
+			add("canary.recipient %q is not a valid email address", c.Canary.Recipient)
+		}
+		if c.Canary.Sender == "" {
+			add("canary.sender is required when canary.recipient is set")
+		} else if !ValidAddress(c.Canary.Sender) {
+			add("canary.sender %q is not a valid email address", c.Canary.Sender)
+		}
+		if c.Canary.Route == "" {
+			add("canary.route is required when canary.recipient is set")
+		} else if !routeNames[c.Canary.Route] {
+			add("canary.route %q references an unknown route", c.Canary.Route)
+		}
+		if c.Canary.IntervalMinutes <= 0 {
+			add("canary.interval_minutes must be positive when canary.recipient is set")
+		}
+		// The canary's whole purpose is to report a failure through the
+		// bounce digest (see internal/canary): without bounce.notify, that
+		// failure would have nowhere to go, and the feature would silently
+		// do nothing useful on the one path an operator actually cares
+		// about. Failing closed here is cheaper than a canary an operator
+		// believes is being watched but is not.
+		if len(c.Bounce.Notify) == 0 {
+			add("canary.recipient is set but bounce.notify is empty; canary failures are reported through the bounce digest, so bounce.notify must be configured too")
+		}
+	}
+
 	if c.Limits.MaxHops <= 0 || c.Limits.MaxConnections <= 0 {
 		add("limits.max_hops and limits.max_connections must be positive")
 	}

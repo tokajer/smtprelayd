@@ -124,6 +124,49 @@ func TestServeHTTPRejectsNonGet(t *testing.T) {
 	}
 }
 
+func TestCanaryFailureIsUnlabeledAndDoesNotTouchRouteMetrics(t *testing.T) {
+	r := New(nil, []string{"m365"}, nil)
+	r.CanaryFailure()
+	r.CanaryFailure()
+
+	text := r.text()
+	if !strings.Contains(text, "smtprelayd_canary_failures_total 2") {
+		t.Errorf("expected an unlabeled counter at 2:\n%s", text)
+	}
+	if !strings.Contains(text, `smtprelayd_bounced_total{route="m365"} 0`) {
+		t.Errorf("canary failures leaked into route-level bounced_total:\n%s", text)
+	}
+}
+
+func TestCanaryDeliveredSetsLastDeliveryTimeNotRouteDelivered(t *testing.T) {
+	// The metric is unlabeled, so its value line and its HELP/TYPE comment
+	// lines share the same prefix; only a line actually starting with the
+	// metric name (not "# HELP ...") counts as the value being present.
+	hasValueLine := func(text string) bool {
+		for _, line := range strings.Split(text, "\n") {
+			if strings.HasPrefix(line, "smtprelayd_canary_last_delivery_time ") {
+				return true
+			}
+		}
+		return false
+	}
+
+	r := New(nil, []string{"m365"}, nil)
+	text := r.text()
+	if hasValueLine(text) {
+		t.Error("canary_last_delivery_time present before any canary delivery")
+	}
+
+	r.CanaryDelivered()
+	text = r.text()
+	if !hasValueLine(text) {
+		t.Errorf("canary_last_delivery_time missing after a canary delivery:\n%s", text)
+	}
+	if !strings.Contains(text, `smtprelayd_delivered_total{route="m365"} 0`) {
+		t.Errorf("canary delivery leaked into route-level delivered_total:\n%s", text)
+	}
+}
+
 func TestAPIAuthFailureIsUnlabeled(t *testing.T) {
 	r := New(nil, []string{"m365"}, nil)
 	r.APIAuthFailure()
