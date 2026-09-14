@@ -307,6 +307,35 @@ func TestDiscardRemovesFailedMessage(t *testing.T) {
 	}
 }
 
+// Has is what lets the dashboard's queue view, which is built from the
+// history store, tell a message it can still act on from one whose spool
+// copy is already gone.
+func TestHasCoversQueuedFailedAndDiscarded(t *testing.T) {
+	s, _ := Open(t.TempDir())
+	id, err := s.Enqueue(Envelope{From: "a@example.at"}, strings.NewReader("x"), 0, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !s.Has(id) {
+		t.Fatal("a queued message reported as absent")
+	}
+
+	failed := enqueueAndFail(t, s, "y")
+	if !s.Has(failed) {
+		t.Fatal("a permanently failed message reported as absent; it can still be requeued")
+	}
+
+	if err := s.Discard(id); err != nil {
+		t.Fatal(err)
+	}
+	if s.Has(id) {
+		t.Fatal("a discarded message still reported as present")
+	}
+	if s.Has(ID("../../etc/passwd")) {
+		t.Fatal("an invalid queue id reported as present")
+	}
+}
+
 func TestDiscardUnknownIDReturnsNotFound(t *testing.T) {
 	dir := t.TempDir()
 	s, _ := Open(dir)

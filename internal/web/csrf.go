@@ -51,6 +51,13 @@ func (s *csrfSigner) mac(action, queueID string, exp int64) []byte {
 // verify checks a token against the action and queue ID it was issued for.
 // A token issued for one action or one message never validates for another,
 // so a form for message A cannot be replayed against message B.
+//
+// The queue page's bulk form passes an empty queue ID, because the set of
+// messages is chosen in the browser after the page was rendered and cannot
+// be bound at issue time. Its actions ("queue-requeue", "queue-delete") are
+// distinct names, so a bulk token still cannot drive a single-message
+// endpoint or the other bulk action, and the property this exists for is
+// unchanged: an origin that never read the page cannot produce the MAC.
 func (s *csrfSigner) verify(token, action, queueID string, now time.Time) bool {
 	dot := strings.IndexByte(token, '.')
 	if dot < 0 {

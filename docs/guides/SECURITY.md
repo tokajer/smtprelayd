@@ -200,9 +200,10 @@ attacker-influenced values and writes them into a message.
 ## 7. Dashboard and API
 
 - **The dashboard must bind to loopback.** It has no authentication of its
-  own: the CSRF token on its requeue and delete forms is fetched from the page
-  itself, so it stops another site from driving those actions but is not a
-  credential. Bearer tokens cannot close this either — the process holds only
+  own: the CSRF token on its requeue and delete forms -- including the queue
+  page's bulk form, which carries one token per action and can delete the
+  whole queue after a confirmation step -- is fetched from the page itself, so
+  it stops another site from driving those actions but is not a credential. Bearer tokens cannot close this either — the process holds only
   their SHA-256 digests, so the dashboard cannot present one for itself.
   Loopback therefore *is* the authentication, and the loader refuses a
   non-loopback `[web].address` outright rather than serving it with a

@@ -33,6 +33,17 @@ var styleCSS []byte
 //go:embed static/htmx.min.js
 var htmxJS []byte
 
+// queueJS is the dashboard's only first-party script. It exists because the
+// queue's bulk form needs two things no amount of server-rendered HTML can
+// provide: a select-all box, and a way to stop the ten-second htmx refresh
+// from swapping the table out from under a selection the operator is still
+// making -- the same objection that keeps /search's results table out of the
+// polling set. It is plain DOM code, event-delegated so it survives a swap,
+// and uses neither eval nor inline script, so script-src 'self' still holds.
+//
+//go:embed static/queue.js
+var queueJS []byte
+
 //go:embed templates/*.html
 var templateFS embed.FS
 
@@ -40,6 +51,13 @@ var templateFS embed.FS
 // the plan's default page size for the eventual JSON API in phase 4d, so
 // the two do not disagree about what "a page" means.
 const pageSize = 50
+
+// bulkMax bounds one bulk action. store.FindMessages caps its own result at
+// 1000 rows, so "everything in the queue" processes at most that many per
+// submission and says that more remain; the same ceiling is applied to an
+// explicit selection so that a hand-built request cannot ask for unbounded
+// work on the request goroutine.
+const bulkMax = 1000
 
 // Server renders the read-only observability dashboard: live queue,
 // search, bounces, per-message detail, route status and a read-only
@@ -202,8 +220,24 @@ func (s *Server) handleHTMXScript(w http.ResponseWriter, _ *http.Request) {
 	_, _ = w.Write(htmxJS)
 }
 
+func (s *Server) handleQueueScript(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "text/javascript; charset=utf-8")
+	_, _ = w.Write(queueJS)
+}
+
+// queueRow is one line of the queue table: a history row plus whether the
+// spool still holds the message. The two can disagree -- a message whose
+// spool copy is gone while history still calls it queued or deferred stays
+// listed here -- and the view has to say so rather than offer the operator a
+// requeue that can only ever fail.
+type queueRow struct {
+	*store.Message
+	Stale bool
+}
+
 // handleQueue shows messages still in the spool: queued or deferred,
-// sortable by the columns the plan calls for.
+// sortable by the columns the plan calls for, and carries the bulk
+// requeue/delete form.
 func (s *Server) handleQueue(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	sortCol := q.Get("sort")
@@ -222,19 +256,44 @@ func (s *Server) handleQueue(w http.ResponseWriter, r *http.Request) {
 	if hasMore {
 		msgs = msgs[:pageSize]
 	}
+	rows := make([]queueRow, 0, len(msgs))
+	for _, m := range msgs {
+		row := queueRow{Message: m}
+		if id, err := spool.ParseID(m.QueueID); err == nil {
+			row.Stale = !s.spool.Has(id)
+		}
+		rows = append(rows, row)
+	}
 
+	now := time.Now()
 	data := struct {
 		baseData
-		Messages  []*store.Message
+		Rows      []queueRow
 		SortLinks map[string]string
 		HasMore   bool
 		NextHref  string
 		PrevHref  string
+		// One token per action, both rendered into the same form: the
+		// checkbox set has to be shared, and a <button formaction> picks the
+		// endpoint, so the form cannot carry a single field named "csrf"
+		// without one action's token authorising the other.
+		RequeueToken string
+		DeleteToken  string
+		Flash        *flash
+		// ConfirmDeleteAll renders the interstitial for "delete the whole
+		// queue", which is reached as a link rather than a button so that
+		// the irreversible action needs a second, deliberate click and stays
+		// refresh-safe without any script.
+		ConfirmDeleteAll bool
 	}{
-		baseData:  s.base("queue", r),
-		Messages:  msgs,
-		SortLinks: sortLinks("/queue", nil, sortCol, order),
-		HasMore:   hasMore,
+		baseData:         s.base("queue", r),
+		Rows:             rows,
+		SortLinks:        sortLinks("/queue", nil, sortCol, order),
+		HasMore:          hasMore,
+		RequeueToken:     s.csrf.token("queue-requeue", "", now),
+		DeleteToken:      s.csrf.token("queue-delete", "", now),
+		Flash:            bulkFlash(q),
+		ConfirmDeleteAll: q.Get("confirm") == "delete-all",
 	}
 	if hasMore {
 		data.NextHref = pageHref("/queue", nil, sortCol, order, offset+pageSize)
@@ -415,6 +474,99 @@ func (s *Server) handleMessage(w http.ResponseWriter, r *http.Request) {
 	s.render(w, "message", data)
 }
 
+// actionOutcome is what a requeue or delete did to one message, so that the
+// single-message handlers can map it onto a status code while the bulk
+// handlers count it. Keeping one description of the outcome is what stops
+// the two entry points from drifting apart on, say, a message whose spool
+// copy is already gone.
+type actionOutcome int
+
+const (
+	outcomeDone    actionOutcome = iota // the spool copy was requeued or discarded
+	outcomeCleared                      // delete only: no spool copy left, history reconciled
+	outcomeBusy                         // leased by a delivery worker
+	outcomeMissing                      // nothing to act on, in the spool or in history
+	outcomeError                        // logged; the operator gets a 500 or a failure count
+)
+
+func (s *Server) audit(r *http.Request, action string, id spool.ID, details string) {
+	if err := s.store.RecordAudit("dashboard", r.RemoteAddr, action, id.String(), details); err != nil {
+		s.log.Warn("audit log write failed", "action", action, "queue_id", id.String(), "error", err)
+	}
+}
+
+// requeueMessage moves one message back into the live queue for immediate
+// retry. A message whose spool copy is gone cannot be requeued -- there is
+// no body to send -- so unlike deleteMessage this has nothing to reconcile
+// and reports it as missing.
+func (s *Server) requeueMessage(r *http.Request, id spool.ID, details string) actionOutcome {
+	switch err := s.spool.Requeue(id); {
+	case err == nil:
+		s.audit(r, "requeue", id, details)
+		return outcomeDone
+	case errors.Is(err, spool.ErrNotFound):
+		return outcomeMissing
+	case errors.Is(err, spool.ErrBusy):
+		return outcomeBusy
+	default:
+		s.log.Error("requeue failed", "queue_id", id.String(), "error", err)
+		return outcomeError
+	}
+}
+
+// deleteMessage removes one message from the spool, wherever it currently
+// sits, while retaining its history row.
+//
+// The ErrNotFound branch is the one that matters: a message can be listed by
+// the queue view with no spool copy behind it (a startup recovery dropped a
+// half-written pair, an operator deleted the files by hand, a crash landed
+// between the unlink and the attempt row). Refusing with 404 there left the
+// row in the view permanently, with no action able to clear it, so the
+// history is reconciled instead -- which is exactly what the operator asked
+// for, "get this out of my queue".
+//
+// This cannot mislabel a message that was in fact delivered: the delivery
+// worker records the "delivered" attempt before it unlinks the body, and a
+// leased message answers ErrBusy here rather than reaching this branch, so
+// the only way in is a message with no lease, no files and a history row
+// that still calls it active. ReconcileRemoved re-checks that last part
+// itself and writes nothing otherwise.
+func (s *Server) deleteMessage(r *http.Request, id spool.ID, details string) actionOutcome {
+	switch err := s.spool.Discard(id); {
+	case err == nil:
+		if rerr := s.store.RecordRemoval(id.String()); rerr != nil {
+			s.log.Warn("removal record write failed", "queue_id", id.String(), "error", rerr)
+		}
+		s.audit(r, "delete", id, details)
+		return outcomeDone
+	case errors.Is(err, spool.ErrNotFound):
+		cleared, rerr := s.store.ReconcileRemoved(id.String())
+		if rerr != nil {
+			s.log.Error("reconciling a message with no spool copy failed", "queue_id", id.String(), "error", rerr)
+			return outcomeError
+		}
+		if !cleared {
+			return outcomeMissing
+		}
+		s.log.Info("queue entry cleared for a message with no spool copy",
+			"queue_id", id.String(), "source", r.RemoteAddr)
+		s.audit(r, "delete", id, joinDetails(details, "no spool copy: history reconciled"))
+		return outcomeCleared
+	case errors.Is(err, spool.ErrBusy):
+		return outcomeBusy
+	default:
+		s.log.Error("delete failed", "queue_id", id.String(), "error", err)
+		return outcomeError
+	}
+}
+
+func joinDetails(a, b string) string {
+	if a == "" {
+		return b
+	}
+	return a + "; " + b
+}
+
 // handleRequeueAction moves a message back into the live queue for
 // immediate retry. Protected by a CSRF token rather than a bearer token,
 // per the phase 4c/4d decision: the dashboard has no session or login to
@@ -430,19 +582,15 @@ func (s *Server) handleRequeueAction(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid or expired form token", http.StatusForbidden)
 		return
 	}
-	switch err := s.spool.Requeue(id); {
-	case err == nil:
-		if aerr := s.store.RecordAudit("dashboard", r.RemoteAddr, "requeue", id.String(), ""); aerr != nil {
-			s.log.Warn("audit log write failed", "action", "requeue", "queue_id", id.String(), "error", aerr)
-		}
+	switch s.requeueMessage(r, id, "") {
+	case outcomeDone:
 		//#nosec G710 -- the destination is a fixed path plus a spool.ID that ParseID already validated; nothing from the request reaches it
 		http.Redirect(w, r, "/messages/"+id.String(), http.StatusSeeOther)
-	case errors.Is(err, spool.ErrNotFound):
+	case outcomeMissing:
 		http.Error(w, "message not found", http.StatusNotFound)
-	case errors.Is(err, spool.ErrBusy):
+	case outcomeBusy:
 		http.Error(w, "message is currently being delivered, try again shortly", http.StatusConflict)
 	default:
-		s.log.Error("requeue failed", "queue_id", id.String(), "error", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 	}
 }
@@ -459,23 +607,229 @@ func (s *Server) handleDeleteAction(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid or expired form token", http.StatusForbidden)
 		return
 	}
-	switch err := s.spool.Discard(id); {
-	case err == nil:
-		if rerr := s.store.RecordRemoval(id.String()); rerr != nil {
-			s.log.Warn("removal record write failed", "queue_id", id.String(), "error", rerr)
-		}
-		if aerr := s.store.RecordAudit("dashboard", r.RemoteAddr, "delete", id.String(), ""); aerr != nil {
-			s.log.Warn("audit log write failed", "action", "delete", "queue_id", id.String(), "error", aerr)
-		}
+	switch s.deleteMessage(r, id, "") {
+	case outcomeDone, outcomeCleared:
 		http.Redirect(w, r, "/queue", http.StatusSeeOther)
-	case errors.Is(err, spool.ErrNotFound):
+	case outcomeMissing:
 		http.Error(w, "message not found", http.StatusNotFound)
-	case errors.Is(err, spool.ErrBusy):
+	case outcomeBusy:
 		http.Error(w, "message is currently being delivered, try again shortly", http.StatusConflict)
 	default:
-		s.log.Error("delete failed", "queue_id", id.String(), "error", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 	}
+}
+
+// bulkCounts is the outcome of one bulk action, counted per message.
+type bulkCounts struct {
+	OK      int
+	Cleared int
+	Busy    int
+	Missing int
+	Failed  int
+	// Truncated says the queue held more than bulkMax active messages, so
+	// the action covered a prefix of it and has to be repeated.
+	Truncated bool
+}
+
+// flash is the one-line outcome banner the queue page renders after a bulk
+// action. It is rebuilt from the redirect's query string rather than kept in
+// server-side state, so a reload cannot repeat the action and there is no
+// session to hold.
+type flash struct {
+	Level string // "ok" or "warn"
+	Text  string
+}
+
+func (s *Server) handleQueueRequeue(w http.ResponseWriter, r *http.Request) {
+	s.handleQueueBulk(w, r, "requeue")
+}
+
+func (s *Server) handleQueueDelete(w http.ResponseWriter, r *http.Request) {
+	s.handleQueueBulk(w, r, "delete")
+}
+
+// handleQueueBulk applies one action to a set of messages: either the rows
+// the operator ticked, or every message the queue view currently lists.
+//
+// "All" is resolved from the history store rather than from the spool index
+// because the queue view is what the operator is looking at when they ask
+// for it, and the two can differ -- a message with no spool copy is listed
+// there and is precisely the kind of entry that needs clearing.
+func (s *Server) handleQueueBulk(w http.ResponseWriter, r *http.Request, action string) {
+	// PostFormValue, not FormValue: the token and the selection must come
+	// from the submitted body, so a bare GET-shaped link carrying the same
+	// parameters cannot drive a bulk action.
+	if !s.csrf.verify(r.PostFormValue("csrf_"+action), "queue-"+action, "", time.Now()) {
+		http.Error(w, "invalid or expired form token", http.StatusForbidden)
+		return
+	}
+
+	var (
+		ids   []spool.ID
+		res   bulkCounts
+		scope = r.PostFormValue("scope")
+	)
+	switch scope {
+	case "selected":
+		selected := r.PostForm["id"]
+		if len(selected) > bulkMax {
+			http.Error(w, "too many messages selected", http.StatusBadRequest)
+			return
+		}
+		ids = make([]spool.ID, 0, len(selected))
+		for _, v := range selected {
+			id, err := spool.ParseID(v)
+			if err != nil {
+				http.Error(w, "invalid queue id", http.StatusBadRequest)
+				return
+			}
+			ids = append(ids, id)
+		}
+	case "all":
+		// Emptying the whole queue is irreversible, so the form that can do
+		// it is only rendered behind the confirmation interstitial. This is
+		// belt and braces for a request built by hand.
+		if action == "delete" && r.PostFormValue("confirm") != "delete-all" {
+			http.Error(w, "deleting the whole queue must be confirmed", http.StatusBadRequest)
+			return
+		}
+		var err error
+		ids, res.Truncated, err = s.activeQueueIDs()
+		if err != nil {
+			s.serverError(w, "queue", err)
+			return
+		}
+	default:
+		http.Error(w, "scope must be selected or all", http.StatusBadRequest)
+		return
+	}
+
+	details := "bulk (" + scope + ")"
+	for _, id := range ids {
+		var outcome actionOutcome
+		if action == "requeue" {
+			outcome = s.requeueMessage(r, id, details)
+		} else {
+			outcome = s.deleteMessage(r, id, details)
+		}
+		switch outcome {
+		case outcomeDone:
+			res.OK++
+		case outcomeCleared:
+			res.Cleared++
+		case outcomeBusy:
+			res.Busy++
+		case outcomeMissing:
+			res.Missing++
+		default:
+			res.Failed++
+		}
+	}
+	s.log.Info("bulk queue action", "action", action, "scope", scope, "source", r.RemoteAddr,
+		"ok", res.OK, "cleared", res.Cleared, "busy", res.Busy, "missing", res.Missing, "failed", res.Failed)
+
+	http.Redirect(w, r, "/queue?"+res.query(action).Encode(), http.StatusSeeOther)
+}
+
+// activeQueueIDs lists the queue IDs the queue view currently shows, capped
+// at bulkMax with a flag saying the cap was hit.
+func (s *Server) activeQueueIDs() ([]spool.ID, bool, error) {
+	msgs, err := s.store.FindMessages(store.MessageFilter{Status: "active", Limit: bulkMax})
+	if err != nil {
+		return nil, false, err
+	}
+	truncated := len(msgs) > bulkMax
+	if truncated {
+		msgs = msgs[:bulkMax]
+	}
+	ids := make([]spool.ID, 0, len(msgs))
+	for _, m := range msgs {
+		id, err := spool.ParseID(m.QueueID)
+		if err != nil {
+			// Nothing the listener writes can produce this; a row that
+			// cannot name a spool file is skipped rather than failing the
+			// whole action for the rows that can.
+			s.log.Warn("queue row skipped: queue id does not parse", "error", err)
+			continue
+		}
+		ids = append(ids, id)
+	}
+	return ids, truncated, nil
+}
+
+// query encodes the counts for the redirect back to /queue. Every value is
+// an integer this process just counted and every key is a literal, so the
+// banner is rebuilt from numbers, never from text that came in with the
+// request.
+func (c bulkCounts) query(action string) url.Values {
+	v := url.Values{}
+	v.Set("done", action)
+	for key, n := range map[string]int{
+		"ok": c.OK, "cleared": c.Cleared, "busy": c.Busy, "missing": c.Missing, "failed": c.Failed,
+	} {
+		if n > 0 {
+			v.Set(key, strconv.Itoa(n))
+		}
+	}
+	if c.Truncated {
+		v.Set("more", "1")
+	}
+	return v
+}
+
+// bulkFlash rebuilds the outcome banner from the redirect's query string. An
+// unknown action yields no banner at all, so a crafted link cannot put an
+// arbitrary sentence on the page; the numbers are parsed, not echoed.
+func bulkFlash(q url.Values) *flash {
+	action := q.Get("done")
+	var verb string
+	switch action {
+	case "requeue":
+		verb = "requeued"
+	case "delete":
+		verb = "deleted"
+	default:
+		return nil
+	}
+
+	c := bulkCounts{
+		OK:        parseOffset(q.Get("ok")),
+		Cleared:   parseOffset(q.Get("cleared")),
+		Busy:      parseOffset(q.Get("busy")),
+		Missing:   parseOffset(q.Get("missing")),
+		Failed:    parseOffset(q.Get("failed")),
+		Truncated: q.Get("more") == "1",
+	}
+
+	var parts []string
+	if c.OK > 0 {
+		parts = append(parts, fmt.Sprintf("%d %s", c.OK, verb))
+	}
+	if c.Cleared > 0 {
+		parts = append(parts, fmt.Sprintf("%d had no spool copy left and were cleared from the queue view", c.Cleared))
+	}
+	if c.Busy > 0 {
+		parts = append(parts, fmt.Sprintf("%d skipped, currently being delivered", c.Busy))
+	}
+	if c.Missing > 0 {
+		parts = append(parts, fmt.Sprintf("%d no longer in the queue", c.Missing))
+	}
+	if c.Failed > 0 {
+		parts = append(parts, fmt.Sprintf("%d failed, see the log", c.Failed))
+	}
+	if len(parts) == 0 {
+		return &flash{Level: "warn", Text: "No message was selected, so nothing was " + verb + "."}
+	}
+
+	text := strings.Join(parts, ", ") + "."
+	if c.Truncated {
+		text += fmt.Sprintf(" The queue held more than %d messages; repeat the action to continue.", bulkMax)
+	}
+	level := "ok"
+	if c.Busy > 0 || c.Missing > 0 || c.Failed > 0 {
+		level = "warn"
+	}
+	return &flash{Level: level, Text: text}
 }
 
 func (s *Server) handleRoutes(w http.ResponseWriter, r *http.Request) {

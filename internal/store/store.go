@@ -344,6 +344,39 @@ func (s *Store) RecordRemoval(queueID string) error {
 	return s.RecordAttempt(queueID, next, 0, "", "removed", nil)
 }
 
+// ReconcileRemoved marks a message removed when its spool copy is already
+// gone while its history still says it is queued or deferred.
+//
+// That combination is reachable without any operator mistake: Spool.recover
+// drops metadata without a body and a body without metadata at startup, an
+// operator can delete spool files by hand, and a crash between removing the
+// files and writing the attempt row leaves the same state. The history row
+// then keeps matching the "active" filter the queue view is built on, so the
+// message is listed forever and every delete of it answers 404 -- there was
+// no way to clear it from the view at all.
+//
+// It returns false, and writes nothing, for a message that is unknown or has
+// already reached an outcome: a delivered or bounced row must not be
+// rewritten into a removal just because its spool copy is (correctly) gone.
+func (s *Store) ReconcileRemoved(queueID string) (bool, error) {
+	msg, err := s.FindMessageByID(queueID)
+	if err != nil {
+		return false, err
+	}
+	if msg == nil {
+		return false, nil
+	}
+	switch msg.Status {
+	case "queued", "deferred":
+		if err := s.RecordRemoval(queueID); err != nil {
+			return false, err
+		}
+		return true, nil
+	default:
+		return false, nil
+	}
+}
+
 // RecordAudit inserts an audit log entry.
 func (s *Store) RecordAudit(tokenName, sourceAddr, action, queueID, details string) error {
 	now := time.Now().UTC()

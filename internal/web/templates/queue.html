@@ -1,8 +1,37 @@
 {{define "content"}}
 <h1>Queue</h1>
+
+{{if .Flash}}<div class="notice notice-{{.Flash.Level}}">{{.Flash.Text}}</div>{{end}}
+
+{{if .ConfirmDeleteAll}}
+<div class="notice">
+	<p><strong>Delete every message the queue view lists?</strong> The spool copies are removed
+	and the mail is gone; the history rows are kept and stay visible under Search.</p>
+	<form method="post" action="/queue/delete" class="actions">
+		<input type="hidden" name="csrf_delete" value="{{.DeleteToken}}">
+		<input type="hidden" name="scope" value="all">
+		<input type="hidden" name="confirm" value="delete-all">
+		<button type="submit" class="danger">Yes, delete the whole queue</button>
+		<a class="button-cancel" href="/queue">Cancel</a>
+	</form>
+</div>
+{{end}}
+
 <div class="table-wrap" id="queue-live" hx-get="{{.CurrentURL}}" hx-trigger="every 10s" hx-select="#queue-live" hx-target="#queue-live" hx-swap="outerHTML">
+<form method="post" action="/queue/requeue" id="queue-bulk" data-queue-bulk>
+<input type="hidden" name="csrf_requeue" value="{{.RequeueToken}}">
+<input type="hidden" name="csrf_delete" value="{{.DeleteToken}}">
+<div class="bulkbar">
+	<span class="bulkcount" data-selected-count>none selected</span>
+	<button type="submit" name="scope" value="selected">Requeue selected</button>
+	<button type="submit" name="scope" value="selected" formaction="/queue/delete" class="danger">Delete selected</button>
+	<span class="bulksep"></span>
+	<button type="submit" name="scope" value="all">Requeue whole queue</button>
+	<button type="submit" form="confirm-delete-all" class="danger">Delete whole queue&hellip;</button>
+</div>
 <table>
 <thead><tr>
+	<th class="cell-pick"><input type="checkbox" data-select-all aria-label="Select all messages on this page"></th>
 	<th><a href="{{index .SortLinks "received_at"}}">Sent</a></th>
 	<th><a href="{{index .SortLinks "status"}}">Status</a></th>
 	<th><a href="{{index .SortLinks "client"}}">Client</a></th>
@@ -14,10 +43,11 @@
 	<th class="cell-resp">Last response</th>
 </tr></thead>
 <tbody>
-{{range .Messages}}
+{{range .Rows}}
 <tr>
+	<td class="cell-pick"><input type="checkbox" name="id" value="{{.QueueID}}" aria-label="Select {{.QueueID}}"></td>
 	<td class="nowrap">{{localtime .ReceivedAt "2006-01-02 15:04:05"}}</td>
-	<td><span class="pill pill-{{.Status}}">{{.Status}}</span></td>
+	<td><span class="pill pill-{{.Status}}">{{.Status}}</span>{{if .Stale}}<br><span class="stale" title="No spool copy left: nothing to send. Delete clears the entry from this view.">no spool copy</span>{{end}}</td>
 	<td>{{.Client}}</td>
 	<td>{{.Route}}</td>
 	<td class="cell-addr">{{.EnvelopeFrom}}</td>
@@ -27,10 +57,14 @@
 	<td class="cell-resp">{{if .AttemptCount}}{{if .LastCode}}{{.LastCode}} {{end}}{{.LastErr}}{{else}}<span class="empty">no attempt yet</span>{{end}}</td>
 </tr>
 {{else}}
-<tr><td colspan="9" class="empty">the queue is empty</td></tr>
+<tr><td colspan="10" class="empty">the queue is empty</td></tr>
 {{end}}
 </tbody>
 </table>
+</form>
+<form method="get" action="/queue" id="confirm-delete-all" hidden>
+	<input type="hidden" name="confirm" value="delete-all">
+</form>
 {{template "pager" .}}
 </div>
 {{end}}

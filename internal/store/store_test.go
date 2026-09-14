@@ -306,6 +306,88 @@ func TestRecordRemovalAppendsAfterExistingAttempts(t *testing.T) {
 	}
 }
 
+// A message can be listed as queued or deferred while its spool copy is
+// already gone: startup recovery drops a half-written pair, an operator
+// deletes the files by hand, a crash lands between the unlink and the
+// attempt row. The row then matches the "active" filter the queue view is
+// built on forever, and every delete of it answered 404 -- nothing could
+// clear it. ReconcileRemoved is what makes that state clearable.
+func TestReconcileRemovedClearsAnActiveRow(t *testing.T) {
+	s := testStore(t)
+	now := time.Now()
+
+	for _, tc := range []struct {
+		id    string
+		class string // "" means no attempt at all, i.e. status queued
+	}{
+		{"GHOST-QUEUED", ""},
+		{"GHOST-DEFERRED", "temporary"},
+	} {
+		_ = s.RecordMessage(testRecord(tc.id, now, now.Add(96*time.Hour)))
+		if tc.class != "" {
+			_ = s.RecordAttempt(tc.id, 1, 421, "try later", tc.class, nil)
+		}
+
+		cleared, err := s.ReconcileRemoved(tc.id)
+		if err != nil {
+			t.Fatalf("%s: %v", tc.id, err)
+		}
+		if !cleared {
+			t.Fatalf("%s: reported nothing to reconcile", tc.id)
+		}
+		msg, err := s.FindMessageByID(tc.id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if msg.Status != "removed" {
+			t.Fatalf("%s: status = %q, want removed", tc.id, msg.Status)
+		}
+	}
+}
+
+// The other half of the contract: a message that reached an outcome has no
+// spool copy precisely because it is finished, and rewriting that into a
+// removal would falsify the journal.
+func TestReconcileRemovedLeavesFinishedRowsAlone(t *testing.T) {
+	s := testStore(t)
+	now := time.Now()
+
+	for _, tc := range []struct{ id, class, want string }{
+		{"DONE-DELIVERED", "delivered", "delivered"},
+		{"DONE-BOUNCED", "permanent", "bounced"},
+		{"DONE-REMOVED", "removed", "removed"},
+	} {
+		_ = s.RecordMessage(testRecord(tc.id, now, now.Add(96*time.Hour)))
+		_ = s.RecordAttempt(tc.id, 1, 250, "response", tc.class, nil)
+
+		cleared, err := s.ReconcileRemoved(tc.id)
+		if err != nil {
+			t.Fatalf("%s: %v", tc.id, err)
+		}
+		if cleared {
+			t.Fatalf("%s: a finished message was rewritten into a removal", tc.id)
+		}
+		msg, err := s.FindMessageByID(tc.id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if msg.Status != tc.want {
+			t.Fatalf("%s: status = %q, want %q", tc.id, msg.Status, tc.want)
+		}
+		if len(msg.Attempts) != 1 {
+			t.Fatalf("%s: attempts = %d, want 1", tc.id, len(msg.Attempts))
+		}
+	}
+
+	cleared, err := s.ReconcileRemoved("NOSUCHMESSAGE000")
+	if err != nil {
+		t.Fatalf("unknown queue ID: %v", err)
+	}
+	if cleared {
+		t.Fatal("unknown queue ID reported as reconciled")
+	}
+}
+
 func TestFindMessagesFiltersByDerivedStatus(t *testing.T) {
 	s := testStore(t)
 	now := time.Now()

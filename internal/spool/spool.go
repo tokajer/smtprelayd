@@ -596,6 +596,23 @@ func (s *Spool) Len() int {
 	return len(s.index)
 }
 
+// Has reports whether a message still has spool files, either live or
+// permanently failed. The queue view is built from the history store, which
+// can list a message the spool no longer holds; this is what lets the view
+// say so instead of offering a requeue that can only fail.
+func (s *Spool) Has(id ID) bool {
+	if !id.valid() {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.index[id]; ok {
+		return true
+	}
+	_, ok := s.failedIndex[id]
+	return ok
+}
+
 // RouteDepth is the queue depth of one route, split by whether a message is
 // claimable now or waiting for its next attempt.
 type RouteDepth struct {

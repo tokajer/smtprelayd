@@ -123,6 +123,12 @@ resets its retry counter.
 
 Scope `admin`. Removes the message from the queue. History is retained.
 
+Answers `{"status":"deleted"}` when a spool copy was removed, and
+`{"status":"cleared"}` when there was none left but the history row still
+said queued or deferred — that row is marked removed, which is what stops a
+message with no files behind it from being listed as active forever. A queue
+ID with no history row at all is still `404`.
+
 ### `GET /api/v1/health`
 
 No authentication. Returns process status, uptime, version and whether every

@@ -191,6 +191,55 @@ func TestAdminScopeCanDeleteAndAudits(t *testing.T) {
 	}
 }
 
+// A message whose spool copy is already gone while history still lists it as
+// queued or deferred answered 404 on every delete, which left it matching
+// the active filters permanently. Delete now reconciles the record, and the
+// dashboard's delete does the same -- the two must not disagree about what
+// delete means.
+func TestDeleteClearsAMessageWithNoSpoolCopy(t *testing.T) {
+	srv, st, _ := testServer(t)
+	const id = "GHOSTAPIAAAAAAAA"
+	recipients, _ := json.Marshal([]string{"b@example.net"})
+	now := time.Now()
+	if err := st.RecordMessage(store.MessageRecord{
+		QueueID: id, Client: "client", Route: "m365", EnvelopeFrom: "a@example.at",
+		Recipients: string(recipients), Subject: "ghost", Listener: "smtp",
+		RemoteAddr: "10.0.0.1", ReceivedAt: now, ExpiresAt: now.Add(time.Hour),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	rec := doReq(srv.Handler(), http.MethodDelete, "/messages/"+id, adminToken)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "cleared") {
+		t.Fatalf("body = %s, want the cleared status", rec.Body.String())
+	}
+	msg, err := st.FindMessageByID(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if msg.Status != "removed" {
+		t.Fatalf("status = %q, want removed", msg.Status)
+	}
+	entries, err := st.FindAuditByQueueID(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || !strings.Contains(entries[0].Details, "no spool copy") {
+		t.Fatalf("unexpected audit entries: %+v", entries)
+	}
+}
+
+func TestDeleteUnknownIDReturns404(t *testing.T) {
+	srv, _, _ := testServer(t)
+	rec := doReq(srv.Handler(), http.MethodDelete, "/messages/NOSUCHMESSAGEAAA", adminToken)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", rec.Code)
+	}
+}
+
 func TestRequeueUnknownIDReturns404(t *testing.T) {
 	srv, _, _ := testServer(t)
 	rec := doReq(srv.Handler(), http.MethodPost, "/messages/AAAAAAAAAAAAAAAA/requeue", adminToken)

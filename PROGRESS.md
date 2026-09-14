@@ -19,7 +19,161 @@ fix below): the MSI installs without error, exactly one service registration
 remains (no duplicate), the on-disk binary is replaced, and the service keeps
 running afterwards. Uninstall remains unverified. Log rotation and Windows ACL
 verification at startup are complete.
-**Last session**: 2026-08-24 (thirtieth session) — New feature, real phase-5
+**Last session**: 2026-09-14 (thirty-first session) — One feature and one
+real bug, both from the same report: "ich hatte das problem das 94 email in
+der queue waren. ich möchte einen punkt haben wo ich einzelne mails markieren
+kann oder auch alle und dann aus der queue entfernen bzw nochmals senden
+versuchen kann", followed mid-work by "nach dem manuellen löschen ist es
+immer noch drinnen. unter queue."
+
+**The bug, which is the more important half.** The queue view is built from
+the history store (`FindMessages`, status `active` = no attempts or a
+`temporary` latest attempt) while the spool is what actually holds the mail,
+and the two can disagree: `Spool.recover` silently drops metadata without a
+body and a body without metadata at startup, an operator can delete spool
+files by hand (which is what 94 messages and no bulk action invites), and a
+crash can land between the unlink and the attempt row. The history row then
+matches `active` forever, and `spool.Discard` answering `ErrNotFound` made
+both the dashboard and the API return 404 — so the row could never be
+cleared, which is exactly the reported symptom. New
+`store.ReconcileRemoved(queueID)` appends the `removed` attempt when, and
+only when, the derived status is still queued or deferred; a delivered,
+bounced or already-removed row is never rewritten (a message that reached an
+outcome has no spool copy *because* it is finished). Both entry points go
+through it, so "delete" cannot mean two different things depending on which
+one is used, and an unknown queue ID is still a 404 — reconciliation repairs
+a record, it does not invent one. The API answers `{"status":"cleared"}`
+rather than `"deleted"` for that path so a script can tell the two apart.
+`spool.Has(id)` is new alongside it, and the queue view marks such a row *no
+spool copy*: requeue cannot do anything for a message with no body, and
+without the marker its refusal would be a second mystery.
+
+**The feature.** The queue page now carries a bulk form: per-row checkboxes,
+a select-all box, `Requeue selected` / `Delete selected`, and whole-queue
+variants of both. Design points that needed deciding rather than copying:
+*scope* travels as `<button name="scope" value="...">` so the clicked button
+picks it with no script; the form posts to `/queue/requeue` with the delete
+button carrying `formaction="/queue/delete"`, which means one shared checkbox
+set but two CSRF fields (`csrf_requeue`, `csrf_delete`, actions
+`queue-requeue`/`queue-delete`, empty queue ID) — the per-action binding the
+existing single-message tokens have is kept, and the set of messages cannot
+be bound at issue time because it is chosen after the page was rendered.
+"All" resolves to the *store's* active set, not the spool index, because that
+is what the operator is looking at when they ask for it, and it is the only
+resolution that can also clear the stale rows above; it is capped at 1000 per
+submission (`store.FindMessages`'s own ceiling) and the banner says when more
+remain. Deleting the whole queue is reached as a link to
+`/queue?confirm=delete-all`, which renders a confirmation panel holding the
+real form — a server-side interstitial, refresh-safe, no `confirm()` and no
+script needed for the one irreversible action on the page. Requeue-all is not
+confirmed: it is what the operator asked for and it destroys nothing. The
+outcome banner is rebuilt from integers parsed out of the redirect
+(`?done=delete&ok=91&cleared=2&busy=1`), so a reload cannot repeat the action
+and no text from the request can reach the page; an unrecognised `done` value
+renders no banner at all. Per-message audit rows are still written for every
+message in a bulk action, with `details` = `bulk (selected)` / `bulk (all)`.
+
+**The dashboard's first first-party JavaScript**, `internal/web/static/
+queue.js`, loaded on the queue page only. Not avoidable and not incidental: a
+select-all box cannot be built server-side, and the ten-second htmx refresh
+would otherwise swap the table out from under a selection in progress —
+`MEMORY.md` already records that objection as the reason `/search`'s results
+table is excluded from polling. The script cancels the poll (via
+`htmx:beforeRequest` + `preventDefault`, verified against the vendored htmx's
+own `if(!he(r,"htmx:beforeRequest",H))` guard) while any box is ticked, and
+the selection counter says "auto-refresh paused" so a visibly frozen table
+does not read as a broken page. Everything is delegated from `document`
+because htmx replaces the whole `#queue-live` region. An htmx trigger filter
+(`every 10s [condition]`) would have been smaller but needs `new Function`,
+i.e. `unsafe-eval` in the CSP, which is not worth it — `script-src 'self'` is
+unchanged, and a test asserts the file contains neither `eval(` nor
+`new Function`.
+
+Verified with the same toolchain as the previous session (`~/sdk/go1.25.13`,
+not on `PATH`): `gofmt -l .` clean, `go vet ./...` clean, `go build ./...`
+plus `GOOS=windows GOARCH=amd64` and `GOOS=linux GOARCH=arm64` clean,
+`go test ./...` and `go test -race ./...` green including 15 new cases
+(bulk delete touches only the selection; bulk requeue audits with its
+`details`; whole-queue delete refused unconfirmed and accepted confirmed;
+CSRF refused for a missing field, the other action's token, a single-message
+token and an expired one; malformed scope, a traversal-shaped id, a short id
+and a selection over the cap all 400; the banner ignores an unknown action
+and never echoes a count; the stale marker appears exactly once; `queue.js`
+is served as `text/javascript` and has no `eval`; `ReconcileRemoved` clears
+queued and deferred rows and leaves delivered, bounced, removed and unknown
+ones alone; `spool.Has` covers queued, failed, discarded and an invalid id),
+`scripts/check-banned-imports.sh` clean for all three targets, `govulncheck`
+(no vulnerabilities) and `gosec -severity=medium` (0 issues, 55 files) both
+clean. The queue page was also rendered once to a file and inspected by hand.
+(`govulncheck` and `gosec` were not present in this environment and were
+installed with `go install` into `~/go/bin`, which is also not on `PATH` —
+next session can use them from there directly.)
+
+**Same session, two corrections from the operator trying it.** "delete-all
+geht nicht" plus "bitte als button einbauen": the whole-queue delete was an
+`<a class="button-danger-link">` in a toolbar of real buttons, which is both
+the wrong affordance and easy to read as dead. It is a `<button>` now. The
+mechanism needed one HTML detail: the button's own GET form cannot be nested
+inside the bulk `<form>` (a form inside a form is invalid and browsers drop
+the inner one), so a hidden `<form method="get" action="/queue"
+id="confirm-delete-all">` sits beside it and the button reaches it with the
+`form` attribute. That keeps the confirmation interstitial a plain GET —
+refresh-safe, no script — while looking and behaving like every other action
+on the page. `.button-danger-link` dropped from the stylesheet; `.button-
+cancel` stays for the Cancel on the panel, which genuinely navigates.
+
+Then verified the way it should have been before shipping a zip: the real
+binary, driven like a browser. A throwaway config (`127.0.0.1:2525`, a route
+pointed at a dead port so nothing ever leaves the queue, dashboard on
+`127.0.0.1:8025`), messages submitted over SMTP with `smtplib`, and every
+action driven by parsing the served HTML and posting the form back verbatim.
+Delete-selected (2 of 5), requeue-selected, and the whole-queue button's
+GET → panel → POST chain all answered 303 with the expected counts and the
+queue ended empty; unconfirmed `scope=all` 400, a requeue token on the delete
+endpoint 403, a traversal-shaped id 400. The first run of this, against the
+binary built before the button change, reported `button present: False` — the
+same thing the operator saw, from the same cause.
+The reported bug was reproduced the operator's way too: submit three
+messages, `rm` the spool files by hand, restart the service. The three rows
+survive the restart, all three are marked *no spool copy*, requeue answers
+`missing=3`, and the whole-queue delete answers `cleared=3` and empties the
+view — with `queue entry cleared for a message with no spool copy` in the
+log three times. Before this session that state was unclearable.
+
+**Same session, handover artefact.** Asked for a zip, then for "das wo die
+msi und die exe haben". The MSI cannot be produced on this machine at all:
+`smtprelayd.wxs` links `WixUIExtension` (stock ExitDialog/UserExit/
+FatalError plus `WixUI_ErrorProgressText`) and the bootstrapper needs WiX
+Burn, so candle/light on Windows are the only route — `wixl` from msitools
+does not implement the UI extension, and a hand-rolled substitute would be a
+*different* installer from the one verified on hardware, which is not
+something to hand over as "the MSI". So the zip
+(`dist/smtprelayd-v0.5.4-test.zip`, not in git, `dist/` is ignored) carries
+the three built binaries plus new `scripts/build-msi.ps1`, which reproduces
+the release workflow's candle/light invocations byte for byte and produces
+both the MSI and the setup.exe from an unpacked zip with no Go toolchain and
+no checkout. The script is transcribed from known-good CI steps but **has
+never been executed** — there is no Windows machine here — so its first run
+is also its test. Binaries are built as `v0.5.4-test` and the MSI's
+ProductVersion is `0.5.4`, deliberately above the installed 0.5.3: the wxs
+declares `MajorUpgrade` without `AllowSameVersionUpgrades`, so a same-version
+MSI installs a *second* product under the same UpgradeCode and produces the
+duplicate service registration an earlier session already had to fix. Noted
+in the zip's own README, along with the stale
+`docs/guides/img/dashboard-queue.png`, which still shows the queue page
+without the bulk form.
+
+Not done, deliberately: the JSON API got the reconciliation but no bulk
+endpoints — the ask was the dashboard, and a bulk API surface is its own
+contract and its own docs. Also not done and worth a future session:
+`Spool.recover` still drops a half-written pair silently, with no log line
+and no way to tell the store about it, which is one of the ways a stale row
+appears in the first place. Reconciling at startup, or at least logging what
+recovery dropped, would attack the cause rather than the symptom; it needs a
+logger in `spool.Open` (signature change, ripples into every caller), so it
+was left out rather than half-done.
+
+**Previous session**: 2026-08-24 (thirtieth session) — New feature, real phase-5
 adjacent work (not a numbered phase item, added on direct request). Started
 as "ein auto test wäre noch gut, dass täglich ein testmail geschickt wird."
 Researched before designing: `smtprelayd selftest` is an active local
@@ -2503,4 +2657,10 @@ tracked in the phase 5 checklist rather than here.
 | 2026-08-21 | A failed OAuth2 token acquisition at startup aborts the service instead of only being logged | Requested directly. Without an eager fetch, a rejected M365 credential or an unreachable tenant was invisible until the first message was already queued behind it. Accepted cost: an outage longer than the restart-on-failure burst window leaves the service down until an operator intervenes, which is the literal ask, not a side effect to soften |
 | 2026-08-21 | `winProgram.Start` blocks on a `ready` channel from `serve()` instead of returning `nil` unconditionally | The SCM was told "started successfully" before `config.Load` or any other startup check had even run, so every startup-failure log line this project has added over many sessions never actually stopped Windows from showing the service as running. A `ready` signal at the one point past every synchronous check, rather than a fixed wait, was chosen because `authms365`'s 15s request timeout means a short wait could still report success moments before a genuine, slow tenant rejection |
 | 2026-08-21 | `listener.Set.Serve` split into `Bind` (fails fast) and `Run` (blocks until shutdown) | The SMTP listener's own socket bind was the last startup step that could still fail after the `ready` signal above; splitting it out lets that failure also reach the SCM instead of only the log |
+| 2026-09-14 | A delete of a message whose spool copy is already gone marks the history row removed instead of answering 404, when and only when its derived status is still queued or deferred | The queue view is built from history and the spool is what holds the mail; the two disagree after a recovery sweep, a manual file deletion or a crash between the unlink and the attempt row. The 404 left such a row listed as queued forever with nothing able to clear it, which is the defect as reported. Restricting it to queued/deferred is what keeps a finished message's journal from being rewritten just because its files are (correctly) gone |
+| 2026-09-14 | "All" in the queue's bulk actions means the history store's active set, not the spool's index | That set is what the operator is looking at when they click it, and it is the only one that includes a row with no spool copy — precisely the entry that needs clearing. Bounded by `store.FindMessages`'s own 1000-row ceiling, with the banner reporting that more remain, rather than looping until the queue is empty inside one request |
+| 2026-09-14 | The bulk form carries two CSRF fields (`csrf_requeue`, `csrf_delete`) rather than one token covering both endpoints | The checkbox set has to be shared, so `formaction` picks the endpoint from one form; a single field named `csrf` would then have to validate for either action, retiring the per-action binding the single-message tokens already have. The queue ID is empty in both, because the message set is chosen after the page was rendered — the property being relied on, that an origin which never read the page cannot produce the MAC, is unchanged |
+| 2026-09-14 | Deleting the whole queue is confirmed by a server-rendered interstitial (`/queue?confirm=delete-all`), not a `confirm()` dialog, and the handler refuses an unconfirmed `scope=all` delete outright | It is the one irreversible action on the page, and a link to a page holding the real form is refresh-safe, needs no script, and cannot be reached by a mis-click on a toolbar. Requeue-all is deliberately not confirmed: it destroys nothing |
+| 2026-09-14 | The bulk outcome banner is rebuilt from integers in the redirect's query string | A POST that renders its own result page re-fires on reload, and server-side flash state would mean a session the dashboard does not have. Parsing counts rather than echoing text also means a crafted `/queue?done=...` link cannot put a sentence of someone else's choosing on the page |
+| 2026-09-14 | `internal/web/static/queue.js` is accepted as the dashboard's first first-party script | A select-all box cannot be rendered server-side, and the ten-second htmx swap would otherwise discard a selection in progress — the same reason `/search`'s results table is not polled. An htmx trigger filter would have done it in one attribute but requires `unsafe-eval`; plain delegated DOM code keeps `script-src 'self'` exactly as it is |
 | 2026-08-21 | `Server.accept`'s `wg.Add` and `Set.Close`'s `wg.Wait` are serialised through a `closeMu`/`closed` pair, not left to rely on the listener socket being closed first | `sync.WaitGroup` requires every `Add` with a positive delta on a counter that could be zero to happen before the matching `Wait`; closing the socket does not guarantee that ordering against a connection `Accept` had already returned. Found by `-race` in the new `Set`-level test the `Bind`/`Run` split needed, not something this session set out to fix — pre-existing in the previous combined `Serve`, simply never exercised by a test at that level before |

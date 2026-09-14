@@ -287,6 +287,25 @@ accent = "#f5a524"
 An override applies to light and dark alike, which is why recolouring beyond
 the accent usually goes with pinning `mode`.
 
+#### Managing the queue
+
+The queue page carries a bulk form. Tick individual messages, or use the
+header checkbox to take every message on the page, then **Requeue selected**
+(retry now, backoff reset) or **Delete selected** (spool copy removed, the
+history row kept and still searchable). Ticking a box pauses the page's
+ten-second auto-refresh so a selection cannot be swapped away mid-click; the
+counter next to the buttons says so.
+
+**Requeue whole queue** and **Delete whole queue** act on every message the
+view lists, not only the current page, up to 1000 per submission — the banner
+says if more remain. Deleting the whole queue asks for confirmation first;
+requeueing does not.
+
+A row marked *no spool copy* is listed in the history but has no message left
+on disk (files deleted by hand, or dropped by a crash-recovery sweep at
+startup). There is nothing to send, so requeue reports it as missing; delete
+clears the entry from the view and marks the history row removed.
+
 ### API and metrics bearer tokens
 
 There is no `token new` helper yet — generate and register one by hand. The

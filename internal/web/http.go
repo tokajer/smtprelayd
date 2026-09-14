@@ -17,15 +17,18 @@ import (
 
 // Handler returns the dashboard's HTTP handler, wrapped with the security
 // headers docs/guides/SECURITY.md requires for it: a strict CSP that allows scripts
-// only from the dashboard's own origin (htmx, vendored under /static/, is
-// the only one and needs neither inline script nor eval), a frame-busting
-// header, MIME sniffing turned off, and a conservative referrer policy.
+// only from the dashboard's own origin (vendored htmx and the queue page's
+// own script, both served from /static/, are the only two and neither needs
+// inline script or eval), a frame-busting header, MIME sniffing turned off,
+// and a conservative referrer policy.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/queue", http.StatusFound)
 	})
 	mux.HandleFunc("GET /queue", s.handleQueue)
+	mux.HandleFunc("POST /queue/requeue", s.handleQueueRequeue)
+	mux.HandleFunc("POST /queue/delete", s.handleQueueDelete)
 	mux.HandleFunc("GET /search", s.handleSearch)
 	mux.HandleFunc("GET /bounces", s.handleBounces)
 	mux.HandleFunc("GET /messages/{id}", s.handleMessage)
@@ -35,6 +38,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /config", s.handleConfig)
 	mux.HandleFunc("GET /static/style.css", s.handleStyle)
 	mux.HandleFunc("GET /static/htmx.min.js", s.handleHTMXScript)
+	mux.HandleFunc("GET /static/queue.js", s.handleQueueScript)
 	return s.requireLoopbackHost(securityHeaders(mux))
 }
 

@@ -281,7 +281,24 @@ func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request) {
 		}
 		writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 	case errors.Is(err, spool.ErrNotFound):
-		writeJSONError(w, http.StatusNotFound, "message not found")
+		// The spool copy is already gone. If history still calls the message
+		// queued or deferred it keeps showing up as active in every listing,
+		// with nothing able to clear it, so the record is reconciled instead
+		// of answering 404 forever. The dashboard's delete does the same;
+		// the two entry points must not disagree about what delete means.
+		cleared, rerr := s.store.ReconcileRemoved(id.String())
+		if rerr != nil {
+			s.serverError(w, "delete", rerr)
+			return
+		}
+		if !cleared {
+			writeJSONError(w, http.StatusNotFound, "message not found")
+			return
+		}
+		if aerr := s.store.RecordAudit(tokenName, sourceAddr(r), "delete", id.String(), "no spool copy: history reconciled"); aerr != nil {
+			s.log.Warn("audit log write failed", "action", "delete", "queue_id", id.String(), "error", aerr)
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"status": "cleared"})
 	case errors.Is(err, spool.ErrBusy):
 		writeJSONError(w, http.StatusConflict, "message is currently being delivered")
 	default:

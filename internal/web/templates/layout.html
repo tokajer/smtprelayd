@@ -8,6 +8,7 @@
 <title>smtprelayd dashboard</title>
 <link rel="stylesheet" href="/static/style.css">
 <script src="/static/htmx.min.js"></script>
+{{if eq .Page "queue"}}<script src="/static/queue.js"></script>{{end}}
 </head>
 <body>
 <header class="topbar">

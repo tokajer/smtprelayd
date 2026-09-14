@@ -466,6 +466,71 @@ td.empty, .table-wrap .empty { text-align: center; padding: 1.5rem; }
 	margin-bottom: 1rem;
 }
 
+.notice p { margin: 0 0 0.5rem; }
+.notice .actions { margin: 0; }
+
+/* The bulk action banner reports what an action did. Warn, not danger: a
+   handful of messages skipped because they were being delivered is a normal
+   outcome the operator has to notice, not a failure. */
+.notice-ok {
+	border-color: var(--ok);
+	color: var(--ok);
+	background: color-mix(in srgb, var(--ok) 10%, transparent);
+}
+
+.notice-warn {
+	border-color: var(--warn);
+	color: var(--warn);
+	background: color-mix(in srgb, var(--warn) 10%, transparent);
+}
+
+/* ---------- queue bulk selection ---------- */
+
+.bulkbar {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 0.6rem;
+	padding: 0 0 0.75rem;
+}
+
+.bulkcount {
+	color: var(--muted);
+	font-size: 0.82rem;
+	min-width: 12rem;
+}
+
+/* Pushes the whole-queue actions away from the selection actions, so
+   "Delete selected" and "Delete whole queue" are not adjacent. */
+.bulksep { flex: 1 1 2rem; }
+
+td.cell-pick, th.cell-pick { width: 1.6rem; padding-right: 0; }
+
+/* The Cancel on the confirmation panel stays an <a> -- it navigates rather
+   than submitting -- but has to sit next to a real button without looking
+   like a stray link. */
+.button-cancel {
+	padding: 0.4rem 1rem;
+	border-radius: var(--radius-sm);
+	border: 1px solid var(--border);
+	background: var(--surface);
+	color: var(--text);
+	font-weight: 600;
+	font-size: 0.9rem;
+	text-decoration: none;
+}
+
+.button-cancel:hover { border-color: var(--accent); }
+
+/* A queue row whose spool copy is gone: history still lists it, but there is
+   nothing left to send, so only delete can do anything with it. */
+.stale {
+	color: var(--muted);
+	font-size: 0.72rem;
+	font-style: italic;
+	white-space: nowrap;
+}
+
 pre.config-section {
 	background: var(--surface-2);
 	border: 1px solid var(--border);

@@ -53,7 +53,7 @@ libraries that do not exist understated it in the one direction that matters.
 | Config | TOML via `github.com/BurntSushi/toml` | Comments allowed, readable for operators |
 | History store | `modernc.org/sqlite` | **Pure Go**, no cgo, keeps Windows builds trivial. Its `modernc.org/libc` runtime imports `os/exec` on every GOOS for the C `system()`/`popen()` shims; the SQLite amalgamation never calls either (`system()` belongs to the sqlite3 CLI, not the library), so the code is linked but unreachable. Recorded decision, 2026-08-11: this is the **only** accepted `os/exec` importer, named explicitly in `scripts/check-banned-imports.sh` |
 | Logging | stdlib `log/slog` (JSON) + `gopkg.in/natefinch/lumberjack.v2` | Structured, rotating, no external agent. The import path settled on 2026-08-12 and the history is worth keeping straight: this row named the `gopkg.in/...v2` path while the code imported `github.com/natefinch/lumberjack v2.0.0+incompatible`, so on 2026-08-11 the row was corrected to describe the tree. The code then moved to the path the row had originally named — not a reversal but the other half of the same fix: the `gopkg.in` module is the properly versioned one with its own `go.mod`, and `+incompatible` dragged two test-only modules into the graph that nothing needed. The API is field-identical, so the change is one import line |
-| Dashboard | Go `html/template` + CSS, embedded via `embed.FS`, plus vendored htmx | No Node build step, ships inside the binary. The 2026-08-07 decision was `html/template` plus htmx; phase 4c needed no client-side behaviour, so htmx was left out and the dashboard carried no JavaScript through phase 4. **Added 2026-08-18**: htmx 2.0.4, vendored as a static file (`internal/web/static/htmx.min.js`, `embed.FS`, never fetched from a CDN — a loopback-only page should not depend on an outside host), so the live queue/bounces/routes/message views poll their own URL every 10s via `hx-get`/`hx-trigger`/`hx-select`/`hx-swap="outerHTML"` and refresh in place instead of requiring a manual reload. `/search`'s results table and the filter forms on `/search` and `/bounces` are deliberately excluded from polling — swapping that region on a timer would overwrite text the operator is still typing. CSP tightened to `default-src 'self'; script-src 'self'` (was bare `default-src 'self'`) to say explicitly that scripts load only from the dashboard's own origin; htmx needs neither inline script nor eval, so no CSP relaxation beyond that was needed. Its appearance is themeable from `[web.theme]` (2026-08-11): CSS custom properties, one generated override block appended to the stylesheet, hex colours only — see `docs/dev/EXPLOIT-SURFACE.md` section 8. Light and dark come from `prefers-color-scheme` and a `data-theme` attribute, still without JavaScript |
+| Dashboard | Go `html/template` + CSS, embedded via `embed.FS`, plus vendored htmx | No Node build step, ships inside the binary. The 2026-08-07 decision was `html/template` plus htmx; phase 4c needed no client-side behaviour, so htmx was left out and the dashboard carried no JavaScript through phase 4. **Added 2026-08-18**: htmx 2.0.4, vendored as a static file (`internal/web/static/htmx.min.js`, `embed.FS`, never fetched from a CDN — a loopback-only page should not depend on an outside host), so the live queue/bounces/routes/message views poll their own URL every 10s via `hx-get`/`hx-trigger`/`hx-select`/`hx-swap="outerHTML"` and refresh in place instead of requiring a manual reload. `/search`'s results table and the filter forms on `/search` and `/bounces` are deliberately excluded from polling — swapping that region on a timer would overwrite text the operator is still typing. CSP tightened to `default-src 'self'; script-src 'self'` (was bare `default-src 'self'`) to say explicitly that scripts load only from the dashboard's own origin; htmx needs neither inline script nor eval, so no CSP relaxation beyond that was needed. Its appearance is themeable from `[web.theme]` (2026-08-11): CSS custom properties, one generated override block appended to the stylesheet, hex colours only — see `docs/dev/EXPLOIT-SURFACE.md` section 8. Light and dark come from `prefers-color-scheme` and a `data-theme` attribute, still without JavaScript. **Amended 2026-09-14**: the queue page's bulk selection added `internal/web/static/queue.js`, the first first-party script in the tree — see section 7 for why it could not be done server-side and what keeps the CSP unchanged |
 | TLS | stdlib `crypto/tls` | No OpenSSL linkage |
 
 ## 3. Component layout
@@ -208,6 +208,35 @@ Three layers, deliberately separate:
 Dashboard features: live queue view, message search by sender, recipient,
 subject, status and time range, per-attempt delivery history, route status,
 requeue and delete actions, read-only configuration view.
+
+**Queue management, added 2026-09-14** (requested after 94 messages piled up
+in one installation and clearing them one message at a time was the only
+option): the queue page carries a bulk form — per-row checkboxes, a select-all
+box, and whole-queue variants of both actions bounded at 1000 messages per
+submission. Three decisions worth keeping:
+
+- "All" is resolved from the **history store's** active set, not from the
+  spool index, because that is what the operator is looking at when they ask
+  for it, and the two can legitimately disagree.
+- A message the queue view lists with **no spool copy** behind it is the case
+  that made this a bug report rather than a feature request. It arises without
+  operator error (`Spool.recover` drops a half-written pair at startup, a
+  crash lands between the unlink and the attempt row) and, before this, every
+  delete of such a row answered 404, so nothing could clear it and it stayed
+  listed as queued forever. `Store.ReconcileRemoved` now marks the row removed
+  when — and only when — its derived status is still queued or deferred; a
+  delivered or bounced row is never rewritten. The dashboard and the API both
+  go through it, so "delete" means the same thing at both entry points, and
+  the queue view marks such rows so requeue's refusal is not a mystery.
+- The dashboard gained its **first first-party JavaScript**
+  (`internal/web/static/queue.js`, queue page only), which the "no JavaScript"
+  half of the row in section 2 no longer describes. A select-all box cannot be
+  built server-side, and the ten-second htmx refresh would otherwise swap the
+  table out from under a selection in progress — the same objection that keeps
+  `/search`'s results table out of the polling set. It is event-delegated so it
+  survives a swap, and uses neither `eval` nor `new Function`, so
+  `script-src 'self'` is unchanged. An htmx trigger filter would have needed
+  `unsafe-eval` and was rejected for that reason.
 
 ## 8. Bounce handling
 

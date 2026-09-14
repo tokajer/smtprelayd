@@ -481,6 +481,355 @@ func enqueueMessage(t *testing.T, st *store.Store, sp *spool.Spool, route string
 	return id.String()
 }
 
+// postValues drives the bulk endpoints, whose body carries the selection as
+// repeated "id" fields plus a per-action token, rather than the single
+// "csrf" field postForm sends.
+func postValues(h http.Handler, target string, form url.Values) *httptest.ResponseRecorder {
+	r := httptest.NewRequest(http.MethodPost, target, strings.NewReader(form.Encode()))
+	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	r.Host = "127.0.0.1:8080"
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, r)
+	return rec
+}
+
+// recordGhost puts a message in the history store with no spool copy behind
+// it: the state a manual deletion of the spool files, or a startup recovery
+// that dropped a half-written pair, leaves behind.
+func recordGhost(t *testing.T, st *store.Store, id string) string {
+	t.Helper()
+	recipients, _ := json.Marshal([]string{"b@example.net"})
+	now := time.Now()
+	if err := st.RecordMessage(store.MessageRecord{
+		QueueID: id, Client: "printers", Route: "m365", EnvelopeFrom: "a@example.at",
+		Recipients: string(recipients), Subject: "ghost", Listener: "smtp",
+		RemoteAddr: "10.10.5.5", ReceivedAt: now, ExpiresAt: now.Add(time.Hour),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return id
+}
+
+func TestQueuePageRendersBulkForm(t *testing.T) {
+	cfg := testConfig(t, "")
+	srv, st, sp := testServer(t, cfg)
+	id := enqueueMessage(t, st, sp, "m365")
+
+	body := get(t, srv.Handler(), "/queue").Body.String()
+	for _, want := range []string{
+		`name="id" value="` + id + `"`,
+		`data-select-all`,
+		`name="csrf_requeue"`,
+		`name="csrf_delete"`,
+		`name="scope" value="selected"`,
+		`name="scope" value="all"`,
+		// The whole-queue delete is a real submit button, not a link: it
+		// reaches its own GET form by the `form` attribute, because that
+		// form cannot be nested inside the bulk form.
+		`form="confirm-delete-all"`,
+		`<form method="get" action="/queue" id="confirm-delete-all" hidden>`,
+		`/static/queue.js`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("the queue page is missing %q", want)
+		}
+	}
+}
+
+// A row the spool no longer holds is marked, because requeue cannot do
+// anything for it and the operator otherwise has no way to tell it apart
+// from a message that is genuinely waiting to be sent.
+func TestQueuePageMarksRowsWithNoSpoolCopy(t *testing.T) {
+	cfg := testConfig(t, "")
+	srv, st, sp := testServer(t, cfg)
+	live := enqueueMessage(t, st, sp, "m365")
+	recordGhost(t, st, "GHOSTAAAAAAAAAAA")
+
+	body := get(t, srv.Handler(), "/queue").Body.String()
+	if strings.Count(body, "no spool copy") != 1 {
+		t.Fatalf("expected exactly one stale marker, body:\n%s", body)
+	}
+	if !strings.Contains(body, live) {
+		t.Error("the live message vanished from the queue view")
+	}
+}
+
+func TestQueueBulkRejectsMissingOrWrongCSRF(t *testing.T) {
+	cfg := testConfig(t, "")
+	srv, st, sp := testServer(t, cfg)
+	id := enqueueMessage(t, st, sp, "m365")
+	now := time.Now()
+
+	for name, form := range map[string]url.Values{
+		"no token":          {"scope": {"selected"}, "id": {id}},
+		"wrong field":       {"scope": {"selected"}, "id": {id}, "csrf_delete": {srv.csrf.token("queue-delete", "", now)}},
+		"single-msg token":  {"scope": {"selected"}, "id": {id}, "csrf_requeue": {srv.csrf.token("requeue", id, now)}},
+		"other bulk action": {"scope": {"selected"}, "id": {id}, "csrf_requeue": {srv.csrf.token("queue-delete", "", now)}},
+		"expired":           {"scope": {"selected"}, "id": {id}, "csrf_requeue": {srv.csrf.token("queue-requeue", "", now.Add(-2*time.Hour))}},
+	} {
+		if rec := postValues(srv.Handler(), "/queue/requeue", form); rec.Code != http.StatusForbidden {
+			t.Errorf("%s: status = %d, want 403", name, rec.Code)
+		}
+	}
+	if sp.Len() != 1 {
+		t.Fatalf("spool changed despite every request being refused")
+	}
+}
+
+func TestQueueBulkDeleteRemovesOnlySelected(t *testing.T) {
+	cfg := testConfig(t, "")
+	srv, st, sp := testServer(t, cfg)
+	keep := enqueueMessage(t, st, sp, "m365")
+	gone1 := enqueueMessage(t, st, sp, "m365")
+	gone2 := enqueueMessage(t, st, sp, "m365")
+
+	rec := postValues(srv.Handler(), "/queue/delete", url.Values{
+		"csrf_delete": {srv.csrf.token("queue-delete", "", time.Now())},
+		"scope":       {"selected"},
+		"id":          {gone1, gone2},
+	})
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if loc := rec.Header().Get("Location"); !strings.Contains(loc, "done=delete") || !strings.Contains(loc, "ok=2") {
+		t.Fatalf("Location = %q, want the delete outcome", loc)
+	}
+	if sp.Len() != 1 {
+		t.Fatalf("spool holds %d messages, want only the unselected one", sp.Len())
+	}
+	for _, id := range []string{gone1, gone2} {
+		msg, err := st.FindMessageByID(id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if msg == nil || msg.Status != "removed" {
+			t.Fatalf("%s: history row is %+v, want a retained row with status removed", id, msg)
+		}
+	}
+	msg, err := st.FindMessageByID(keep)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if msg.Status != "queued" {
+		t.Fatalf("unselected message status = %q, want queued", msg.Status)
+	}
+}
+
+func TestQueueBulkRequeueSelectedAudits(t *testing.T) {
+	cfg := testConfig(t, "")
+	srv, st, sp := testServer(t, cfg)
+	id := enqueueMessage(t, st, sp, "m365")
+
+	rec := postValues(srv.Handler(), "/queue/requeue", url.Values{
+		"csrf_requeue": {srv.csrf.token("queue-requeue", "", time.Now())},
+		"scope":        {"selected"},
+		"id":           {id},
+	})
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	entries, err := st.FindAuditByQueueID(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Action != "requeue" || entries[0].Details != "bulk (selected)" {
+		t.Fatalf("unexpected audit entries: %+v", entries)
+	}
+}
+
+// The whole-queue delete is the one irreversible action on the page, so the
+// form that carries it is only rendered behind the confirmation page and the
+// handler refuses an unconfirmed request outright.
+func TestQueueBulkDeleteAllRequiresConfirmation(t *testing.T) {
+	cfg := testConfig(t, "")
+	srv, st, sp := testServer(t, cfg)
+	enqueueMessage(t, st, sp, "m365")
+	enqueueMessage(t, st, sp, "m365")
+	token := srv.csrf.token("queue-delete", "", time.Now())
+
+	rec := postValues(srv.Handler(), "/queue/delete", url.Values{
+		"csrf_delete": {token}, "scope": {"all"},
+	})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("unconfirmed: status = %d, want 400", rec.Code)
+	}
+	if sp.Len() != 2 {
+		t.Fatalf("unconfirmed request deleted %d messages", 2-sp.Len())
+	}
+
+	page := get(t, srv.Handler(), "/queue?confirm=delete-all").Body.String()
+	if !strings.Contains(page, `value="delete-all"`) {
+		t.Fatalf("the confirmation page does not carry the confirmed form:\n%s", page)
+	}
+
+	rec = postValues(srv.Handler(), "/queue/delete", url.Values{
+		"csrf_delete": {token}, "scope": {"all"}, "confirm": {"delete-all"},
+	})
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("confirmed: status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if sp.Len() != 0 {
+		t.Fatalf("spool still holds %d messages after deleting the whole queue", sp.Len())
+	}
+	active, err := st.FindMessages(store.MessageFilter{Status: "active", Limit: 100})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(active) != 0 {
+		t.Fatalf("%d messages still match the queue view", len(active))
+	}
+}
+
+// The bug this whole path exists for: a message listed in the queue with no
+// spool copy behind it answered 404 on every delete, so it could never be
+// cleared from the view. Both the single-message action and the bulk one
+// must now clear it.
+func TestDeleteClearsAQueueRowWithNoSpoolCopy(t *testing.T) {
+	cfg := testConfig(t, "")
+	srv, st, _ := testServer(t, cfg)
+	single := recordGhost(t, st, "GHOSTSINGLEAAAAA")
+	bulk := recordGhost(t, st, "GHOSTBULKAAAAAAA")
+
+	rec := postForm(srv.Handler(), "/messages/"+single+"/delete", srv.csrf.token("delete", single, time.Now()))
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("single delete: status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	rec = postValues(srv.Handler(), "/queue/delete", url.Values{
+		"csrf_delete": {srv.csrf.token("queue-delete", "", time.Now())},
+		"scope":       {"selected"},
+		"id":          {bulk},
+	})
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("bulk delete: status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if loc := rec.Header().Get("Location"); !strings.Contains(loc, "cleared=1") {
+		t.Fatalf("Location = %q, want cleared=1", loc)
+	}
+
+	for _, id := range []string{single, bulk} {
+		msg, err := st.FindMessageByID(id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if msg.Status != "removed" {
+			t.Fatalf("%s: status = %q, want removed", id, msg.Status)
+		}
+		entries, err := st.FindAuditByQueueID(id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(entries) != 1 || !strings.Contains(entries[0].Details, "no spool copy") {
+			t.Fatalf("%s: unexpected audit entries: %+v", id, entries)
+		}
+	}
+
+	// A queue ID that was never seen at all is still a 404: reconciliation
+	// repairs a record that exists, it does not invent one.
+	unknown := "NOSUCHMESSAGEAAA"
+	rec = postForm(srv.Handler(), "/messages/"+unknown+"/delete", srv.csrf.token("delete", unknown, time.Now()))
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("unknown message: status = %d, want 404", rec.Code)
+	}
+}
+
+// A message whose spool copy is gone cannot be requeued: there is no body to
+// send. It must be reported as missing rather than silently counted as done.
+func TestQueueBulkRequeueReportsMessagesWithNoSpoolCopy(t *testing.T) {
+	cfg := testConfig(t, "")
+	srv, st, _ := testServer(t, cfg)
+	id := recordGhost(t, st, "GHOSTREQUEUEAAAA")
+
+	rec := postValues(srv.Handler(), "/queue/requeue", url.Values{
+		"csrf_requeue": {srv.csrf.token("queue-requeue", "", time.Now())},
+		"scope":        {"selected"},
+		"id":           {id},
+	})
+	if loc := rec.Header().Get("Location"); !strings.Contains(loc, "missing=1") {
+		t.Fatalf("Location = %q, want missing=1", loc)
+	}
+	msg, err := st.FindMessageByID(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if msg.Status != "queued" {
+		t.Fatalf("status = %q; a failed requeue must not rewrite the record", msg.Status)
+	}
+}
+
+func TestQueueBulkRejectsMalformedRequests(t *testing.T) {
+	cfg := testConfig(t, "")
+	srv, _, _ := testServer(t, cfg)
+	token := srv.csrf.token("queue-delete", "", time.Now())
+
+	cases := map[string]url.Values{
+		"unknown scope": {"csrf_delete": {token}, "scope": {"everything"}},
+		"missing scope": {"csrf_delete": {token}},
+		"invalid id":    {"csrf_delete": {token}, "scope": {"selected"}, "id": {"../../etc/passwd"}},
+		"short id":      {"csrf_delete": {token}, "scope": {"selected"}, "id": {"TOOSHORT"}},
+	}
+	for name, form := range cases {
+		if rec := postValues(srv.Handler(), "/queue/delete", form); rec.Code != http.StatusBadRequest {
+			t.Errorf("%s: status = %d, want 400", name, rec.Code)
+		}
+	}
+
+	tooMany := url.Values{"csrf_delete": {token}, "scope": {"selected"}}
+	for i := 0; i <= bulkMax; i++ {
+		tooMany.Add("id", "AAAAAAAAAAAAAAAA")
+	}
+	if rec := postValues(srv.Handler(), "/queue/delete", tooMany); rec.Code != http.StatusBadRequest {
+		t.Errorf("over the cap: status = %d, want 400", rec.Code)
+	}
+}
+
+// The banner is rebuilt from the redirect's query string, so it must never
+// render text that came in with the request, and an unknown action must
+// produce no banner at all.
+func TestBulkFlashIsBuiltFromCountsOnly(t *testing.T) {
+	if f := bulkFlash(url.Values{"done": {"<script>alert(1)</script>"}, "ok": {"1"}}); f != nil {
+		t.Fatalf("an unknown action produced a banner: %+v", f)
+	}
+	if f := bulkFlash(url.Values{}); f != nil {
+		t.Fatalf("no action produced a banner: %+v", f)
+	}
+
+	f := bulkFlash(url.Values{"done": {"delete"}, "ok": {"3"}, "cleared": {"2"}})
+	if f == nil || f.Level != "ok" || !strings.Contains(f.Text, "3 deleted") || !strings.Contains(f.Text, "2 had no spool copy") {
+		t.Fatalf("unexpected banner: %+v", f)
+	}
+	f = bulkFlash(url.Values{"done": {"requeue"}, "busy": {"1"}, "failed": {"2"}, "more": {"1"}})
+	if f == nil || f.Level != "warn" || !strings.Contains(f.Text, "repeat the action") {
+		t.Fatalf("unexpected banner: %+v", f)
+	}
+	f = bulkFlash(url.Values{"done": {"requeue"}})
+	if f == nil || f.Level != "warn" || !strings.Contains(f.Text, "No message was selected") {
+		t.Fatalf("unexpected empty-selection banner: %+v", f)
+	}
+	// Garbage in a count is read as zero, never echoed.
+	f = bulkFlash(url.Values{"done": {"delete"}, "ok": {"<img src=x>"}})
+	if f == nil || strings.Contains(f.Text, "img") {
+		t.Fatalf("a count was echoed into the banner: %+v", f)
+	}
+}
+
+func TestQueueScriptServedWithJSContentType(t *testing.T) {
+	cfg := testConfig(t, "")
+	srv, _, _ := testServer(t, cfg)
+	rec := get(t, srv.Handler(), "/static/queue.js")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d", rec.Code)
+	}
+	if ct := rec.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/javascript") {
+		t.Fatalf("content-type = %q", ct)
+	}
+	// The CSP allows no inline script and no eval, so the page's own script
+	// must not need either.
+	if body := rec.Body.String(); strings.Contains(body, "eval(") || strings.Contains(body, "new Function") {
+		t.Fatal("queue.js uses eval, which the dashboard's CSP forbids")
+	}
+}
+
 func TestStyleServedWithCSSContentType(t *testing.T) {
 	cfg := testConfig(t, "")
 	srv, _, _ := testServer(t, cfg)
