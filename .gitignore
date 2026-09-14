@@ -3,3 +3,4 @@
 *.msi
 *.wixobj
 *.wixpdb
+.claude/
