@@ -306,7 +306,7 @@ See `docs/guides/API.md` for the endpoint contract.
 ### Canary probes
 
 Optional, zero or more `[[canary]]` entries: a synthetic test message the
-relay composes and enqueues itself, on a configurable interval, through a
+relay composes and enqueues itself, on a configurable schedule, through a
 configured route — so a working delivery path is noticed even without real
 traffic, and a silently broken one (expired credential, changed smarthost
 policy) does not go unnoticed just because no client happened to send
@@ -329,6 +329,34 @@ Canary traffic is kept out of its route's own delivered/bounced/deferred/
 auth-failure metrics either way, with its own pair instead, labeled by name
 (`smtprelayd_canary_last_delivery_time`, `smtprelayd_canary_failures_total`)
 — see `docs/guides/CONFIGURATION.md` section 7 and `docs/guides/CHECKMK.md`.
+
+**Schedule, added 2026-09-15.** An entry configures exactly one of
+`interval_minutes` (every n minutes from service start) or `daily_at` (fixed
+times of day); both, or neither, is a load-time error. An interval is the
+wrong instrument for "a test mail every morning before anyone is in": it
+drifts with every restart, so the one thing an operator wants to be able to
+say about a daily canary — *it is late* — stops being answerable. `daily_at`
+accepts a single `"HH:MM"` or an array of them, decoded by a custom
+`config.DailyAt` unmarshaller, because once a day is the common case and a
+one-element array would be noise an operator has to be told about; strict
+`HH:MM` parsing, not `time.Parse`, so `"7:00"` and a rolling-over `"24:00"`
+are refused rather than silently meaning something else.
+
+The times are **UTC**, not `service.timezone`. That setting only ever changed
+how a timestamp is displayed; this one decides when mail is sent, and a zone
+with daylight saving has one day a year without 02:30 and one with two — plus
+`time.LoadLocation` on Windows would mean either embedding `time/tzdata` or
+depending on the registry. A local-time schedule can be reconsidered, but it
+needs that cost accepted explicitly.
+
+The wait is taken in steps of at most a minute and recomputed from the wall
+clock, instead of one timer armed for up to 24 hours: a Go timer counts on
+the monotonic clock, which stops while the machine is suspended and does not
+follow an NTP step, so a single long timer would miss 07:00 by exactly as
+much as either event moved the day. A scheduled time that has already passed
+when the process looks again sends once, late — a late canary is a signal, a
+missing one is indistinguishable from the failure the canary exists to
+detect.
 
 ## 9. Security posture
 

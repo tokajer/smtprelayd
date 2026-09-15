@@ -590,8 +590,21 @@ func (c *Config) Validate() error {
 		} else if !routeNames[cn.Route] {
 			add("canary[%d] %q: route %q references an unknown route", i, cn.Name, cn.Route)
 		}
-		if cn.IntervalMinutes <= 0 {
-			add("canary[%d] %q: interval_minutes must be positive", i, cn.Name)
+		// A canary needs exactly one schedule. Both is refused rather than
+		// silently preferring one, because the two answer the "is it
+		// overdue?" question an alert asks with different numbers, and
+		// neither is refused because a canary that never sends is
+		// indistinguishable from one that is configured but broken.
+		switch {
+		case len(cn.DailyAt) > 0 && cn.IntervalMinutes != 0:
+			add("canary[%d] %q: interval_minutes and daily_at are mutually exclusive; configure exactly one of them", i, cn.Name)
+		case len(cn.DailyAt) > 0:
+			if _, err := cn.DailyAt.Minutes(); err != nil {
+				add("canary[%d] %q: daily_at: %v", i, cn.Name, err)
+			}
+		case cn.IntervalMinutes > 0:
+		default:
+			add("canary[%d] %q: a schedule is required: either interval_minutes (positive) or daily_at (\"HH:MM\" in UTC, or an array of them)", i, cn.Name)
 		}
 	}
 

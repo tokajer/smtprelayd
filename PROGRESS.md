@@ -19,7 +19,64 @@ fix below): the MSI installs without error, exactly one service registration
 remains (no duplicate), the on-disk binary is replaced, and the service keeps
 running afterwards. Uninstall remains unverified. Log rotation and Windows ACL
 verification at startup are complete.
-**Last session**: 2026-09-14 (thirty-first session) — One feature and one
+**Last session**: 2026-09-15 (thirty-second session) — One feature, from
+"ich möchte die canary nicht nur als intervall sondern zu einem bestimmten
+zeitpunkt. (UTC)" / "z.b täglich 07:00".
+
+A `[[canary]]` entry now configures **exactly one** of `interval_minutes` or
+the new `daily_at`; both, or neither, is a load-time error. An interval is
+the wrong instrument for "a test mail every morning before anyone is in": it
+drifts with every restart, so the one thing the operator wants to be able to
+say about a daily canary — *it is late* — stops being answerable. Asked
+before touching the schema (working agreement 4); the operator chose both
+spellings of the value and fixed UTC.
+
+`config.DailyAt` therefore decodes itself (`UnmarshalTOML`) and accepts a
+single `daily_at = "07:00"` or an array `["07:00", "19:30"]`: once a day is
+the common case and a one-element array would be noise an operator has to be
+told about. The strings are kept verbatim and resolved by `DailyAt.Minutes()`
+(sorted, de-duplicated) so a malformed time is one more collected `Validate`
+error naming its canary, not a decode failure that aborts the file without
+saying which entry was wrong. Parsing is strict `HH:MM` by hand and not
+`time.Parse`, which would also accept `"7:00"` and a `"24:00"` that rolls
+into the next day — both a schedule other than the one written down.
+
+**UTC, not `service.timezone`**, recorded in `MEMORY.md`: that setting only
+ever changed how a timestamp is *displayed*, this one decides when mail is
+sent, and a DST zone has one day a year without 02:30 and one with two —
+plus `time.LoadLocation` on Windows would mean embedding `time/tzdata` or
+depending on the registry. `docs/guides/CONFIGURATION.md` says so explicitly,
+with the Vienna example (07:00 UTC = 09:00 local in summer, 08:00 in winter),
+because that is the one thing an operator will get wrong.
+
+`Runner.runDaily` takes the wait in steps of at most a minute, recomputed
+from the wall clock, instead of arming one timer for up to 24 hours: a Go
+timer counts on the monotonic clock, which stops while the machine is
+suspended and does not follow an NTP step, so a single long timer would miss
+07:00 by exactly as much as either event moved the day. A scheduled time
+already past when the process looks again sends once, late — a late canary
+is a signal, a missing one is indistinguishable from the failure the canary
+exists to detect. Cancellation is selected on *inside* each step, so a
+service stop never waits out a step. The next send is logged (`canary
+scheduled`) after every send.
+
+Verified with `~/sdk/go1.25.13` (not on `PATH`): `gofmt -l .` clean,
+`go vet ./...` clean, `go build ./...` plus `GOOS=windows GOARCH=amd64` and
+`GOOS=linux GOARCH=arm64` clean, `go test ./...` and `go test -race` green
+including 25 new cases (`nextDaily` across two times a day, exactly on a
+scheduled time, a non-UTC `now`, midnight, a month boundary; `waitUntil`
+returning immediately for a past deadline and on cancellation without
+waiting out a step; `Run` stopping on cancel with a daily schedule and
+refusing to start on a malformed one; decoding a single time and an array,
+unsorted and repeated times collapsing; both schedules, neither schedule,
+`"7:00"`, `"24:00"`, `"07:60"`, a bad time inside an array and a non-string
+`daily_at` all refused), `scripts/check-banned-imports.sh` clean for all
+three targets, `govulncheck` clean, `gosec -severity=medium` 0 issues over
+55 files. Also run for real: the built binary with
+`daily_at = ["<now+2min>", "23:59"]` logged `next` as the nearer of the two
+and queued the canary at that minute.
+
+**Previous session**: 2026-09-14 (thirty-first session) — One feature and one
 real bug, both from the same report: "ich hatte das problem das 94 email in
 der queue waren. ich möchte einen punkt haben wo ich einzelne mails markieren
 kann oder auch alle und dann aus der queue entfernen bzw nochmals senden

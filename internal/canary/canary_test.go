@@ -200,3 +200,119 @@ func TestRunStopsOnContextCancellation(t *testing.T) {
 		t.Fatal("Run did not stop after context cancellation")
 	}
 }
+
+// TestNextDailyPicksTheNextTimeOfDay is the whole of the fixed-time
+// schedule's arithmetic. Everything around it is a timer.
+func TestNextDailyPicksTheNextTimeOfDay(t *testing.T) {
+	at := []int{7 * 60, 19*60 + 30} // 07:00 and 19:30 UTC
+	for name, tc := range map[string]struct {
+		now  string
+		at   []int
+		want string
+	}{
+		"before the first time today":    {"2026-09-15T05:00:00Z", at, "2026-09-15T07:00:00Z"},
+		"between two times":              {"2026-09-15T07:00:01Z", at, "2026-09-15T19:30:00Z"},
+		"after the last time rolls over": {"2026-09-15T20:00:00Z", at, "2026-09-16T07:00:00Z"},
+		"exactly on a scheduled time":    {"2026-09-15T07:00:00Z", at, "2026-09-15T19:30:00Z"},
+		// 08:00+02:00 is 06:00 UTC, so the next send is today's 07:00 UTC.
+		// Reading the wall clock instead would have put it past 07:00 and
+		// answered 19:30.
+		"a non-UTC now is converted":                               {"2026-09-15T08:00:00+02:00", at, "2026-09-15T07:00:00Z"},
+		"midnight schedule after midnight":                         {"2026-09-15T00:00:00Z", []int{0}, "2026-09-16T00:00:00Z"},
+		"midnight schedule before midnight":                        {"2026-09-15T23:59:00Z", []int{0}, "2026-09-16T00:00:00Z"},
+		"across a month boundary":                                  {"2026-09-30T23:00:00Z", []int{0}, "2026-10-01T00:00:00Z"},
+		"across a DST change in the local zone is still 24h apart": {"2026-10-25T08:00:00Z", []int{7 * 60}, "2026-10-26T07:00:00Z"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			now, err := time.Parse(time.RFC3339, tc.now)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want, err := time.Parse(time.RFC3339, tc.want)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := nextDaily(now, tc.at); !got.Equal(want) {
+				t.Errorf("nextDaily(%s) = %s, want %s", tc.now, got.Format(time.RFC3339), tc.want)
+			}
+		})
+	}
+}
+
+// TestWaitUntilReturnsImmediatelyForAPastDeadline is the suspend-and-resume
+// case: a scheduled time the machine slept through must send once, late,
+// not be waited out for another day.
+func TestWaitUntilReturnsImmediatelyForAPastDeadline(t *testing.T) {
+	done := make(chan bool, 1)
+	go func() { done <- waitUntil(context.Background(), time.Now().Add(-3*time.Hour)) }()
+	select {
+	case ok := <-done:
+		if !ok {
+			t.Error("waitUntil reported cancellation for a past deadline")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("waitUntil did not return for a deadline that has already passed")
+	}
+}
+
+// TestWaitUntilStopsOnCancellationWithoutWaitingOutAStep guards the reason
+// cancellation is selected on inside each step rather than between them: a
+// service stop must not block for maxDailyWait.
+func TestWaitUntilStopsOnCancellationWithoutWaitingOutAStep(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan bool, 1)
+	go func() { done <- waitUntil(ctx, time.Now().Add(24*time.Hour)) }()
+	cancel()
+	select {
+	case ok := <-done:
+		if ok {
+			t.Error("waitUntil reported the deadline passed, want cancellation")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("waitUntil did not stop after context cancellation")
+	}
+}
+
+func TestRunStopsOnContextCancellationWithADailySchedule(t *testing.T) {
+	c := baseCanary()
+	c.IntervalMinutes = 0
+	c.DailyAt = config.DailyAt{"07:00"}
+	r, _, _ := testRunner(t, baseCfg(), c)
+	ctx, cancel := context.WithCancel(context.Background())
+
+	done := make(chan struct{})
+	go func() {
+		r.Run(ctx)
+		close(done)
+	}()
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run did not stop after context cancellation")
+	}
+}
+
+// TestRunReturnsImmediatelyForAnUnusableDailySchedule is the defence in
+// depth config.Validate makes unreachable: a malformed time must not be
+// turned into some other time and then sent on.
+func TestRunReturnsImmediatelyForAnUnusableDailySchedule(t *testing.T) {
+	c := baseCanary()
+	c.IntervalMinutes = 0
+	c.DailyAt = config.DailyAt{"7:00"}
+	r, sp, _ := testRunner(t, baseCfg(), c)
+
+	done := make(chan struct{})
+	go func() {
+		r.Run(context.Background())
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run did not return for a malformed daily_at")
+	}
+	if sp.Len() != 0 {
+		t.Errorf("spool has %d messages, want none sent on an unusable schedule", sp.Len())
+	}
+}

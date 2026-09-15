@@ -119,14 +119,21 @@ max_per_hour = 12
 func TestCanaryRequiresSharedSettingsWhenEnabled(t *testing.T) {
 	bounce := "[bounce]\nnotify = [\"ops@example.at\"]\nsender = \"bounce@example.at\"\nnotify_route = \"m365\"\ndigest_minutes = 15\nmax_per_hour = 12\n"
 	for name, extra := range map[string]string{
-		"no name":               bounce + "[[canary]]\nrecipient = \"ops@example.at\"\nsender = \"canary@example.at\"\nroute = \"m365\"\ninterval_minutes = 1440\n",
-		"invalid recipient":     bounce + "[[canary]]\nname = \"m365-daily\"\nrecipient = \"not-an-address\"\nsender = \"canary@example.at\"\nroute = \"m365\"\ninterval_minutes = 1440\n",
-		"no sender":             bounce + "[[canary]]\nname = \"m365-daily\"\nrecipient = \"ops@example.at\"\nroute = \"m365\"\ninterval_minutes = 1440\n",
-		"invalid sender":        bounce + "[[canary]]\nname = \"m365-daily\"\nrecipient = \"ops@example.at\"\nsender = \"not-an-address\"\nroute = \"m365\"\ninterval_minutes = 1440\n",
-		"no route":              bounce + "[[canary]]\nname = \"m365-daily\"\nrecipient = \"ops@example.at\"\nsender = \"canary@example.at\"\ninterval_minutes = 1440\n",
-		"unknown route":         bounce + "[[canary]]\nname = \"m365-daily\"\nrecipient = \"ops@example.at\"\nsender = \"canary@example.at\"\nroute = \"nope\"\ninterval_minutes = 1440\n",
-		"no interval":           bounce + "[[canary]]\nname = \"m365-daily\"\nrecipient = \"ops@example.at\"\nsender = \"canary@example.at\"\nroute = \"m365\"\ninterval_minutes = 0\n",
-		"bounce not configured": "[[canary]]\nname = \"m365-daily\"\nrecipient = \"ops@example.at\"\nsender = \"canary@example.at\"\nroute = \"m365\"\ninterval_minutes = 1440\n",
+		"no name":                          bounce + "[[canary]]\nrecipient = \"ops@example.at\"\nsender = \"canary@example.at\"\nroute = \"m365\"\ninterval_minutes = 1440\n",
+		"invalid recipient":                bounce + "[[canary]]\nname = \"m365-daily\"\nrecipient = \"not-an-address\"\nsender = \"canary@example.at\"\nroute = \"m365\"\ninterval_minutes = 1440\n",
+		"no sender":                        bounce + "[[canary]]\nname = \"m365-daily\"\nrecipient = \"ops@example.at\"\nroute = \"m365\"\ninterval_minutes = 1440\n",
+		"invalid sender":                   bounce + "[[canary]]\nname = \"m365-daily\"\nrecipient = \"ops@example.at\"\nsender = \"not-an-address\"\nroute = \"m365\"\ninterval_minutes = 1440\n",
+		"no route":                         bounce + "[[canary]]\nname = \"m365-daily\"\nrecipient = \"ops@example.at\"\nsender = \"canary@example.at\"\ninterval_minutes = 1440\n",
+		"unknown route":                    bounce + "[[canary]]\nname = \"m365-daily\"\nrecipient = \"ops@example.at\"\nsender = \"canary@example.at\"\nroute = \"nope\"\ninterval_minutes = 1440\n",
+		"no interval":                      bounce + "[[canary]]\nname = \"m365-daily\"\nrecipient = \"ops@example.at\"\nsender = \"canary@example.at\"\nroute = \"m365\"\ninterval_minutes = 0\n",
+		"no schedule at all":               bounce + "[[canary]]\nname = \"m365-daily\"\nrecipient = \"ops@example.at\"\nsender = \"canary@example.at\"\nroute = \"m365\"\n",
+		"both schedules":                   bounce + "[[canary]]\nname = \"m365-daily\"\nrecipient = \"ops@example.at\"\nsender = \"canary@example.at\"\nroute = \"m365\"\ninterval_minutes = 1440\ndaily_at = \"07:00\"\n",
+		"daily_at without a leading zero":  bounce + "[[canary]]\nname = \"m365-daily\"\nrecipient = \"ops@example.at\"\nsender = \"canary@example.at\"\nroute = \"m365\"\ndaily_at = \"7:00\"\n",
+		"daily_at hour out of range":       bounce + "[[canary]]\nname = \"m365-daily\"\nrecipient = \"ops@example.at\"\nsender = \"canary@example.at\"\nroute = \"m365\"\ndaily_at = \"24:00\"\n",
+		"daily_at minute out of range":     bounce + "[[canary]]\nname = \"m365-daily\"\nrecipient = \"ops@example.at\"\nsender = \"canary@example.at\"\nroute = \"m365\"\ndaily_at = \"07:60\"\n",
+		"one bad time in a daily_at array": bounce + "[[canary]]\nname = \"m365-daily\"\nrecipient = \"ops@example.at\"\nsender = \"canary@example.at\"\nroute = \"m365\"\ndaily_at = [\"07:00\", \"nope\"]\n",
+		"daily_at is not a time string":    bounce + "[[canary]]\nname = \"m365-daily\"\nrecipient = \"ops@example.at\"\nsender = \"canary@example.at\"\nroute = \"m365\"\ndaily_at = 700\n",
+		"bounce not configured":            "[[canary]]\nname = \"m365-daily\"\nrecipient = \"ops@example.at\"\nsender = \"canary@example.at\"\nroute = \"m365\"\ninterval_minutes = 1440\n",
 		"duplicate name": bounce + `[[canary]]
 name = "m365-daily"
 recipient = "ops@example.at"
@@ -590,5 +597,69 @@ func TestBounceAddressesAreValidated(t *testing.T) {
 	good := route + "sender = \"postmaster@example.at\"\nnotify = [\"ops@example.at\"]\n"
 	if _, err := Load(write(t, baseConfig+good)); err != nil {
 		t.Fatalf("a valid bounce configuration was rejected: %v", err)
+	}
+}
+
+// TestCanaryDailyAtAcceptsOneTimeOrSeveral covers both spellings of the
+// fixed-time schedule, because the single-string form exists only so that
+// the common case need not be written as a one-element array: if it ever
+// stopped decoding, every existing config using it would fail to load.
+func TestCanaryDailyAtAcceptsOneTimeOrSeveral(t *testing.T) {
+	bounce := "[bounce]\nnotify = [\"ops@example.at\"]\nsender = \"bounce@example.at\"\nnotify_route = \"m365\"\ndigest_minutes = 15\nmax_per_hour = 12\n"
+	canary := func(daily string) string {
+		return baseConfig + bounce + "[[canary]]\nname = \"m365-daily\"\nrecipient = \"ops@example.at\"\nsender = \"canary@example.at\"\nroute = \"m365\"\ndaily_at = " + daily + "\n"
+	}
+	for name, tc := range map[string]struct {
+		daily string
+		want  []int
+	}{
+		"a single time": {`"07:00"`, []int{7 * 60}},
+		"several times": {`["07:00", "19:30"]`, []int{7 * 60, 19*60 + 30}},
+		"midnight and the last minute of the day": {`["00:00", "23:59"]`, []int{0, 23*60 + 59}},
+		"unsorted and repeated":                   {`["19:30", "07:00", "19:30"]`, []int{7 * 60, 19*60 + 30}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			c, err := Load(write(t, canary(tc.daily)))
+			if err != nil {
+				t.Fatalf("daily_at = %s was rejected: %v", tc.daily, err)
+			}
+			if len(c.Canaries) != 1 {
+				t.Fatalf("got %d canaries, want 1", len(c.Canaries))
+			}
+			if c.Canaries[0].IntervalMinutes != 0 {
+				t.Errorf("interval_minutes = %d, want it left unset", c.Canaries[0].IntervalMinutes)
+			}
+			got, err := c.Canaries[0].DailyAt.Minutes()
+			if err != nil {
+				t.Fatalf("Minutes: %v", err)
+			}
+			if len(got) != len(tc.want) {
+				t.Fatalf("Minutes() = %v, want %v", got, tc.want)
+			}
+			for i := range got {
+				if got[i] != tc.want[i] {
+					t.Fatalf("Minutes() = %v, want %v", got, tc.want)
+				}
+			}
+		})
+	}
+}
+
+// TestParseTimeOfDayRejectsAnythingButHHMM guards the deliberate decision
+// not to use time.Parse, which accepts several spellings that would be a
+// different schedule from the one written down.
+func TestParseTimeOfDayRejectsAnythingButHHMM(t *testing.T) {
+	for _, s := range []string{"", "7:00", "070:0", "0700", "07:0", "07:000", "24:00", "07:60", "07:0a", "+7:00", "07-00", "07:00:00", " 07:00", "07:00 "} {
+		if _, err := parseTimeOfDay(s); err == nil {
+			t.Errorf("parseTimeOfDay(%q) was accepted", s)
+		}
+	}
+	for s, want := range map[string]int{"00:00": 0, "07:00": 420, "23:59": 1439} {
+		got, err := parseTimeOfDay(s)
+		if err != nil {
+			t.Errorf("parseTimeOfDay(%q): %v", s, err)
+		} else if got != want {
+			t.Errorf("parseTimeOfDay(%q) = %d, want %d", s, got, want)
+		}
 	}
 }

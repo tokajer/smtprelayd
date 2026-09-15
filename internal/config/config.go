@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -147,9 +148,11 @@ type Bounce struct {
 	MaxPerHour    int      `toml:"max_per_hour"`
 }
 
-// Canary configures one periodic synthetic test message, sent through Route
+// Canary configures one recurring synthetic test message, sent through Route
 // to Recipient, so an operator notices a working delivery path even without
-// real traffic. Zero or more may be configured, one per route worth
+// real traffic. Its schedule is either IntervalMinutes (every n minutes
+// from service start) or DailyAt (at fixed times of day, UTC), never both.
+// Zero or more may be configured, one per route worth
 // watching independently; Name distinguishes them in the bounce digest
 // (which groups by it, same as a real client) and as a metrics label, and
 // must be unique both among canaries and against every configured client
@@ -159,11 +162,102 @@ type Bounce struct {
 // configuring any canary at all also requires bounce.notify to be
 // configured — otherwise a failing canary would have nowhere to report to.
 type Canary struct {
-	Name            string `toml:"name"`
-	Sender          string `toml:"sender"`
-	Recipient       string `toml:"recipient"`
-	Route           string `toml:"route"`
-	IntervalMinutes int    `toml:"interval_minutes"`
+	Name            string  `toml:"name"`
+	Sender          string  `toml:"sender"`
+	Recipient       string  `toml:"recipient"`
+	Route           string  `toml:"route"`
+	IntervalMinutes int     `toml:"interval_minutes"`
+	DailyAt         DailyAt `toml:"daily_at"`
+}
+
+// DailyAt is a canary's fixed-time schedule: one or more times of day, in
+// UTC, as the alternative to IntervalMinutes. Exactly one of the two is
+// configured; Validate refuses an entry that sets both or neither, because
+// a canary whose schedule is stated twice has no single answer to when it
+// is overdue, which is the question every alert on it asks.
+//
+// It decodes itself rather than being a plain []string so that a single
+// time may be written as "07:00" instead of ["07:00"]: once a day is the
+// common case and a one-element array is noise an operator would have to be
+// told about. The strings are kept verbatim and turned into a schedule by
+// Minutes, so a malformed time is one more collected Validate error naming
+// the canary it came from instead of a decode failure that aborts the file
+// without saying which entry was wrong.
+//
+// The times are UTC and not service.timezone deliberately: service.timezone
+// only ever changed how a timestamp is displayed, while this one decides
+// when mail is sent, and a zone with daylight saving has one day a year
+// with no 02:30 in it and one with two.
+type DailyAt []string
+
+// UnmarshalTOML accepts a single time string or an array of them. A value
+// of any other shape is a decode error: unlike a malformed time it cannot
+// be reported per canary later, because nothing would have been stored.
+func (d *DailyAt) UnmarshalTOML(v any) error {
+	switch t := v.(type) {
+	case string:
+		*d = DailyAt{t}
+	case []any:
+		out := make(DailyAt, 0, len(t))
+		for _, e := range t {
+			s, ok := e.(string)
+			if !ok {
+				return fmt.Errorf("daily_at must be a time string or an array of time strings, found %T in the array", e)
+			}
+			out = append(out, s)
+		}
+		*d = out
+	default:
+		return fmt.Errorf("daily_at must be a time string or an array of time strings, found %T", v)
+	}
+	return nil
+}
+
+// Minutes resolves the configured times to minutes since midnight UTC,
+// sorted ascending and de-duplicated: sorted because the schedule is walked
+// in the order the day runs, de-duplicated because the same time written
+// twice describes one send, not two.
+func (d DailyAt) Minutes() ([]int, error) {
+	seen := make(map[int]bool, len(d))
+	out := make([]int, 0, len(d))
+	for _, s := range d {
+		m, err := parseTimeOfDay(s)
+		if err != nil {
+			return nil, err
+		}
+		if seen[m] {
+			continue
+		}
+		seen[m] = true
+		out = append(out, m)
+	}
+	sort.Ints(out)
+	return out, nil
+}
+
+// parseTimeOfDay accepts exactly two digits, a colon and two digits on a
+// 24-hour clock. time.Parse would additionally accept "7:00" and a "24:00"
+// that silently rolls into the next day, both of which are a schedule other
+// than the one written down.
+func parseTimeOfDay(s string) (int, error) {
+	malformed := fmt.Errorf("%q is not a time of day in 24-hour HH:MM form", s)
+	if len(s) != 5 || s[2] != ':' || !digits(s[:2]) || !digits(s[3:]) {
+		return 0, malformed
+	}
+	h, m := int(s[0]-'0')*10+int(s[1]-'0'), int(s[3]-'0')*10+int(s[4]-'0')
+	if h > 23 || m > 59 {
+		return 0, malformed
+	}
+	return h*60 + m, nil
+}
+
+func digits(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 type Web struct {

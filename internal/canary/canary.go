@@ -21,11 +21,12 @@ import (
 // record, so the two cannot disagree about what was sent.
 const contentType = "text/plain; charset=utf-8"
 
-// Runner enqueues one canary's message every canary.interval_minutes. One
-// Runner exists per configured [[canary]] entry, each on its own ticker, so
-// entries with different intervals or routes do not interfere with one
-// another. Delivery, retry and permanent-failure handling are deliberately
-// not this package's concern: the message is enqueued exactly like any
+// Runner enqueues one canary's message on that canary's schedule, which is
+// either every canary.interval_minutes or at canary.daily_at's fixed times
+// of day in UTC. One Runner exists per configured [[canary]] entry, each on
+// its own timer, so entries with different schedules or routes do not
+// interfere with one another. Delivery, retry and permanent-failure handling
+// are deliberately not this package's concern: the message is enqueued like any
 // other and left for the already-running delivery.Manager to carry, so a
 // stuck route delays or fails the canary exactly as it would any real
 // message, and a permanent failure is picked up by the bounce notifier's
@@ -47,13 +48,28 @@ func New(cfg *config.Config, c config.Canary, sp *spool.Spool, st *store.Store, 
 	return &Runner{cfg: cfg, canary: c, spool: sp, store: st, log: log.With("component", "canary", "name", c.Name)}
 }
 
-// Run enqueues a canary message every canary.interval_minutes until ctx is
-// cancelled. It returns immediately for a zero or negative interval, which
-// config.Validate already refuses for any configured entry — this is
-// defence in depth against a Runner ever being started for one that is not,
-// not a path expected to be reached, the same shape bounce.Notifier.Run
-// uses for its own interval.
+// maxDailyWait bounds one step of the wait for a fixed-time schedule. See
+// runDaily for why the wait is taken in steps at all.
+const maxDailyWait = time.Minute
+
+// Run enqueues a canary message on the configured schedule until ctx is
+// cancelled. It returns immediately for an entry with no usable schedule at
+// all, which config.Validate already refuses — this is defence in depth
+// against a Runner ever being started for one that is not, not a path
+// expected to be reached, the same shape bounce.Notifier.Run uses for its
+// own interval.
 func (r *Runner) Run(ctx context.Context) {
+	if len(r.canary.DailyAt) > 0 {
+		at, err := r.canary.DailyAt.Minutes()
+		if err != nil {
+			// Same defence in depth: sending on a schedule nobody wrote
+			// down would be worse than the operator noticing this line.
+			r.log.Error("canary has an unusable daily_at schedule, not starting it", "error", err)
+			return
+		}
+		r.runDaily(ctx, at)
+		return
+	}
 	interval := time.Duration(r.canary.IntervalMinutes) * time.Minute
 	if interval <= 0 {
 		return
@@ -68,6 +84,67 @@ func (r *Runner) Run(ctx context.Context) {
 			if err := r.send(time.Now()); err != nil {
 				r.log.Error("sending canary message failed", "error", err)
 			}
+		}
+	}
+}
+
+// runDaily sends at each of at's times of day, in UTC, until ctx is
+// cancelled. at is minutes since midnight, sorted ascending and non-empty.
+//
+// The wait is recomputed from the wall clock in steps of at most
+// maxDailyWait rather than armed once for up to 24 hours, because a Go
+// timer counts on the monotonic clock: that clock stops while the machine
+// is suspended and does not move when NTP steps the wall clock, so a single
+// long timer would miss 07:00 by however far either event moved the day.
+// Stepping bounds that to one step's worth, and a scheduled time that has
+// already passed once the machine is awake again sends once, late, instead
+// of being skipped silently — a late canary is a signal, a missing one
+// looks exactly like the failure the canary exists to detect.
+func (r *Runner) runDaily(ctx context.Context, at []int) {
+	for {
+		next := nextDaily(time.Now(), at)
+		r.log.Info("canary scheduled", "next", next.Format(time.RFC3339))
+		if !waitUntil(ctx, next) {
+			return
+		}
+		if err := r.send(time.Now()); err != nil {
+			r.log.Error("sending canary message failed", "error", err)
+		}
+	}
+}
+
+// nextDaily returns the first scheduled instant strictly after now. Strictly
+// after, so that the send which has just happened cannot be selected again
+// and fire a second time within the same minute.
+func nextDaily(now time.Time, at []int) time.Time {
+	u := now.UTC()
+	midnight := time.Date(u.Year(), u.Month(), u.Day(), 0, 0, 0, 0, time.UTC)
+	for _, m := range at {
+		if t := midnight.Add(time.Duration(m) * time.Minute); t.After(u) {
+			return t
+		}
+	}
+	return midnight.AddDate(0, 0, 1).Add(time.Duration(at[0]) * time.Minute)
+}
+
+// waitUntil blocks until deadline has passed, reporting false if ctx was
+// cancelled first. Cancellation is honoured within one select, not one
+// step: a service stop must not wait out a maxDailyWait.
+func waitUntil(ctx context.Context, deadline time.Time) bool {
+	for {
+		d := time.Until(deadline)
+		if d <= 0 {
+			return true
+		}
+		if d > maxDailyWait {
+			d = maxDailyWait
+		}
+		t := time.NewTimer(d)
+		select {
+		case <-ctx.Done():
+			t.Stop()
+			return false
+		case <-t.C:
 		}
 	}
 }

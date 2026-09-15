@@ -201,12 +201,18 @@ max_per_hour    = 12                       # cap, excess is recorded but not mai
 # must be configured whenever any canary is. Also visible in /metrics,
 # labeled by name: smtprelayd_canary_last_delivery_time (a gauge; alert if
 # it goes stale) and smtprelayd_canary_failures_total (a counter).
+# Exactly one schedule per entry: either interval_minutes (every n minutes,
+# counted from service start) or daily_at (fixed times of day). daily_at is
+# always UTC -- service.timezone only changes how timestamps are displayed --
+# and takes either one "HH:MM" or an array of them.
 [[canary]]
 name              = "m365-daily"           # must be unique, also the bounce-digest grouping key
 recipient         = "ops@example.at"
 sender            = "canary@example.at"
 route             = "m365"
-interval_minutes  = 1440                   # 1440 = daily
+daily_at          = "07:00"                # every day at 07:00 UTC
+# daily_at        = ["07:00", "19:30"]     # or several times a day
+# interval_minutes = 1440                  # or every n minutes instead; not both
 
 # ---------------------------------------------------------------------------
 # Dashboard and metrics

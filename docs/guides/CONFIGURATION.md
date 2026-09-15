@@ -226,18 +226,39 @@ name             = "m365-daily"       # unique; also the bounce-digest grouping 
 recipient        = "ops@example.at"
 sender           = "canary@example.at"
 route            = "m365"
-interval_minutes = 1440               # 1440 = daily
+daily_at         = "07:00"            # every day at 07:00 UTC
+# daily_at       = ["07:00", "19:30"] # or several fixed times a day
+# interval_minutes = 1440             # or every n minutes instead -- never both
 ```
 A periodic synthetic message the relay composes and sends itself, so an
 operator (or a monitoring system) notices a working delivery path even
 without real traffic. Zero or more `[[canary]]` blocks may be configured —
 one per route worth watching independently, each with its own name,
-recipient, sender and interval; no block at all disables the feature
+recipient, sender and schedule; no block at all disables the feature
 entirely. `name` must be unique, both among canaries and against every
 configured `[[client]]` name (section 2): it is the same grouping key the
 bounce digest already uses, so a collision would silently route a canary's
 failures to that client's own `[client.bounce] notify` override instead of
 the global list.
+
+**The schedule is exactly one of `interval_minutes` or `daily_at`**; setting
+both, or neither, is a startup error. `interval_minutes` sends every n
+minutes counted from service start, so a restart shifts it. `daily_at` sends
+at fixed times of day and a restart does not move them — write one time as
+`"07:00"` or several as `["07:00", "19:30"]`, always two digits, a colon and
+two digits on a 24-hour clock (`"7:00"` is refused rather than guessed at).
+
+`daily_at` is **UTC**, deliberately and regardless of `service.timezone`:
+that setting only ever changed how a timestamp is *displayed*, while this one
+decides when mail is actually sent, and a zone with daylight saving has one
+day a year with no 02:30 in it and another with two. In `Europe/Vienna`,
+`"07:00"` UTC is 09:00 local in summer and 08:00 local in winter.
+
+A scheduled time the machine slept through (suspend, or a large NTP step)
+sends once, late, as soon as the service notices — a late canary is a signal,
+while a silently skipped one looks exactly like the failure the canary exists
+to detect. The next scheduled time is written to the log (`canary scheduled`)
+after every send.
 
 A failed canary is reported through `[bounce]` above rather than a second
 alerting mechanism, so **`[bounce].notify` must be configured whenever any
@@ -250,8 +271,9 @@ Also exposed on `/metrics` (section 8) for automated monitoring rather than
 only a human noticing a missing email, labeled by `name`:
 - `smtprelayd_canary_last_delivery_time{name="..."}` — a gauge, the Unix
   timestamp of that canary's last successful delivery. Absent until its
-  first one. The useful alert is "this has not advanced in longer than
-  `interval_minutes` plus a margin", which catches a route silently failing
+  first one. The useful alert is "this has not advanced in longer than the
+  configured schedule's period plus a margin" — `interval_minutes`, or the
+  longest gap between two `daily_at` times — which catches a route silently failing
   even while the canary keeps being queued.
 - `smtprelayd_canary_failures_total{name="..."}` — a counter, incremented on
   any failed or deferred delivery attempt for that canary.
