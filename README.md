@@ -44,6 +44,7 @@ build takes.
 smtprelayd -config /etc/smtprelayd/smtprelayd.toml check      # validate and exit
 smtprelayd -config /etc/smtprelayd/smtprelayd.toml run        # foreground
 smtprelayd -config /etc/smtprelayd/smtprelayd.toml selftest   # open relay probe
+smtprelayd -config /etc/smtprelayd/smtprelayd.toml gen-cert   # self-signed listener cert
 ```
 
 `check` refuses to pass a configuration that would relay for an unmatched
@@ -54,7 +55,22 @@ a privileged port that the invoking user may not bind, is reported as a note
 and left unverified — the service itself binds those through
 `CAP_NET_BIND_SERVICE`. `selftest` connects to the running listeners and fails
 loudly if a relay attempt from an unlisted address succeeds. Run it after every
-configuration change.
+configuration change. Because it dials from this host, a configuration that
+allowlists loopback gets a `note:` rather than a failure, saying the
+default-deny path was not exercised.
+
+The relay also mails the `bounce.notify` contacts thirty days before its TLS
+certificate or a Microsoft 365 client secret expires, and daily after that
+until it is renewed — the same contacts and route a delivery-failure digest
+uses, with nothing extra to configure.
+
+`gen-cert` writes a self-signed certificate and key to the `[tls]` paths the
+configuration already names, for an internal listener with no CA behind it. It
+refuses to overwrite either file without `-force`, and it runs on a
+configuration that does not validate yet, since a missing certificate is
+precisely what stops one validating. Inbound only: outbound delivery verifies
+against the system roots regardless. See
+[docs/guides/CONFIGURATION.md](docs/guides/CONFIGURATION.md) for the caveats.
 
 On Windows, `smtprelayd install` / `uninstall` / `start` / `stop` (elevated
 prompt required) register the service under the SCM as

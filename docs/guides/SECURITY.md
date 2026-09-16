@@ -73,8 +73,11 @@ The single most damaging failure mode gets the strictest handling.
   view, and never serialised into history or metrics.
 - OAuth access tokens live in memory only. They are not persisted, not cached
   to disk and not exposed through the API. Only the token's age is observable.
-- Client secret expiry is read from configuration and surfaced as a metric so
-  it can be alerted on before it lapses and delivery stops.
+- Client secret expiry is read from configuration and mailed to the
+  `bounce.notify` contacts thirty days ahead, so it can be renewed before it
+  lapses and delivery stops (`internal/expiry`). It is also logged once at
+  startup. It is **not** a metric, despite an earlier version of this line:
+  nothing in `internal/metrics` exposes it.
 - **API tokens are stored as hashes.** The configuration holds a SHA-256 hex
   digest, not the token. `smtprelayd token new` generates a 256-bit random
   token, prints it once and emits the digest to paste into the configuration.
@@ -151,7 +154,11 @@ attacker-influenced values and writes them into a message.
 - SASL authentication on inbound listeners is offered only after TLS is
   established. `PLAIN` and `LOGIN` are never advertised on a cleartext
   connection.
-- Certificate expiry for the relay's own certificate is exposed as a metric.
+- Certificate expiry for the relay's own certificate, and the expiry of any
+  Microsoft 365 client secret, are mailed to the `bounce.notify` contacts
+  thirty days ahead and daily thereafter, including once the date has passed
+  (`internal/expiry`). A metric for the same values does not exist yet, so
+  with no notification contact configured the expiry is only logged.
 
 ## 6. Process privileges and file permissions
 

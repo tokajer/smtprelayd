@@ -172,11 +172,6 @@ func (n *Notifier) send(client string, recipients, ids []string, now time.Time) 
 	subject := fmt.Sprintf("[smtprelayd] %d delivery failure(s) for %s", len(ids), client)
 
 	var body strings.Builder
-	fmt.Fprintf(&body, "From: %s\r\n", n.cfg.Bounce.Sender)
-	fmt.Fprintf(&body, "To: %s\r\n", strings.Join(recipients, ", "))
-	fmt.Fprintf(&body, "Subject: %s\r\n", subject)
-	fmt.Fprintf(&body, "Date: %s\r\n", now.Format(time.RFC1123Z))
-	body.WriteString("Content-Type: " + digestContentType + "\r\n\r\n")
 	fmt.Fprintf(&body, "%d message(s) from client %q could not be delivered:\r\n", len(ids), client)
 
 	for _, id := range ids {
@@ -199,10 +194,67 @@ func (n *Notifier) send(client string, recipients, ids []string, now time.Time) 
 			id, msg.EnvelopeFrom, strings.Join(msg.Recipients, ", "), subj, code, resp)
 	}
 
+	queueID, err := n.enqueue(client, recipients, subject, body.String(), now)
+	if err != nil {
+		return err
+	}
+	n.log.Info("bounce digest queued", "client", client, "queue_id", queueID, "failures", len(ids))
+	return nil
+}
+
+// Notify enqueues one operator notification through this same channel: the
+// configured bounce.sender, the bounce.notify recipients and the
+// bounce.notify_route, carrying the loop-prevention properties a digest has.
+// It exists so that anything with something to tell the operator reuses the
+// contact details and the delivery path already configured for bounces,
+// rather than growing a second notion of "who to mail".
+//
+// source names what produced the notification. It is what recipientsFor
+// looks up, so a source sharing a client's name would reach that client's
+// bounce.notify override -- callers pass something that cannot collide.
+//
+// Unlike a digest this is not subject to bounce.max_per_hour. That cap
+// exists so a delivery-failure storm cannot become a mail storm; a caller
+// here is expected to rate-limit itself to the occasional message, and
+// dropping a warning about something expiring would defeat the point of
+// sending it.
+//
+// Returns nil without sending when no recipient is configured at all, which
+// is how notifications are switched off.
+func (n *Notifier) Notify(source, subject, bodyText string, now time.Time) error {
+	recipients := n.recipientsFor(source)
+	if len(recipients) == 0 {
+		return nil
+	}
+	queueID, err := n.enqueue(source, recipients, subject, bodyText, now)
+	if err != nil {
+		return err
+	}
+	n.log.Info("operator notification queued", "source", source, "queue_id", queueID, "subject", subject)
+	return nil
+}
+
+// enqueue composes the header block around bodyText and spools the result.
+//
+// The three loop-prevention properties live here so that every caller gets
+// them: an empty envelope sender (net/smtp renders Mail("") as
+// "MAIL FROM:<>", the standard null reverse path), the Notification flag (so
+// the delivery manager never treats its own failure as another bounce to
+// notify about), and never having passed through the listener at all, which
+// is what keeps it out of sender rewriting.
+func (n *Notifier) enqueue(source string, recipients []string, subject, bodyText string, now time.Time) (string, error) {
+	var msg strings.Builder
+	fmt.Fprintf(&msg, "From: %s\r\n", n.cfg.Bounce.Sender)
+	fmt.Fprintf(&msg, "To: %s\r\n", strings.Join(recipients, ", "))
+	fmt.Fprintf(&msg, "Subject: %s\r\n", subject)
+	fmt.Fprintf(&msg, "Date: %s\r\n", now.Format(time.RFC1123Z))
+	msg.WriteString("Content-Type: " + digestContentType + "\r\n\r\n")
+	msg.WriteString(bodyText)
+
 	env := spool.Envelope{
 		From:         "",
 		To:           recipients,
-		Client:       client,
+		Client:       source,
 		Route:        n.cfg.Bounce.NotifyRoute,
 		Listener:     "bounce-notifier",
 		RemoteAddr:   "internal",
@@ -210,16 +262,16 @@ func (n *Notifier) send(client string, recipients, ids []string, now time.Time) 
 		Notification: true,
 	}
 	lifetime := time.Duration(n.cfg.Queue.MaxLifetimeHours) * time.Hour
-	data := body.String()
+	data := msg.String()
 	queueID, err := n.spool.Enqueue(env, strings.NewReader(data), 0, lifetime)
 	if err != nil {
-		return fmt.Errorf("bounce: enqueue digest: %w", err)
+		return "", fmt.Errorf("bounce: enqueue notification: %w", err)
 	}
 
 	recipientsJSON, _ := json.Marshal(recipients)
 	if rerr := n.store.RecordMessage(store.MessageRecord{
 		QueueID:     queueID.String(),
-		Client:      client,
+		Client:      source,
 		Route:       n.cfg.Bounce.NotifyRoute,
 		Recipients:  string(recipientsJSON),
 		Subject:     subject,
@@ -231,9 +283,7 @@ func (n *Notifier) send(client string, recipients, ids []string, now time.Time) 
 		ReceivedAt:  now,
 		ExpiresAt:   now.Add(lifetime),
 	}); rerr != nil {
-		n.log.Warn("recording digest in history failed", "queue_id", queueID.String(), "error", rerr)
+		n.log.Warn("recording notification in history failed", "queue_id", queueID.String(), "error", rerr)
 	}
-
-	n.log.Info("bounce digest queued", "client", client, "queue_id", queueID.String(), "failures", len(ids))
-	return nil
+	return queueID.String(), nil
 }

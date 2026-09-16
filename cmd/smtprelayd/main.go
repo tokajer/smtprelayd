@@ -29,6 +29,7 @@ import (
 	"github.com/tokajer/smtprelayd/internal/canary"
 	"github.com/tokajer/smtprelayd/internal/config"
 	"github.com/tokajer/smtprelayd/internal/delivery"
+	"github.com/tokajer/smtprelayd/internal/expiry"
 	"github.com/tokajer/smtprelayd/internal/listener"
 	"github.com/tokajer/smtprelayd/internal/logging"
 	"github.com/tokajer/smtprelayd/internal/metrics"
@@ -43,12 +44,16 @@ var version = "dev"
 
 const usage = `smtprelayd %s — Open Source SMTP Relay for Windows & Linux
 
-usage: smtprelayd [-config <file>] [-out <file>] <command>
+usage: smtprelayd [-config <file>] [-out <file>] [-force] <command>
 
 commands:
   run        start the relay in the foreground (default)
   check      validate the configuration and its bind addresses, then exit
   selftest   attempt to relay through the running instance and fail if it works
+  gen-cert   write a self-signed certificate and key to the paths [tls]
+             cert_file and key_file already name, for an internal listener
+             with no CA behind it; refuses to overwrite either file unless
+             -force is given (flag must come before the command, like -config)
   version    print the version and exit
 
 Windows only, requires an elevated prompt:
@@ -77,6 +82,7 @@ func main() {
 	configPath := fs.String("config", defaultConfigPath(), "path to the configuration file")
 	console := fs.Bool("console", false, "also log to stderr when a log file is configured")
 	outPath := fs.String("out", "", "output file for protect-secret (Windows only)")
+	force := fs.Bool("force", false, "allow gen-cert to overwrite an existing certificate and key")
 	fs.Usage = func() { fmt.Fprintf(os.Stderr, usage, version) }
 	_ = fs.Parse(os.Args[1:])
 
@@ -106,13 +112,13 @@ func main() {
 		return
 	}
 
-	if err := run(cmd, *configPath, *console, *outPath); err != nil {
+	if err := run(cmd, *configPath, *console, *outPath, *force); err != nil {
 		fmt.Fprintln(os.Stderr, "smtprelayd:", err)
 		os.Exit(1)
 	}
 }
 
-func run(cmd, configPath string, console bool, outPath string) error {
+func run(cmd, configPath string, console bool, outPath string, force bool) error {
 	switch cmd {
 	case "version":
 		fmt.Println("smtprelayd", version)
@@ -126,6 +132,9 @@ func run(cmd, configPath string, console bool, outPath string) error {
 
 	case "protect-secret":
 		return protectSecret(outPath)
+
+	case "gen-cert":
+		return genCert(configPath, force, os.Stdout)
 
 	case "check":
 		cfg, err := config.Load(configPath)
@@ -292,6 +301,11 @@ func serve(ctx context.Context, configPath string, console bool, ready chan<- er
 		r := canary.New(cfg, c, sp, st, log)
 		bg.Go(func() { r.Run(ctx) })
 	}
+	// Started unconditionally: it reports through the notifier, which
+	// declines to send when bounce.notify is empty, so an unconfigured
+	// contact costs one idle ticker rather than needing a switch of its own.
+	expiryWatcher := expiry.New(cfg, dm.Notifier(), log)
+	bg.Go(func() { expiryWatcher.Run(ctx) })
 
 	if cfg.Metrics.Enabled {
 		bg.Go(func() {

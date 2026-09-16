@@ -247,3 +247,97 @@ func TestRunStopsOnContextCancellation(t *testing.T) {
 		t.Fatal("Run did not stop after context cancellation")
 	}
 }
+
+// Notify is the channel anything with news for the operator reuses, so it
+// must carry the same loop-prevention properties a digest does: without the
+// null reverse path and the Notification flag, a warning that failed to
+// deliver would generate a bounce, which would generate another warning.
+func TestNotifyEnqueuesWithLoopPrevention(t *testing.T) {
+	n, sp, _ := testNotifier(t, baseCfg())
+	now := time.Now()
+
+	if err := n.Notify("expiry-watch", "[smtprelayd] something expires", "body text", now); err != nil {
+		t.Fatal(err)
+	}
+
+	meta, ok := sp.Claim(time.Now().Add(time.Minute))
+	if !ok {
+		t.Fatal("Notify queued nothing")
+	}
+	if meta.Envelope.From != "" {
+		t.Errorf("envelope sender = %q, want the null reverse path", meta.Envelope.From)
+	}
+	if !meta.Envelope.Notification {
+		t.Error("Notification must be set, or the delivery manager treats its own failure as a new bounce")
+	}
+	if meta.Envelope.Route != "m365" {
+		t.Errorf("route = %q, want bounce.notify_route", meta.Envelope.Route)
+	}
+	if len(meta.Envelope.To) != 1 || meta.Envelope.To[0] != "ops@example.at" {
+		t.Errorf("recipients = %v, want the global bounce.notify", meta.Envelope.To)
+	}
+
+	f, err := sp.Open(meta.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	raw, err := io.ReadAll(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := string(raw)
+	for _, want := range []string{
+		"From: bounce@example.at\r\n",
+		"To: ops@example.at\r\n",
+		"Subject: [smtprelayd] something expires\r\n",
+		"\r\n\r\nbody text",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("message is missing %q:\n%s", want, body)
+		}
+	}
+}
+
+// No contact configured is how notifications are switched off, and must be a
+// quiet no-op rather than an error the caller has to special-case.
+func TestNotifyWithoutRecipientsSendsNothing(t *testing.T) {
+	cfg := baseCfg()
+	cfg.Bounce.Notify = nil
+	n, sp, _ := testNotifier(t, cfg)
+
+	if err := n.Notify("expiry-watch", "subject", "body", time.Now()); err != nil {
+		t.Fatalf("Notify with no recipients should be a no-op, got %v", err)
+	}
+	if _, ok := sp.Claim(time.Now()); ok {
+		t.Error("Notify queued a message with nowhere to send it")
+	}
+}
+
+// A digest must keep working unchanged now that it shares enqueue with
+// Notify: the header block is the part that moved.
+func TestDigestStillRendersItsHeaderBlock(t *testing.T) {
+	n, sp, st := testNotifier(t, baseCfg())
+	now := time.Now()
+	recordFailed(t, st, "0000000000000000000000000000000a", "printers")
+	n.RecordFail("printers", "0000000000000000000000000000000a")
+	n.dispatch(now)
+
+	meta, ok := sp.Claim(time.Now().Add(time.Minute))
+	if !ok {
+		t.Fatal("dispatch queued nothing")
+	}
+	f, err := sp.Open(meta.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	raw, _ := io.ReadAll(f)
+	body := string(raw)
+	if !strings.HasPrefix(body, "From: bounce@example.at\r\nTo: ops@example.at\r\n") {
+		t.Errorf("digest header block is wrong:\n%s", body)
+	}
+	if !strings.Contains(body, "could not be delivered") {
+		t.Errorf("digest body is missing:\n%s", body)
+	}
+}

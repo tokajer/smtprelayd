@@ -64,8 +64,9 @@ key_file  = "/etc/smtprelayd/tls/relay.key"   # unencrypted PEM private key
 Steps:
 
 1. Obtain a certificate for the relay's hostname from whatever CA the network
-   already trusts (internal PKI, ACME, or a purchased cert) — smtprelayd does
-   not issue or renew certificates itself.
+   already trusts (internal PKI, ACME, or a purchased cert). smtprelayd never
+   renews certificates, and it issues one only when you ask it to, with
+   `gen-cert` below.
 2. Place `cert_file` and `key_file` on disk. The loader does not enforce
    permissions on these two paths the way it does for `file:` secrets, but
    the private key deserves the same treatment: on Linux, owned by the
@@ -79,6 +80,79 @@ Steps:
 
 The same `[tls]` pair is reused for a metrics listener bound beyond loopback
 (section 8).
+
+### Self-signed certificates: `gen-cert`
+
+For an internal listener with no CA behind it, the relay can issue its own:
+
+```
+smtprelayd -config /etc/smtprelayd/smtprelayd.toml gen-cert
+```
+
+It writes to the `cert_file` and `key_file` paths the configuration already
+names — it does not invent paths, so set those two first. The key is written
+mode `0600` and its directory `0700`, both created if absent.
+
+Deliberately, it **runs on a configuration that does not validate yet**. A
+listener with `tls` set and no certificate on disk is exactly what `check`
+refuses, so requiring a valid configuration first would make the command
+useless for its own purpose. It prints the validation error as a warning,
+writes the two files, and leaves any other fault for `check` to report
+afterwards.
+
+It **refuses to overwrite** an existing certificate or key. Pass `-force`
+only when you are certain: these are the paths a CA-issued key lives at, and
+overwriting one is not recoverable.
+
+The subject alternative names are derived from the configuration —
+`service.hostname`, every non-wildcard listener bind address, plus
+`localhost`, `127.0.0.1` and `::1` — and printed so you can check them. A
+wildcard bind (`0.0.0.0`, `::`) contributes nothing, since it is not a name
+any client asks for.
+
+Two limits worth knowing before you rely on it:
+
+- The certificate is valid for **825 days**. You are warned by mail thirty
+  days ahead if `bounce.notify` is configured — see *Expiry warnings* below —
+  but there is still no expiry *metric*, so a host with no notification
+  contact gets no notice at all beyond the date printed at generation.
+- It is signed by no CA. A device that verifies certificates must be given
+  this one explicitly, or be configured not to verify. Devices that check
+  nothing — most printers and MFPs — need no further action.
+
+### Expiry warnings
+
+Two things in this service expire on a date nobody is watching: the
+listener's TLS certificate, and a Microsoft 365 client secret
+(`oauth2.secret_expires`). Both failures are total — an expired certificate
+refuses every TLS submission, an expired secret fails every delivery on that
+route — so the relay mails about them.
+
+There is nothing to configure. The warning goes to the **`bounce.notify`**
+contacts, from `bounce.sender`, over `bounce.notify_route` — the same
+contact details a delivery-failure digest uses. With no `bounce.notify` set,
+nothing is sent and the expiry appears only in the log.
+
+- The window is **30 days**, matching the threshold the startup log already
+  used for client secrets.
+- One mail per day at most while anything is inside the window, batching
+  every affected item into a single message rather than one mail each.
+- An expiry that has **already passed** is still reported, with `ACTION
+  REQUIRED` in the subject — that is the case you most need to hear about.
+- The check runs hourly and immediately at startup, so restarting a service
+  whose certificate expires next week tells you now.
+- A certificate that cannot be read is logged, not mailed: the listener would
+  not have started on one, so it means the file changed under a running
+  service.
+
+Unlike a bounce digest, these are not subject to `bounce.max_per_hour`. That
+cap exists so a delivery-failure storm cannot become a mail storm; an expiry
+warning is already limited to one a day and dropping it would defeat the
+point of sending it.
+
+This affects inbound listeners only. Outbound delivery to the smarthost
+verifies against the system roots as always, and no option anywhere changes
+that.
 
 ## 2. Clients — who may relay, and sender rewriting
 
