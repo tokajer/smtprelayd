@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/tokajer/smtprelayd/internal/config"
+	"github.com/tokajer/smtprelayd/internal/expiry"
 	"github.com/tokajer/smtprelayd/internal/httpx"
 	"github.com/tokajer/smtprelayd/internal/metrics"
 	"github.com/tokajer/smtprelayd/internal/spool"
@@ -833,19 +834,62 @@ func bulkFlash(q url.Values) *flash {
 	return &flash{Level: level, Text: text}
 }
 
+// expiryRow is one deadline as the configuration page renders it. The state
+// drives the pill colour and is derived here rather than in the template, so
+// the threshold stays the one internal/expiry actually mails on.
+type expiryRow struct {
+	What    string
+	Detail  string
+	Expires time.Time
+	Days    int
+	State   string // ok, soon, expired
+}
+
 func (s *Server) handleRoutes(w http.ResponseWriter, r *http.Request) {
 	s.render(w, "routes", s.base("routes", r))
 }
 
+// expiryRows renders what is going to stop working. It lists every deadline,
+// not only the ones inside the warning window: an operator checking whether
+// the certificate is healthy needs to see it while it still is.
+func (s *Server) expiryRows(now time.Time) (rows []expiryRow, certErr string) {
+	items, err := expiry.Items(s.cfg)
+	if err != nil {
+		certErr = err.Error()
+	}
+	window := expiry.WarnWindow(s.cfg)
+	for _, it := range items {
+		row := expiryRow{
+			What: it.What, Detail: it.Detail, Expires: it.Expires,
+			Days: expiry.DaysUntil(it.Expires, now), State: "ok",
+		}
+		switch {
+		case !it.Expires.After(now):
+			row.State = "expired"
+		case window > 0 && it.Expires.Before(now.Add(window)):
+			row.State = "soon"
+		}
+		rows = append(rows, row)
+	}
+	return rows, certErr
+}
+
 func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
+	rows, certErr := s.expiryRows(time.Now())
 	data := struct {
 		baseData
+		Expiry        []expiryRow
+		ExpiryError   string
+		WarnDays      int
 		ListenersText string
 		ClientsText   string
 		RoutesText    string
 		BounceText    string
 	}{
 		baseData:      s.base("config", r),
+		Expiry:        rows,
+		ExpiryError:   certErr,
+		WarnDays:      s.cfg.Expiry.WarnDays,
 		ListenersText: formatListeners(s.cfg.Listeners),
 		ClientsText:   formatClients(s.cfg.Clients),
 		RoutesText:    formatRoutes(s.cfg.Routes),

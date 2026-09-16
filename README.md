@@ -40,11 +40,27 @@ build takes.
 
 ## Run
 
+First run, in order. Step 2 is only needed when a listener uses TLS and you
+have no certificate from a CA:
+
 ```sh
-smtprelayd -config /etc/smtprelayd/smtprelayd.toml check      # validate and exit
-smtprelayd -config /etc/smtprelayd/smtprelayd.toml run        # foreground
-smtprelayd -config /etc/smtprelayd/smtprelayd.toml selftest   # open relay probe
-smtprelayd -config /etc/smtprelayd/smtprelayd.toml gen-cert   # self-signed listener cert
+CFG=/etc/smtprelayd/smtprelayd.toml     # %ProgramData%\SMTPRelayd\smtprelayd.toml on Windows
+
+# 1. edit the configuration (copy the shipped .example first)
+# 2. generate a self-signed certificate for the [tls] paths it names
+smtprelayd -config $CFG gen-cert
+# 3. validate
+smtprelayd -config $CFG check
+# 4. start: systemctl enable --now smtprelayd   /   Start-Service smtprelayd
+# 5. prove it is not an open relay
+smtprelayd -config $CFG selftest
+```
+
+Afterwards:
+
+```sh
+smtprelayd -config $CFG run        # foreground, for debugging
+smtprelayd -config $CFG version
 ```
 
 `check` refuses to pass a configuration that would relay for an unmatched
@@ -66,10 +82,11 @@ uses, with nothing extra to configure.
 
 `gen-cert` writes a self-signed certificate and key to the `[tls]` paths the
 configuration already names, for an internal listener with no CA behind it. It
-refuses to overwrite either file without `-force`, and it runs on a
-configuration that does not validate yet, since a missing certificate is
-precisely what stops one validating. Inbound only: outbound delivery verifies
-against the system roots regardless. See
+sets the group and modes the service account needs, refuses to overwrite
+either file without `-force`, and runs on a configuration that does not
+validate yet — a missing certificate is precisely what stops one validating,
+so it has to. Inbound only: outbound delivery verifies against the system
+roots regardless. See
 [docs/guides/CONFIGURATION.md](docs/guides/CONFIGURATION.md) for the caveats.
 
 On Windows, `smtprelayd install` / `uninstall` / `start` / `stop` (elevated

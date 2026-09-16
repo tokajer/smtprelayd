@@ -17,3 +17,20 @@ package fsmode
 // their dependency may or may not have created yet (a WAL sidecar, a log
 // file on a fresh install), and a missing file is nothing to restrict.
 func RestrictFile(path string) error { return restrictFile(path) }
+
+// ShareWithGroupOf gives path the group that owns reference, and the least
+// permissive mode that still lets that group read it: 0750 for a directory,
+// 0640 for a file.
+//
+// It exists because a file the operator creates by hand is owned by whoever
+// ran the command — root, on a server — while the service runs as its own
+// unprivileged account. A private key written 0600 root:root inside a 0700
+// directory is one the service cannot open, and the failure surfaces as a
+// service that will not start rather than as anything about permissions.
+// Passing the configuration file as reference picks up whatever group the
+// package assigned (root:smtprelayd on Linux), so no account name has to be
+// hardcoded here.
+//
+// On Windows it is a no-op, for the reason RestrictFile is: access there is
+// governed by the inherited DACL, not by mode bits or a POSIX group.
+func ShareWithGroupOf(path, reference string) error { return shareWithGroupOf(path, reference) }

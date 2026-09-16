@@ -43,8 +43,13 @@ smtprelayd installed.
 Before starting the service:
   1. Copy /etc/smtprelayd/smtprelayd.toml.example to
      /etc/smtprelayd/smtprelayd.toml and edit it (tenant, mailbox, clients).
-  2. Validate it:   smtprelayd -config /etc/smtprelayd/smtprelayd.toml check
-  3. Start it:      systemctl enable --now smtprelayd
+  2. If a listener uses TLS and you have no certificate from a CA, generate a
+     self-signed one for the paths [tls] names:
+                    smtprelayd -config /etc/smtprelayd/smtprelayd.toml gen-cert
+     It sets the group and modes the service needs. Skip this step if you
+     already placed a certificate and key at those paths.
+  3. Validate it:   smtprelayd -config /etc/smtprelayd/smtprelayd.toml check
+  4. Start it:      systemctl enable --now smtprelayd
 
 The service was not started automatically because it has no usable
 configuration yet.

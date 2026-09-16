@@ -158,6 +158,100 @@ what `internal/expiry` above now does by mail. A *metric* for the same value
 still does not exist, so a host with no `bounce.notify` contact gets no
 notice beyond the date printed at generation.
 
+### expiry.warn_days, and the expiry view on the dashboard (2026-09-16)
+
+Two operator requests, one after the other. First: show the certificate and
+`oauth2.secret_expires` deadlines in the dashboard. Then, after "finde nichts"
+when looking for how to configure the warning: make the lead time a setting.
+
+**Schema change**, the only one of this session, and made on an explicit
+request rather than unilaterally. New `[expiry] warn_days`, default 30,
+range 0..3650, where 0 switches the mails off. Its own section rather than a
+key under `[bounce]` precisely because of the "finde nichts": an operator
+looking for expiry configuration now finds a section called `expiry`. The
+contacts are still `bounce.notify`/`bounce.sender`/`bounce.notify_route`, so
+there is no second place to keep addresses.
+
+`expiry.WarnBefore` (a constant) became `expiry.WarnWindow(cfg)`, and
+`collect` returns nothing at all when the window is zero.
+
+**Deliberate triggering is now the documented test.** Raising `warn_days`
+above the remaining lifetime pulls a healthy certificate into the window and
+the mail goes out at the next restart, because the watcher checks immediately
+at startup. Verified both directions end to end: an 825-day certificate with
+`warn_days = 30` sends nothing, and the same certificate with
+`warn_days = 900` produced `[smtprelayd] the listener TLS certificate expires
+in 824 day(s)` with a well-formed message in the spool. That is cheaper than
+reissuing a short-lived certificate and exercises the identical path.
+
+**The dashboard view sits at the top of the Configuration page**, on the
+operator's instruction — it was first built into the Routes page and moved.
+It lists *every* deadline regardless of `warn_days`, with a state of `ok`,
+`soon` or `expired`, so a healthy certificate is visible rather than only an
+unhealthy one being audible. A certificate that cannot be read is shown as
+such instead of being omitted. `internal/expiry` gained exported `Items`,
+`DaysUntil` and `WarnWindow` so the page and the mail share one definition of
+what expires and when, rather than the web layer parsing the certificate a
+second time.
+
+`gen-cert` also gained `-days N` (1..7300) along the way, before the operator
+redirected to a config setting. It was kept: it is tested, and a shorter
+certificate lifetime is a reasonable thing to want independently of testing.
+Say so if it should go.
+
+**A third false metric claim** was corrected while here:
+`configs/smtprelayd.example.toml` said `secret_expires` was "surfaced as a
+metric for alerting". It is not. That makes three such claims found and fixed
+this session; none of them ever existed in `internal/metrics`.
+
+### Three gen-cert defects fixed (2026-09-16, same session)
+
+Found while answering operator questions rather than by review, which is why
+they are recorded separately from the feature above.
+
+**The key was unreadable by the service on Linux.** `gen-cert` wrote the key
+`0600` and its directory `0700` owned by whoever ran it — root, on a server —
+while the service runs as `smtprelayd`. The account could not even traverse
+into the directory, and the symptom is a service that refuses to start saying
+nothing about permissions. New `fsmode.ShareWithGroupOf` gives a path the
+group that owns a reference path and the least permissive mode that still
+lets that group read it (`0750` for a directory, `0640` for a file); the
+reference is the configuration file, because the package already set
+`/etc/smtprelayd` to `root:smtprelayd`, so no account name is hardcoded. It
+runs *after* `RestrictFile`, so a failure leaves the key too restrictive
+rather than too open, and a failure prints the exact `chown`/`chmod` instead
+of failing the command. No-op on Windows, where the inherited DACL governs
+access — which is why the operator never hit this there.
+
+**The printed SAN list showed duplicates.** `certHosts` did not deduplicate,
+so a hostname that was also a listener bind address appeared several times.
+The certificate itself was always correct (`certgen.dedupe` handled it), but
+the output an operator checks did not match what was issued. Worse, the test
+covering it was named `…AndDeduplicates` and asserted the duplicates — a test
+whose name contradicted its assertion.
+
+**The metrics address was missing from the SANs.** `metrics.Serve` presents
+this same certificate when it binds beyond loopback, so a certificate valid
+for the mail listeners failed hostname verification for Checkmk. `certHosts`
+now includes `metrics.address` when the endpoint is enabled. The dashboard
+needs no entry — `Validate` pins it to loopback, already covered.
+
+Verified end to end, not only by unit test: a configuration with a listener on
+`10.0.0.10`, metrics on `10.0.0.5` and a hostname produced
+`relay.test.invalid, 10.0.0.10, 10.0.0.5, localhost, 127.0.0.1, ::1` — each
+once — and left `drwxr-x---` on the directory and `-rw-r-----` on the key,
+both carrying the configuration file's group.
+
+Two existing tests asserted the old `0600` intent and were changed to `0640`
+plus an explicit check that no other account has any access, which is the
+property that actually matters.
+
+**The instructions now generate a certificate as part of the normal flow**
+rather than mentioning it afterwards: `packaging/linux/postinstall.sh`'s
+first-install text gained it as step 2 of 4, `README.md`'s Run section is an
+ordered first-run sequence, and `docs/guides/CONFIGURATION.md` section 1
+splits into "1a self-signed, generated here" and "1b from a CA".
+
 ### Field verification on the Windows server (2026-09-16)
 
 Confirmed by the operator on the real deployment, not on the dev box:

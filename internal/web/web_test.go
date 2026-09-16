@@ -19,6 +19,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/tokajer/smtprelayd/internal/certgen"
 	"github.com/tokajer/smtprelayd/internal/config"
 	"github.com/tokajer/smtprelayd/internal/spool"
 	"github.com/tokajer/smtprelayd/internal/store"
@@ -895,5 +896,60 @@ func TestServeIsPlainHTTPEvenWithATLSCertificateConfigured(t *testing.T) {
 	cancel()
 	if err := <-done; err != nil {
 		t.Fatalf("Serve returned %v, want nil on a cancelled context", err)
+	}
+}
+
+// The configuration page shows every deadline, not only the ones close enough to be
+// mailed about: an operator checking whether the certificate is healthy needs
+// to see it when it is.
+func TestConfigPageShowsExpiries(t *testing.T) {
+	cfg := testConfig(t, "")
+	certPEM, _, err := certgen.Generate(certgen.Options{
+		Hosts: []string{"relay.internal.example.at"}, Validity: 400 * 24 * time.Hour,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	certFile := filepath.Join(t.TempDir(), "relay.crt")
+	if err := os.WriteFile(certFile, certPEM, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg.TLS.CertFile = certFile
+	cfg.Routes = append(cfg.Routes, config.Route{
+		Name: "m365", Auth: "xoauth2",
+		OAuth2: config.OAuth2{
+			TenantID:      "contoso.onmicrosoft.com",
+			SecretExpires: time.Now().Add(10 * 24 * time.Hour).Format("2006-01-02"),
+		},
+	})
+
+	srv, _, _ := testServer(t, cfg)
+	body := get(t, srv.Handler(), "/config").Body.String()
+	for _, want := range []string{
+		"Expiry",
+		"the listener TLS certificate",
+		"the Microsoft 365 client secret for route &#34;m365&#34;",
+		// 400 days out: present, and not flagged as a problem.
+		"pill-ok",
+		// 10 days out: inside the warning window.
+		"pill-soon",
+		"bounce.notify",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("config page is missing %q", want)
+		}
+	}
+}
+
+// A certificate path that cannot be read is surfaced, not silently omitted:
+// it means the file changed under a running service.
+func TestConfigPageReportsAnUnreadableCertificate(t *testing.T) {
+	cfg := testConfig(t, "")
+	cfg.TLS.CertFile = filepath.Join(t.TempDir(), "absent.crt")
+
+	srv, _, _ := testServer(t, cfg)
+	body := get(t, srv.Handler(), "/config").Body.String()
+	if !strings.Contains(body, "could not be read") {
+		t.Errorf("config page should report the unreadable certificate:\n%s", body)
 	}
 }

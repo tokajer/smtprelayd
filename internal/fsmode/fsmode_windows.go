@@ -11,3 +11,5 @@ package fsmode
 // WRITE_ATTRIBUTES. Access to everything under the data directory is
 // governed by the DACL the installer writes and CheckDataDirACL verifies.
 func restrictFile(string) error { return nil }
+
+func shareWithGroupOf(_, _ string) error { return nil }

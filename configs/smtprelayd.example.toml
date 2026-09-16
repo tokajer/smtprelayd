@@ -121,7 +121,8 @@ rate_limit_per_min = 25            # conservative, per connection limit is ~30
   tenant_id     = "00000000-0000-0000-0000-000000000000"
   client_id     = "00000000-0000-0000-0000-000000000000"
   client_secret = "${SMTPRELAYD_M365_SECRET}"   # env, file:<path>, or dpapi:<path> on Windows
-  secret_expires = "2027-02-01"                # surfaced as a metric for alerting
+  secret_expires = "2027-02-01"                # drives the [expiry] warning mail
+                                               # and the dashboard; not a metric
   scope         = "https://outlook.office365.com/.default"
   mailbox       = "relay@example.at"
 
@@ -186,6 +187,15 @@ failed_retention_hours = 168
 # 365 after it accepted the message land in the rewritten sender's mailbox and
 # are not visible here. See MEMORY.md section 8.
 # ---------------------------------------------------------------------------
+
+# How far ahead to warn that something will stop working: the relay's own TLS
+# certificate, and any Microsoft 365 client secret with oauth2.secret_expires
+# set. The warning is mailed to the [bounce] notify addresses below -- it has
+# no contacts of its own -- once a day while inside the window, and keeps
+# going after the date has passed. Also shown at the top of the dashboard's
+# Configuration page, whatever this is set to. 0 switches the mails off.
+[expiry]
+warn_days = 30
 
 [bounce]
 sender          = "postmaster@example.at"  # empty envelope sender is used on the wire

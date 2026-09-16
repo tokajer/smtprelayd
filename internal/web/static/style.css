@@ -553,3 +553,7 @@ pre.config-section {
 @media (prefers-reduced-motion: reduce) {
 	* { transition: none !important; }
 }
+
+/* Expiry states on the routes page. pill-expired already maps to danger. */
+.pill-ok { color: var(--ok); }
+.pill-soon { color: var(--warn); }

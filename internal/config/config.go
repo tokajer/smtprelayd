@@ -32,6 +32,7 @@ type Config struct {
 	Web       Web        `toml:"web"`
 	Metrics   Metrics    `toml:"metrics"`
 	History   History    `toml:"history"`
+	Expiry    Expiry     `toml:"expiry"`
 	Limits    Limits     `toml:"limits"`
 
 	// Path is the file this configuration was loaded from.
@@ -349,6 +350,16 @@ type History struct {
 	RetainSubjects bool `toml:"retain_subjects"`
 }
 
+// Expiry configures how far ahead the relay warns about something that is
+// going to stop working: its own TLS certificate, and any Microsoft 365
+// client secret with oauth2.secret_expires set.
+type Expiry struct {
+	// WarnDays is the lead time in days. Zero switches the warnings off;
+	// there is no other way to disable them while keeping bounce digests,
+	// since both use the same bounce.notify contacts.
+	WarnDays int `toml:"warn_days"`
+}
+
 type Limits struct {
 	MaxMessageMB     int `toml:"max_message_mb"`
 	MaxHops          int `toml:"max_hops"`
@@ -449,6 +460,7 @@ func Defaults() *Config {
 		Web:     Web{Address: "127.0.0.1:8025", Theme: Theme{Mode: "auto"}},
 		Metrics: Metrics{Address: "127.0.0.1:9025", Path: "/metrics"},
 		History: History{RetentionDays: 90, RetainSubjects: true},
+		Expiry:  Expiry{WarnDays: 30},
 		Limits: Limits{
 			MaxMessageMB: 50,
 			MaxHops:      25, MaxHeaders: 200, MaxHeaderBytes: 262144,

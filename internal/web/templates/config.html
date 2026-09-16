@@ -2,6 +2,36 @@
 <h1>Configuration</h1>
 <p class="empty">Read-only. Secrets are never shown, regardless of section.</p>
 
+<h2>Expiry</h2>
+{{if .ExpiryError}}
+<p class="empty">The TLS certificate at the configured path could not be read: {{.ExpiryError}}</p>
+{{end}}
+<div class="table-wrap">
+<table>
+<thead><tr>
+	<th>What</th><th>Detail</th><th>Expires</th><th>Remaining</th><th>State</th>
+</tr></thead>
+<tbody>
+{{range .Expiry}}
+<tr>
+	<td>{{.What}}</td>
+	<td class="nowrap">{{.Detail}}</td>
+	<td class="nowrap">{{localtime .Expires "2006-01-02 15:04:05"}}</td>
+	<td class="num nowrap">{{if lt .Days 0}}{{.Days}} days ago{{else}}{{.Days}} days{{end}}</td>
+	<td><span class="pill pill-{{.State}}">{{.State}}</span></td>
+</tr>
+{{else}}
+<tr><td colspan="5" class="empty">nothing with a deadline is configured</td></tr>
+{{end}}
+</tbody>
+</table>
+</div>
+<p class="empty">
+{{if gt .WarnDays 0}}Warned by mail to the <code>bounce.notify</code> contacts from {{.WarnDays}} days before
+(<code>expiry.warn_days</code>), daily, and after the date has passed.
+{{else}}Warnings are switched off (<code>expiry.warn_days</code> is 0).{{end}}
+</p>
+
 <h2>Listeners</h2>
 <pre class="config-section">{{.ListenersText}}</pre>
 

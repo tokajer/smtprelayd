@@ -44,7 +44,7 @@ var version = "dev"
 
 const usage = `smtprelayd %s — Open Source SMTP Relay for Windows & Linux
 
-usage: smtprelayd [-config <file>] [-out <file>] [-force] <command>
+usage: smtprelayd [-config <file>] [-out <file>] [-force] [-days N] <command>
 
 commands:
   run        start the relay in the foreground (default)
@@ -53,7 +53,8 @@ commands:
   gen-cert   write a self-signed certificate and key to the paths [tls]
              cert_file and key_file already name, for an internal listener
              with no CA behind it; refuses to overwrite either file unless
-             -force is given (flag must come before the command, like -config)
+             -force is given, and -days N sets a validity other than the
+             default (flags must come before the command, like -config)
   version    print the version and exit
 
 Windows only, requires an elevated prompt:
@@ -83,6 +84,7 @@ func main() {
 	console := fs.Bool("console", false, "also log to stderr when a log file is configured")
 	outPath := fs.String("out", "", "output file for protect-secret (Windows only)")
 	force := fs.Bool("force", false, "allow gen-cert to overwrite an existing certificate and key")
+	days := fs.Int("days", 0, "validity in days for gen-cert (0 uses the default)")
 	fs.Usage = func() { fmt.Fprintf(os.Stderr, usage, version) }
 	_ = fs.Parse(os.Args[1:])
 
@@ -112,13 +114,13 @@ func main() {
 		return
 	}
 
-	if err := run(cmd, *configPath, *console, *outPath, *force); err != nil {
+	if err := run(cmd, *configPath, *console, *outPath, *force, *days); err != nil {
 		fmt.Fprintln(os.Stderr, "smtprelayd:", err)
 		os.Exit(1)
 	}
 }
 
-func run(cmd, configPath string, console bool, outPath string, force bool) error {
+func run(cmd, configPath string, console bool, outPath string, force bool, days int) error {
 	switch cmd {
 	case "version":
 		fmt.Println("smtprelayd", version)
@@ -134,7 +136,7 @@ func run(cmd, configPath string, console bool, outPath string, force bool) error
 		return protectSecret(outPath)
 
 	case "gen-cert":
-		return genCert(configPath, force, os.Stdout)
+		return genCert(configPath, force, days, os.Stdout)
 
 	case "check":
 		cfg, err := config.Load(configPath)

@@ -61,17 +61,30 @@ cert_file = "/etc/smtprelayd/tls/relay.crt"   # leaf cert, intermediates appende
 key_file  = "/etc/smtprelayd/tls/relay.key"   # unencrypted PEM private key
 ```
 
-Steps:
+Steps. Pick **1a** or **1b**, then continue at 2.
 
-1. Obtain a certificate for the relay's hostname from whatever CA the network
-   already trusts (internal PKI, ACME, or a purchased cert). smtprelayd never
-   renews certificates, and it issues one only when you ask it to, with
-   `gen-cert` below.
+**1a. Self-signed, generated here.** For an internal listener with no CA
+behind it, this is the whole step — set `cert_file` and `key_file` above to
+where you want them, then:
+
+```
+smtprelayd -config /etc/smtprelayd/smtprelayd.toml gen-cert
+```
+
+It creates the directory, writes both files, and gives them the group and
+modes the service account needs. Nothing else to do; go to step 3. Details
+and caveats under *Self-signed certificates* below.
+
+**1b. From a CA.** Obtain a certificate for the relay's hostname from
+whatever CA the network already trusts (internal PKI, ACME, or a purchased
+cert). smtprelayd never renews certificates.
+
 2. Place `cert_file` and `key_file` on disk. The loader does not enforce
-   permissions on these two paths the way it does for `file:` secrets, but
-   the private key deserves the same treatment: on Linux, owned by the
-   `smtprelayd` user, mode `0600`; on Windows, put it inside the data
-   directory so it inherits the protected ACL `SecureDataDir` sets there (see
+   permissions on these two paths the way it does for `file:` secrets, so set
+   them the way `gen-cert` does: on Linux `root:smtprelayd`, directory `0750`
+   and key `0640`, so the service account can read it and no other local
+   account can; on Windows, put it inside the data directory so it inherits
+   the protected ACL `SecureDataDir` sets there (see
    `docs/guides/MS365-AUTH.md`'s `file:` option for exactly how that inheritance
    works).
 3. Validate and apply (see above) — `check` fails immediately with
@@ -90,8 +103,18 @@ smtprelayd -config /etc/smtprelayd/smtprelayd.toml gen-cert
 ```
 
 It writes to the `cert_file` and `key_file` paths the configuration already
-names — it does not invent paths, so set those two first. The key is written
-mode `0600` and its directory `0700`, both created if absent.
+names — it does not invent paths, so set those two first. Both the directory
+and the files are created if absent.
+
+**Permissions are handled for you.** On a server this command runs as root
+while the service runs as its own account, so a key left `0600 root:root`
+would be one the service cannot open — and that surfaces as a service which
+refuses to start, saying nothing about permissions. `gen-cert` therefore
+gives the directory (`0750`) and the key (`0640`) the group that owns the
+configuration file, which the package already set to the service's group. The
+key stays unreadable to every other local account. If it cannot do that — you
+ran it as a user with no rights to that group — it prints the exact `chown`
+and `chmod` to run instead of failing silently.
 
 Deliberately, it **runs on a configuration that does not validate yet**. A
 listener with `tls` set and no certificate on disk is exactly what `check`
@@ -104,11 +127,16 @@ It **refuses to overwrite** an existing certificate or key. Pass `-force`
 only when you are certain: these are the paths a CA-issued key lives at, and
 overwriting one is not recoverable.
 
-The subject alternative names are derived from the configuration —
-`service.hostname`, every non-wildcard listener bind address, plus
-`localhost`, `127.0.0.1` and `::1` — and printed so you can check them. A
-wildcard bind (`0.0.0.0`, `::`) contributes nothing, since it is not a name
-any client asks for.
+The subject alternative names are derived from the configuration and printed
+so you can check them: `service.hostname`, every non-wildcard listener bind
+address, the `metrics.address` when the metrics endpoint is enabled (it
+serves this same certificate when bound beyond loopback, so a monitoring
+system would otherwise fail hostname verification), plus `localhost`,
+`127.0.0.1` and `::1`. Duplicates are collapsed. A wildcard bind (`0.0.0.0`,
+`::`) contributes nothing, since it is not a name any client asks for.
+
+If you add a listener or change `metrics.address` later, re-run it with
+`-force` so the new name is covered.
 
 Two limits worth knowing before you rely on it:
 
@@ -128,19 +156,36 @@ listener's TLS certificate, and a Microsoft 365 client secret
 refuses every TLS submission, an expired secret fails every delivery on that
 route — so the relay mails about them.
 
-There is nothing to configure. The warning goes to the **`bounce.notify`**
-contacts, from `bounce.sender`, over `bounce.notify_route` — the same
-contact details a delivery-failure digest uses. With no `bounce.notify` set,
-nothing is sent and the expiry appears only in the log.
+```toml
+[expiry]
+warn_days = 30   # lead time; 0 switches the mails off
+```
 
-- The window is **30 days**, matching the threshold the startup log already
-  used for client secrets.
+That is the only setting. The warning goes to the **`bounce.notify`**
+contacts, from `bounce.sender`, over `bounce.notify_route` — the same contact
+details a delivery-failure digest uses, so there is no second place to keep
+addresses. With no `bounce.notify` set, nothing is sent and the expiry appears
+only in the log.
+
+Both deadlines are listed at the top of the dashboard's **Configuration**
+page regardless of this setting, with a state of `ok`, `soon` or `expired`, so
+you can see a healthy certificate rather than only hearing about an unhealthy
+one.
+
+- `warn_days` accepts 0 to 3650. The default is 30, matching the threshold the
+  startup log already used for client secrets.
+- **To trigger one deliberately** — to check the mail path works — raise
+  `warn_days` above the remaining lifetime (`warn_days = 900` against a
+  freshly generated 825-day certificate), restart, and the mail goes out at
+  once. Put it back afterwards. This is cheaper than reissuing a short-lived
+  certificate and exercises exactly the same path.
 - One mail per day at most while anything is inside the window, batching
   every affected item into a single message rather than one mail each.
 - An expiry that has **already passed** is still reported, with `ACTION
   REQUIRED` in the subject — that is the case you most need to hear about.
 - The check runs hourly and immediately at startup, so restarting a service
-  whose certificate expires next week tells you now.
+  whose certificate expires next week tells you now — and so a changed
+  `warn_days` takes effect on the next restart without waiting.
 - A certificate that cannot be read is logged, not mailed: the listener would
   not have started on one, so it means the file changed under a running
   service.

@@ -32,14 +32,17 @@ import (
 	"github.com/tokajer/smtprelayd/internal/config"
 )
 
-const (
-	// WarnBefore is how far ahead an expiry is announced. It matches the
-	// thirty days delivery.warnSecretExpiry already logs at, because renewing
-	// either of these needs a person with rights they may not have today: a
-	// CA or an internal PKI for the certificate, a directory administrator
-	// for the client secret.
-	WarnBefore = 30 * 24 * time.Hour
+// WarnWindow is how far ahead an expiry is announced, from
+// expiry.warn_days. The default is thirty days, matching what
+// delivery.warnSecretExpiry already logs at, because renewing either of these
+// needs a person with rights they may not have today: a CA or an internal PKI
+// for the certificate, a directory administrator for the client secret. Zero
+// switches the warnings off.
+func WarnWindow(cfg *config.Config) time.Duration {
+	return time.Duration(cfg.Expiry.WarnDays) * 24 * time.Hour
+}
 
+const (
 	// resendInterval bounds how often the same item is mailed about. Once a
 	// day is often enough that an operator cannot miss the window and rare
 	// enough that the warning does not become noise they filter away.
@@ -58,14 +61,14 @@ const (
 	source = "expiry-watch"
 )
 
-// item is one thing with a deadline.
-type item struct {
-	// key identifies the item across checks so that resendInterval applies
+// Item is one thing with a deadline.
+type Item struct {
+	// Key identifies the item across checks so that resendInterval applies
 	// per item rather than to the batch.
-	key     string
-	what    string
-	detail  string
-	expires time.Time
+	Key     string
+	What    string
+	Detail  string
+	Expires time.Time
 }
 
 // Watcher periodically reports what is about to expire. It holds no state
@@ -96,6 +99,10 @@ func New(cfg *config.Config, n *bounce.Notifier, log *slog.Logger) *Watcher {
 // whose certificate expires next week should hear about it now, not in an
 // hour.
 func (w *Watcher) Run(ctx context.Context) {
+	if WarnWindow(w.cfg) <= 0 {
+		w.log.Info("expiry.warn_days is 0, expiry warnings are disabled")
+		return
+	}
 	if len(w.cfg.Bounce.Notify) == 0 {
 		// Nowhere to send. The startup log still carries what collect would
 		// have found, so this is not silent, and Notify would return without
@@ -120,9 +127,9 @@ func (w *Watcher) Run(ctx context.Context) {
 // with a certificate and two secrets all expiring in the same month wants
 // one mail, not three.
 func (w *Watcher) check(now time.Time) {
-	due := []item{}
+	due := []Item{}
 	for _, it := range w.collect(now) {
-		if last, ok := w.lastSent[it.key]; ok && now.Sub(last) < resendInterval {
+		if last, ok := w.lastSent[it.Key]; ok && now.Sub(last) < resendInterval {
 			continue
 		}
 		due = append(due, it)
@@ -130,46 +137,44 @@ func (w *Watcher) check(now time.Time) {
 	if len(due) == 0 {
 		return
 	}
-	// Soonest first, so the most urgent line is the one read first.
-	sort.Slice(due, func(i, j int) bool { return due[i].expires.Before(due[j].expires) })
 
-	subject, body := compose(due, now, w.cfg.Service.Hostname)
+	subject, body := compose(due, now, w.cfg.Service.Hostname, w.cfg.Expiry.WarnDays)
 	if err := w.notifier.Notify(source, subject, body, now); err != nil {
 		// Not marked as sent, so the next check tries again.
 		w.log.Error("sending expiry warning failed", "error", err)
 		return
 	}
 	for _, it := range due {
-		w.lastSent[it.key] = now
-		w.log.Warn("expiry warning sent", "item", it.what, "expires", it.expires.Format(time.RFC3339))
+		w.lastSent[it.Key] = now
+		w.log.Warn("expiry warning sent", "item", it.What, "expires", it.Expires.Format(time.RFC3339))
 	}
 }
 
-// collect returns everything expiring within WarnBefore, already expired
-// included — an expiry that has passed is the case an operator most needs
-// told about, so it is reported rather than dropped for being out of range.
-func (w *Watcher) collect(now time.Time) []item {
-	var items []item
-	deadline := now.Add(WarnBefore)
-
-	if path := w.cfg.TLS.CertFile; path != "" {
-		switch notAfter, err := certNotAfter(path); {
-		case err != nil:
-			// The listener would already have failed to start on an
-			// unreadable certificate, so this is a file that changed
-			// underneath a running service. Worth a log line, not a mail.
-			w.log.Warn("cannot read the TLS certificate to check its expiry", "file", path, "error", err)
-		case notAfter.Before(deadline):
-			items = append(items, item{
-				key:     "tls-certificate",
-				what:    "the listener TLS certificate",
-				detail:  path,
-				expires: notAfter,
+// Items reports everything with a deadline that this service depends on,
+// however far away it is, soonest first. The warning mail filters this by
+// WarnBefore; the dashboard shows all of it, so that an operator can see a
+// healthy expiry rather than only ever hearing about an unhealthy one.
+//
+// certErr is non-nil when tls.cert_file is configured but unreadable. That is
+// not an Item: the listener would not have started on it, so it means the
+// file changed under a running service, and the caller decides whether to log
+// it or show it.
+func Items(cfg *config.Config) (items []Item, certErr error) {
+	if path := cfg.TLS.CertFile; path != "" {
+		notAfter, err := certNotAfter(path)
+		if err != nil {
+			certErr = err
+		} else {
+			items = append(items, Item{
+				Key:     "tls-certificate",
+				What:    "the listener TLS certificate",
+				Detail:  path,
+				Expires: notAfter,
 			})
 		}
 	}
 
-	for _, r := range w.cfg.Routes {
+	for _, r := range cfg.Routes {
 		if r.Auth != "xoauth2" {
 			continue
 		}
@@ -177,25 +182,50 @@ func (w *Watcher) collect(now time.Time) []item {
 		if !ok {
 			continue // oauth2.secret_expires was not set; nothing to check
 		}
-		if exp.Before(deadline) {
-			items = append(items, item{
-				key:     "oauth2-secret:" + r.Name,
-				what:    fmt.Sprintf("the Microsoft 365 client secret for route %q", r.Name),
-				detail:  "tenant " + r.OAuth2.TenantID,
-				expires: exp,
-			})
+		items = append(items, Item{
+			Key:     "oauth2-secret:" + r.Name,
+			What:    fmt.Sprintf("the Microsoft 365 client secret for route %q", r.Name),
+			Detail:  "tenant " + r.OAuth2.TenantID,
+			Expires: exp,
+		})
+	}
+	// Soonest first, so the most urgent line is the one read first -- in the
+	// mail and in the dashboard alike.
+	sort.Slice(items, func(i, j int) bool { return items[i].Expires.Before(items[j].Expires) })
+	return items, certErr
+}
+
+// collect returns everything expiring within WarnBefore, already expired
+// included: an expiry that has passed is the case an operator most needs
+// told about, so it is reported rather than dropped for being out of range.
+func (w *Watcher) collect(now time.Time) []Item {
+	all, certErr := Items(w.cfg)
+	if certErr != nil {
+		// Worth a log line, not a mail: see Items.
+		w.log.Warn("cannot read the TLS certificate to check its expiry",
+			"file", w.cfg.TLS.CertFile, "error", certErr)
+	}
+	window := WarnWindow(w.cfg)
+	if window <= 0 {
+		return nil // warnings switched off
+	}
+	deadline := now.Add(window)
+	var due []Item
+	for _, it := range all {
+		if it.Expires.Before(deadline) {
+			due = append(due, it)
 		}
 	}
-	return items
+	return due
 }
 
 // compose renders the message. It says what breaks when each item lapses,
 // because the recipient of this mail is not necessarily the person who
 // configured the relay.
-func compose(due []item, now time.Time, hostname string) (subject, body string) {
+func compose(due []Item, now time.Time, hostname string, windowDays int) (subject, body string) {
 	expired := 0
 	for _, it := range due {
-		if !it.expires.After(now) {
+		if !it.Expires.After(now) {
 			expired++
 		}
 	}
@@ -203,20 +233,20 @@ func compose(due []item, now time.Time, hostname string) (subject, body string) 
 	case expired > 0:
 		subject = fmt.Sprintf("[smtprelayd] ACTION REQUIRED: %d item(s) expired on %s", expired, hostname)
 	case len(due) == 1:
-		subject = fmt.Sprintf("[smtprelayd] %s expires in %d day(s)", due[0].what, daysUntil(due[0].expires, now))
+		subject = fmt.Sprintf("[smtprelayd] %s expires in %d day(s)", due[0].What, DaysUntil(due[0].Expires, now))
 	default:
 		subject = fmt.Sprintf("[smtprelayd] %d item(s) expire within %d days on %s",
-			len(due), int(WarnBefore.Hours()/24), hostname)
+			len(due), windowDays, hostname)
 	}
 
 	var b strings.Builder
 	fmt.Fprintf(&b, "smtprelayd on %s is reporting that the following will stop working:\r\n", hostname)
 	for _, it := range due {
-		days := daysUntil(it.expires, now)
+		days := DaysUntil(it.Expires, now)
 		b.WriteString("\r\n")
-		fmt.Fprintf(&b, "  %s\r\n", it.what)
-		fmt.Fprintf(&b, "    %s\r\n", it.detail)
-		fmt.Fprintf(&b, "    expires: %s\r\n", it.expires.Format(time.RFC1123Z))
+		fmt.Fprintf(&b, "  %s\r\n", it.What)
+		fmt.Fprintf(&b, "    %s\r\n", it.Detail)
+		fmt.Fprintf(&b, "    expires: %s\r\n", it.Expires.Format(time.RFC1123Z))
 		if days < 0 {
 			fmt.Fprintf(&b, "    status:  EXPIRED %d day(s) ago\r\n", -days)
 		} else {
@@ -232,9 +262,9 @@ func compose(due []item, now time.Time, hostname string) (subject, body string) 
 	return subject, b.String()
 }
 
-// daysUntil is negative once t has passed. Truncating rather than rounding
+// DaysUntil is negative once t has passed. Truncating rather than rounding
 // keeps "1 day left" from being printed for something lapsing in an hour.
-func daysUntil(t, now time.Time) int {
+func DaysUntil(t, now time.Time) int {
 	return int(t.Sub(now).Hours() / 24)
 }
 

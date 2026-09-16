@@ -31,6 +31,9 @@ var tenantID = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9.-]{0,127}$`)
 // ValidTenantID reports whether s is safe to place in the token endpoint path.
 func ValidTenantID(s string) bool { return tenantID.MatchString(s) }
 
+// maxExpiryWarnDays bounds expiry.warn_days at ten years.
+const maxExpiryWarnDays = 3650
+
 // maxSpoolGB is an exabyte, chosen only so that the gigabytes-to-bytes
 // multiplication in Spool.SetQuota cannot overflow int64 and land back on
 // "no quota". No filesystem this reaches is anywhere near it.
@@ -498,6 +501,14 @@ func (c *Config) Validate() error {
 
 	if c.History.RetentionDays <= 0 {
 		add("history.retention_days must be positive")
+	}
+
+	// Bounded rather than merely non-negative: the value becomes a
+	// time.Duration in days, and a lead time longer than any certificate's
+	// own lifetime means "always warn", which is a typo far more often than
+	// it is a choice.
+	if c.Expiry.WarnDays < 0 || c.Expiry.WarnDays > maxExpiryWarnDays {
+		add("expiry.warn_days must be between 0 and %d (0 disables the warnings)", maxExpiryWarnDays)
 	}
 
 	// Only bounce.notify may be overridden per client, so that a printer's

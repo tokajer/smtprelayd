@@ -663,3 +663,40 @@ func TestParseTimeOfDayRejectsAnythingButHHMM(t *testing.T) {
 		}
 	}
 }
+
+func TestExpiryWarnDaysRange(t *testing.T) {
+	for _, tc := range []struct {
+		days    int
+		wantErr bool
+	}{
+		{0, false},    // switches the warnings off
+		{30, false},   // the default
+		{3650, false}, // the ceiling
+		{-1, true},
+		{3651, true},
+	} {
+		body := baseConfig + fmt.Sprintf("\n[expiry]\nwarn_days = %d\n", tc.days)
+		_, err := Load(write(t, body))
+		if tc.wantErr && err == nil {
+			t.Errorf("warn_days %d was accepted, want an error", tc.days)
+		}
+		if !tc.wantErr && err != nil {
+			t.Errorf("warn_days %d was rejected: %v", tc.days, err)
+		}
+	}
+}
+
+// Left unset it must come out at the documented default rather than 0, which
+// would silently disable the warnings.
+func TestExpiryWarnDaysDefaults(t *testing.T) {
+	if d := Defaults().Expiry.WarnDays; d != 30 {
+		t.Fatalf("default expiry.warn_days = %d, want 30", d)
+	}
+	cfg, err := Load(write(t, baseConfig))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Expiry.WarnDays != 30 {
+		t.Fatalf("a configuration with no [expiry] section got warn_days %d, want 30", cfg.Expiry.WarnDays)
+	}
+}

@@ -5,12 +5,16 @@ package main
 
 import (
 	"crypto/tls"
+	"crypto/x509"
+	"encoding/pem"
 	"io"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/tokajer/smtprelayd/internal/config"
 )
@@ -74,7 +78,7 @@ func TestGenCertWorksOnAConfigThatDoesNotValidateYet(t *testing.T) {
 	}
 
 	var out strings.Builder
-	if err := genCert(path, false, &out); err != nil {
+	if err := genCert(path, false, 0, &out); err != nil {
 		t.Fatalf("gen-cert: %v", err)
 	}
 
@@ -93,13 +97,16 @@ func TestGenCertWorksOnAConfigThatDoesNotValidateYet(t *testing.T) {
 	}
 }
 
+// 0640, not 0600: the key has to stay unreadable to other local accounts --
+// it is the property that matters -- while still being readable by the group
+// the service runs under, which is what ShareWithGroupOf widens it to.
 func TestGenCertWritesARestrictedKey(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("mode bits do not govern access on Windows; the data directory DACL does")
 	}
 	certDir := filepath.Join(t.TempDir(), "tls")
 	path := writeConfig(t, tlsConfigBody(t, certDir))
-	if err := genCert(path, false, io.Discard); err != nil {
+	if err := genCert(path, false, 0, io.Discard); err != nil {
 		t.Fatal(err)
 	}
 
@@ -107,8 +114,11 @@ func TestGenCertWritesARestrictedKey(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if mode := st.Mode().Perm(); mode != 0o600 {
-		t.Errorf("key mode = %04o, want 0600", mode)
+	if mode := st.Mode().Perm(); mode != 0o640 {
+		t.Errorf("key mode = %04o, want 0640", mode)
+	}
+	if mode := st.Mode().Perm(); mode&0o007 != 0 {
+		t.Errorf("key mode %04o grants access to other accounts", mode)
 	}
 }
 
@@ -117,7 +127,7 @@ func TestGenCertWritesARestrictedKey(t *testing.T) {
 func TestGenCertRefusesToOverwriteWithoutForce(t *testing.T) {
 	certDir := filepath.Join(t.TempDir(), "tls")
 	path := writeConfig(t, tlsConfigBody(t, certDir))
-	if err := genCert(path, false, io.Discard); err != nil {
+	if err := genCert(path, false, 0, io.Discard); err != nil {
 		t.Fatal(err)
 	}
 	before, err := os.ReadFile(filepath.Join(certDir, "relay.crt"))
@@ -125,7 +135,7 @@ func TestGenCertRefusesToOverwriteWithoutForce(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	err = genCert(path, false, io.Discard)
+	err = genCert(path, false, 0, io.Discard)
 	if err == nil {
 		t.Fatal("a second gen-cert without -force must refuse")
 	}
@@ -147,7 +157,7 @@ func TestGenCertForceReplacesAndRestoresTheKeyMode(t *testing.T) {
 	}
 	certDir := filepath.Join(t.TempDir(), "tls")
 	path := writeConfig(t, tlsConfigBody(t, certDir))
-	if err := genCert(path, false, io.Discard); err != nil {
+	if err := genCert(path, false, 0, io.Discard); err != nil {
 		t.Fatal(err)
 	}
 	keyFile := filepath.Join(certDir, "relay.key")
@@ -156,12 +166,13 @@ func TestGenCertForceReplacesAndRestoresTheKeyMode(t *testing.T) {
 		t.Fatal(err)
 	}
 	// os.WriteFile applies its mode only when it creates the file, so a key
-	// loosened by hand would otherwise stay loose through a -force run.
-	if err := os.Chmod(keyFile, 0o644); err != nil {
+	// loosened by hand would otherwise stay world-readable through a -force
+	// run.
+	if err := os.Chmod(keyFile, 0o666); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := genCert(path, true, io.Discard); err != nil {
+	if err := genCert(path, true, 0, io.Discard); err != nil {
 		t.Fatalf("gen-cert -force: %v", err)
 	}
 	after, err := os.ReadFile(keyFile)
@@ -175,8 +186,11 @@ func TestGenCertForceReplacesAndRestoresTheKeyMode(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if mode := st.Mode().Perm(); mode != 0o600 {
-		t.Errorf("key mode after -force = %04o, want 0600", mode)
+	if mode := st.Mode().Perm(); mode != 0o640 {
+		t.Errorf("key mode after -force = %04o, want 0640", mode)
+	}
+	if mode := st.Mode().Perm(); mode&0o007 != 0 {
+		t.Errorf("key mode %04o after -force grants access to other accounts", mode)
 	}
 }
 
@@ -206,7 +220,7 @@ tls = "none"
 auth = "none"
 default = true
 `)
-	err := genCert(path, false, io.Discard)
+	err := genCert(path, false, 0, io.Discard)
 	if err == nil {
 		t.Fatal("gen-cert without [tls] paths must be refused")
 	}
@@ -219,7 +233,7 @@ default = true
 // [tls] block to act on and the decode error is what the operator needs.
 func TestGenCertOnAnUndecodableConfigReturnsTheLoadError(t *testing.T) {
 	path := writeConfig(t, "this is not toml {{{")
-	if err := genCert(path, false, io.Discard); err == nil {
+	if err := genCert(path, false, 0, io.Discard); err == nil {
 		t.Fatal("an undecodable configuration must be reported")
 	}
 }
@@ -231,11 +245,15 @@ func TestCertHostsSkipsWildcardBindsAndDeduplicates(t *testing.T) {
 			{Name: "smtp", Address: "0.0.0.0:25"},
 			{Name: "smtps", Address: "[::]:465"},
 			{Name: "submission", Address: "10.10.5.1:587"},
+			// Same address on a second listener, and the hostname again: a
+			// SAN list that repeats an entry is confusing in the printed
+			// output and pointless in the certificate.
 			{Name: "dup", Address: "10.10.5.1:588"},
+			{Name: "loop", Address: "127.0.0.1:2525"},
 		},
 	}
 	got := certHosts(cfg)
-	want := []string{"relay.internal.example.at", "10.10.5.1", "10.10.5.1", "localhost", "127.0.0.1", "::1"}
+	want := []string{"relay.internal.example.at", "10.10.5.1", "127.0.0.1", "localhost", "::1"}
 	if len(got) != len(want) {
 		t.Fatalf("certHosts() = %v, want %v", got, want)
 	}
@@ -244,11 +262,127 @@ func TestCertHostsSkipsWildcardBindsAndDeduplicates(t *testing.T) {
 			t.Fatalf("certHosts() = %v, want %v", got, want)
 		}
 	}
-	// A wildcard bind is not a name any client asks for, so it must not
-	// reach the SAN list.
+	// A wildcard bind is not a name any client asks for.
 	for _, h := range got {
 		if h == "0.0.0.0" || h == "::" {
 			t.Errorf("wildcard bind %q leaked into the SAN list", h)
 		}
+	}
+}
+
+// The metrics endpoint serves this same certificate when it binds beyond
+// loopback, so a certificate without that name fails hostname verification
+// for the monitoring system while working fine for mail.
+func TestCertHostsIncludesAPublicMetricsAddress(t *testing.T) {
+	cfg := &config.Config{
+		Service:   config.Service{Hostname: "relay.internal.example.at"},
+		Listeners: []config.Listener{{Name: "smtp", Address: "0.0.0.0:25"}},
+		Metrics:   config.Metrics{Enabled: true, Address: "10.0.0.5:9025"},
+	}
+	got := certHosts(cfg)
+	found := false
+	for _, h := range got {
+		if h == "10.0.0.5" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("certHosts() = %v, want it to include the metrics address", got)
+	}
+}
+
+// Metrics disabled contributes nothing, and a loopback metrics address is
+// already covered by the constants.
+func TestCertHostsIgnoresDisabledMetrics(t *testing.T) {
+	cfg := &config.Config{
+		Service: config.Service{Hostname: "relay.internal.example.at"},
+		Metrics: config.Metrics{Enabled: false, Address: "10.0.0.5:9025"},
+	}
+	for _, h := range certHosts(cfg) {
+		if h == "10.0.0.5" {
+			t.Fatalf("a disabled metrics address reached the SAN list: %v", certHosts(cfg))
+		}
+	}
+}
+
+// The service must be able to read the key it will be started with. On Unix
+// that means the configuration file's group, since the package gives
+// /etc/smtprelayd to root:smtprelayd and the command runs as root.
+func TestGenCertGivesTheKeyTheConfigurationsGroup(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("access is governed by the inherited DACL on Windows, not by a POSIX group")
+	}
+	certDir := filepath.Join(t.TempDir(), "tls")
+	path := writeConfig(t, tlsConfigBody(t, certDir))
+	if err := genCert(path, false, 0, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+
+	cfgInfo, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantGid := cfgInfo.Sys().(*syscall.Stat_t).Gid
+
+	keyFile := filepath.Join(certDir, "relay.key")
+	for _, tc := range []struct {
+		path     string
+		wantMode os.FileMode
+	}{
+		{certDir, 0o750},
+		{keyFile, 0o640},
+	} {
+		fi, err := os.Stat(tc.path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if gid := fi.Sys().(*syscall.Stat_t).Gid; gid != wantGid {
+			t.Errorf("%s has gid %d, want the configuration's %d", tc.path, gid, wantGid)
+		}
+		if mode := fi.Mode().Perm(); mode != tc.wantMode {
+			t.Errorf("%s has mode %04o, want %04o", tc.path, mode, tc.wantMode)
+		}
+	}
+}
+
+// -days is what makes the expiry warning testable: without it the only
+// certificate this command can produce is 825 days out, and nothing inside
+// the 30-day window can be reached without hand-building a PEM.
+func TestGenCertDaysSetsTheValidity(t *testing.T) {
+	certDir := filepath.Join(t.TempDir(), "tls")
+	path := writeConfig(t, tlsConfigBody(t, certDir))
+	if err := genCert(path, false, 20, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+
+	raw, err := os.ReadFile(filepath.Join(certDir, "relay.crt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	blk, _ := pem.Decode(raw)
+	if blk == nil {
+		t.Fatal("certificate did not decode")
+	}
+	c, err := x509.ParseCertificate(blk.Bytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	days := int(time.Until(c.NotAfter).Hours() / 24)
+	if days != 19 && days != 20 {
+		t.Errorf("certificate is valid for %d days, want 20", days)
+	}
+}
+
+func TestGenCertRejectsAnOutOfRangeDays(t *testing.T) {
+	certDir := filepath.Join(t.TempDir(), "tls")
+	path := writeConfig(t, tlsConfigBody(t, certDir))
+	for _, days := range []int{-1, maxValidityDays + 1} {
+		if err := genCert(path, false, days, io.Discard); err == nil {
+			t.Errorf("-days %d must be refused", days)
+		}
+	}
+	// Nothing may have been written by a refused run.
+	if _, err := os.Stat(filepath.Join(certDir, "relay.crt")); err == nil {
+		t.Error("a refused -days still wrote a certificate")
 	}
 }
