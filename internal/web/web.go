@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/tokajer/smtprelayd/internal/config"
+	"github.com/tokajer/smtprelayd/internal/httpx"
 	"github.com/tokajer/smtprelayd/internal/metrics"
 	"github.com/tokajer/smtprelayd/internal/spool"
 	"github.com/tokajer/smtprelayd/internal/store"
@@ -323,7 +324,7 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		Limit:     pageSize,
 		Offset:    offset,
 	}
-	filterErr := parseTimeRange(q, &filter.Since, &filter.Until)
+	filterErr := httpx.ParseTimeRange(q, &filter.Since, &filter.Until)
 
 	var msgs []*store.Message
 	if filterErr == "" {
@@ -395,7 +396,7 @@ func (s *Server) handleBounces(w http.ResponseWriter, r *http.Request) {
 		Limit:     pageSize,
 		Offset:    offset,
 	}
-	filterErr := parseTimeRange(q, &filter.Since, &filter.Until)
+	filterErr := httpx.ParseTimeRange(q, &filter.Since, &filter.Until)
 	if filterErr == "" {
 		filterErr = filterErrClass
 	}
@@ -856,24 +857,6 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 // parseTimeRange parses the since/until query parameters into *dst, RFC 3339
 // only, leaving *dst nil and returning a message on a bad value rather than
 // guessing at another layout.
-func parseTimeRange(q url.Values, since, until **time.Time) string {
-	if v := strings.TrimSpace(q.Get("since")); v != "" {
-		t, err := time.Parse(time.RFC3339, v)
-		if err != nil {
-			return "since must be RFC 3339, e.g. 2026-01-01T00:00:00Z"
-		}
-		*since = &t
-	}
-	if v := strings.TrimSpace(q.Get("until")); v != "" {
-		t, err := time.Parse(time.RFC3339, v)
-		if err != nil {
-			return "until must be RFC 3339, e.g. 2026-01-01T00:00:00Z"
-		}
-		*until = &t
-	}
-	return ""
-}
-
 func parseOffset(s string) int {
 	n, err := strconv.Atoi(s)
 	if err != nil || n < 0 {

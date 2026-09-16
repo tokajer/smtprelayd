@@ -41,9 +41,18 @@ The single most damaging failure mode gets the strictest handling.
 - CIDR overlaps are reported at load time. Ambiguous matching is a failure,
   not a warning.
 - `smtprelayd selftest` performs an active check: it connects to its own
-  listeners from an unlisted source, attempts to relay to an external domain
-  and fails loudly if the attempt succeeds. This runs in CI and should run
-  after every configuration change.
+  listeners, attempts to relay to an external domain and fails loudly if the
+  attempt succeeds. This runs in CI and should run after every configuration
+  change.
+
+  The probe dials from the host the relay runs on, so it arrives from
+  loopback — which is **not** necessarily an unlisted source. If loopback is
+  itself an allowlisted client, relaying is the configured behaviour and the
+  check reports a `note:` line saying so instead of a failure, because the
+  default-deny path was never exercised. To test that path, run the probe
+  from an address outside every client `cidr`. A client whose `cidr` covers
+  every address still fails outright: that is an open relay however the match
+  is reached.
 - Received-header hop counting rejects mail exceeding a maximum hop count, so
   a routing mistake cannot become an amplification loop.
 

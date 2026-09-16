@@ -752,15 +752,13 @@ func (s *Spool) Discard(id ID) error {
 	return syncDir(s.failed)
 }
 
-// spoolSize returns the total size in bytes the spool occupies: queued
-// messages plus the permanently failed ones kept in spool/failed. Failed
-// messages are counted because they are still on the filesystem the quota
-// exists to protect -- summing only the live index let a client that produced
-// nothing but permanent failures fill the disk without the quota ever seeing
-// it.
-func (s *Spool) spoolSize() int64 {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+// sizeLocked sums what the spool occupies: queued messages plus the
+// permanently failed ones kept in spool/failed. Failed messages are counted
+// because they are still on the filesystem the quota exists to protect --
+// summing only the live index let a client that produced nothing but
+// permanent failures fill the disk without the quota ever seeing it.
+// Callers must hold s.mu.
+func (s *Spool) sizeLocked() int64 {
 	var total int64
 	for _, m := range s.index {
 		total += m.Envelope.Size
@@ -769,6 +767,36 @@ func (s *Spool) spoolSize() int64 {
 		total += e.size
 	}
 	return total
+}
+
+// spoolSize returns the total size in bytes the spool occupies. See
+// sizeLocked for what counts and why; this wrapper exists because Commit
+// calls it without holding the lock.
+func (s *Spool) spoolSize() int64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.sizeLocked()
+}
+
+// QuotaWarning reports whether the spool has reached limits.spool_warn_percent
+// of its configured quota. over is false whenever no quota or no warning
+// threshold is configured. It does no logging itself and mutates nothing:
+// this package holds no logger, so the caller (the delivery manager) is
+// responsible for reporting the transition.
+func (s *Spool) QuotaWarning() (used, quota int64, over bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	quota = s.maxQuotaBytes
+	if quota <= 0 || s.warnQuotaPercent <= 0 {
+		return 0, quota, false
+	}
+	used = s.sizeLocked()
+	// quota may be math.MaxInt64 (SetQuota clamps an oversized config value
+	// to it), so quota*warnPercent could overflow. Dividing quota first
+	// instead cannot overflow and loses at most 99 bytes of precision,
+	// irrelevant for a threshold measured in gigabytes.
+	over = used >= quota/100*int64(s.warnQuotaPercent)
+	return used, quota, over
 }
 
 // SetQuota configures the maximum spool size and warning threshold. A maxGB of

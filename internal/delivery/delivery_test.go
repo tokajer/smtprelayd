@@ -4,6 +4,7 @@
 package delivery
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -150,6 +151,46 @@ func TestVerifyTokensFailsStartupOnRejectedCredential(t *testing.T) {
 	if !strings.Contains(err.Error(), "m365") || !strings.Contains(err.Error(), "invalid_client") {
 		t.Fatalf("unexpected error: %v", err)
 	}
+}
+
+// TestReportQuotaLogsOnlyOnTransition drives reportQuota through a rising
+// edge, staying over, a falling edge, and staying under, asserting a log
+// line is emitted only on the two transitions -- the entire point of the
+// edge-trigger. It also covers the division guard with a zero quota.
+func TestReportQuotaLogsOnlyOnTransition(t *testing.T) {
+	var buf bytes.Buffer
+	m := &Manager{log: slog.New(slog.NewTextHandler(&buf, nil))}
+
+	m.reportQuota(900, 1000, true)
+	if out := buf.String(); !strings.Contains(out, "spool is filling up") {
+		t.Fatalf("rising edge: want log containing %q, got %q", "spool is filling up", out)
+	}
+	if out := buf.String(); !strings.Contains(out, "percent=90") {
+		t.Fatalf("rising edge: want percent=90, got %q", out)
+	}
+
+	buf.Reset()
+	m.reportQuota(950, 1000, true)
+	if out := buf.String(); out != "" {
+		t.Fatalf("still over: want no log, got %q", out)
+	}
+
+	buf.Reset()
+	m.reportQuota(700, 1000, false)
+	if out := buf.String(); !strings.Contains(out, "spool is back below the quota warning threshold") {
+		t.Fatalf("falling edge: want log containing %q, got %q", "spool is back below the quota warning threshold", out)
+	}
+
+	buf.Reset()
+	m.reportQuota(600, 1000, false)
+	if out := buf.String(); out != "" {
+		t.Fatalf("still under: want no log, got %q", out)
+	}
+
+	// Fresh manager so quotaWarned starts false and the rising edge fires,
+	// reaching the used*100/quota computation with quota == 0.
+	zero := &Manager{log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	zero.reportQuota(0, 0, true)
 }
 
 // Compile-time assertion that fakeTokenSource satisfies the interface

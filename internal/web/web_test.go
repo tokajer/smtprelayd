@@ -4,10 +4,12 @@
 package web
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -839,5 +841,59 @@ func TestStyleServedWithCSSContentType(t *testing.T) {
 	}
 	if ct := rec.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/css") {
 		t.Fatalf("content-type = %q", ct)
+	}
+}
+
+// TestServeIsPlainHTTPEvenWithATLSCertificateConfigured guards the fix for a
+// real trap: Serve used to switch to HTTPS whenever cfg.TLS.CertFile was
+// non-empty, and that field is populated as soon as any *SMTP* listener uses
+// TLS. Configuring mail TLS therefore turned the dashboard into HTTPS on
+// loopback, and an operator following CONFIGURATION.md to http://127.0.0.1
+// got a handshake error. config.Validate pins web.address to loopback, so
+// there is no address a certificate could authenticate to.
+func TestServeIsPlainHTTPEvenWithATLSCertificateConfigured(t *testing.T) {
+	probe, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := probe.Addr().String()
+	_ = probe.Close()
+
+	cfg := testConfig(t, "")
+	cfg.Web.Address = addr
+	// A path that does not exist: the removed branch would have failed here
+	// trying to load it, which is itself the regression this catches.
+	cfg.TLS.CertFile = filepath.Join(t.TempDir(), "absent.crt")
+	cfg.TLS.KeyFile = filepath.Join(t.TempDir(), "absent.key")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		done <- Serve(ctx, cfg, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_, _ = io.WriteString(w, "dashboard")
+		}), discardLog())
+	}()
+
+	var resp *http.Response
+	for i := 0; i < 100; i++ {
+		resp, err = http.Get("http://" + addr + "/")
+		if err == nil {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if err != nil {
+		t.Fatalf("plain HTTP GET failed, which is what serving TLS here would look like: %v", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if string(body) != "dashboard" {
+		t.Fatalf("body = %q, want %q", body, "dashboard")
+	}
+
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatalf("Serve returned %v, want nil on a cancelled context", err)
 	}
 }

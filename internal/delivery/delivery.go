@@ -15,7 +15,6 @@ import (
 
 	"github.com/tokajer/smtprelayd/internal/authms365"
 	"github.com/tokajer/smtprelayd/internal/bounce"
-	"github.com/tokajer/smtprelayd/internal/canary"
 	"github.com/tokajer/smtprelayd/internal/config"
 	"github.com/tokajer/smtprelayd/internal/delivery/smarthost"
 	"github.com/tokajer/smtprelayd/internal/metrics"
@@ -41,7 +40,6 @@ type Manager struct {
 	log      *slog.Logger
 	metrics  *metrics.Registry
 	notifier *bounce.Notifier
-	canaries []*canary.Runner
 
 	// routes holds the per-route concurrency budget, limits the per-route
 	// messages per minute, tokens the OAuth2 source for xoauth2 routes.
@@ -51,8 +49,10 @@ type Manager struct {
 	rate   *routeLimiter
 	wg     sync.WaitGroup
 
-	// lastFailedSweep is read and written only from Run's own goroutine.
+	// lastFailedSweep and quotaWarned are read and written only from Run's
+	// own goroutine.
 	lastFailedSweep time.Time
+	quotaWarned     bool
 }
 
 // New builds the delivery manager. Each route gets its own concurrency budget
@@ -90,7 +90,6 @@ func New(cfg *config.Config, sp *spool.Spool, log *slog.Logger, st *store.Store)
 	canaryNames := make([]string, 0, len(cfg.Canaries))
 	for _, c := range cfg.Canaries {
 		canaryNames = append(canaryNames, c.Name)
-		m.canaries = append(m.canaries, canary.New(cfg, c, sp, st, log))
 	}
 	m.metrics = metrics.New(sp, routeNames, canaryNames, authTokens)
 	m.notifier = bounce.New(cfg, sp, st, log)
@@ -109,13 +108,6 @@ func (m *Manager) Metrics() *metrics.Registry {
 // returns immediately.
 func (m *Manager) Notifier() *bounce.Notifier {
 	return m.notifier
-}
-
-// Canaries returns one Runner per configured [[canary]] entry, for the
-// caller to run each as its own background goroutine. Empty if none are
-// configured.
-func (m *Manager) Canaries() []*canary.Runner {
-	return m.canaries
 }
 
 // warnSecretExpiry surfaces an expiring client secret at startup. Until the
@@ -201,6 +193,7 @@ func (m *Manager) Run(ctx context.Context) {
 		}
 
 		m.sweepFailed(time.Now())
+		m.checkQuota()
 
 		select {
 		case <-ctx.Done():
@@ -227,6 +220,32 @@ func (m *Manager) sweepFailed(now time.Time) {
 		m.log.Info("failed spool retention sweep",
 			"removed", removed, "freed_bytes", freed)
 	}
+}
+
+// checkQuota fetches the current quota state from the spool and reports it.
+func (m *Manager) checkQuota() {
+	used, quota, over := m.spool.QuotaWarning()
+	m.reportQuota(used, quota, over)
+}
+
+// reportQuota logs the spool quota warning only on a transition. The
+// dispatch loop polls every pollInterval (5s), so logging the current state
+// on each poll rather than the edge would bury the one line an operator
+// needs to notice under constant repetition.
+func (m *Manager) reportQuota(used, quota int64, over bool) {
+	switch {
+	case over && !m.quotaWarned:
+		var percent int64
+		if quota > 0 {
+			percent = used * 100 / quota
+		}
+		m.log.Warn("spool is filling up",
+			"used_bytes", used, "max_bytes", quota, "percent", percent)
+	case !over && m.quotaWarned:
+		m.log.Info("spool is back below the quota warning threshold",
+			"used_bytes", used, "max_bytes", quota)
+	}
+	m.quotaWarned = over
 }
 
 func (m *Manager) attempt(ctx context.Context, meta *spool.Meta) {

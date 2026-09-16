@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/tokajer/smtprelayd/internal/config"
+	"github.com/tokajer/smtprelayd/internal/httpx"
 	"github.com/tokajer/smtprelayd/internal/metrics"
 	"github.com/tokajer/smtprelayd/internal/spool"
 	"github.com/tokajer/smtprelayd/internal/store"
@@ -72,7 +73,7 @@ func jsonHeaders(next http.Handler) http.Handler {
 // or malformed token yields 401, insufficient scope yields 403.
 func (s *Server) auth(need string, next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		source := sourceAddr(r)
+		source := httpx.SourceAddr(r)
 		now := time.Now()
 
 		if wait, blocked := s.fails.blocked(source, now); blocked {
@@ -81,7 +82,7 @@ func (s *Server) auth(need string, next http.HandlerFunc) http.HandlerFunc {
 			return
 		}
 
-		info, ok := checkToken(s.cfg, bearerToken(r))
+		info, ok := checkToken(s.cfg, httpx.BearerToken(r))
 		if !ok {
 			s.fails.recordFailure(source, now)
 			if s.metrics != nil {
@@ -93,7 +94,7 @@ func (s *Server) auth(need string, next http.HandlerFunc) http.HandlerFunc {
 		}
 		s.fails.recordSuccess(source)
 
-		if !scopeSatisfies(info.Scope, need) {
+		if !config.ScopeSatisfies(info.Scope, need) {
 			writeJSONError(w, http.StatusForbidden, "token scope does not permit this action")
 			return
 		}

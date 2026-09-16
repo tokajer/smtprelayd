@@ -508,3 +508,55 @@ func TestSetQuotaNeverWrapsIntoNoQuota(t *testing.T) {
 		t.Fatalf("a negative quota became %d, want 0 (no quota)", s.maxQuotaBytes)
 	}
 }
+
+// QuotaWarning backs the "spool is filling up" log line, so it must report
+// exactly the state limits.spool_warn_percent describes: no warning without
+// both a quota and a threshold configured, and a clean flip once usage
+// reaches the threshold.
+func TestQuotaWarningReportsThresholdCrossing(t *testing.T) {
+	s, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// No quota: over must stay false no matter how much is enqueued.
+	s.SetQuota(0, 80)
+	if _, err := s.Enqueue(Envelope{}, strings.NewReader(strings.Repeat("x", 4096)), 0, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, over := s.QuotaWarning(); over {
+		t.Fatal("QuotaWarning reported over with no quota configured")
+	}
+
+	// A quota with no warning threshold: over must stay false regardless of
+	// usage. SetQuota's gigabyte granularity is too coarse to test a byte
+	// threshold against, but that does not matter here since warnPercent of
+	// 0 short-circuits the comparison before usage is even considered.
+	s.SetQuota(1, 0)
+	if _, _, over := s.QuotaWarning(); over {
+		t.Fatal("QuotaWarning reported over with no warning threshold configured")
+	}
+
+	// A quota and a threshold: set the unexported fields directly, since
+	// SetQuota cannot express a precise byte threshold to test against.
+	s2, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	s2.maxQuotaBytes = 1000
+	s2.warnQuotaPercent = 80
+
+	if _, err := s2.Enqueue(Envelope{}, strings.NewReader(strings.Repeat("x", 500)), 0, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if used, max, over := s2.QuotaWarning(); over || used != 500 || max != 1000 {
+		t.Fatalf("QuotaWarning() = %d, %d, %v below threshold, want 500, 1000, false", used, max, over)
+	}
+
+	if _, err := s2.Enqueue(Envelope{}, strings.NewReader(strings.Repeat("x", 300)), 0, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if used, max, over := s2.QuotaWarning(); !over || used != 800 || max != 1000 {
+		t.Fatalf("QuotaWarning() = %d, %d, %v at threshold, want 800, 1000, true", used, max, over)
+	}
+}

@@ -298,6 +298,13 @@ authentication, and a non-loopback `address` is a startup error with no
 config override. For remote access, use an SSH tunnel or a reverse proxy that
 authenticates in front of it.
 
+It is always served as plain **HTTP**, so reach it at `http://127.0.0.1:8025`
+(and the JSON API, which shares this listener, at `http://127.0.0.1:8025/api/v1/…`).
+Configuring `[tls]` for the SMTP listeners does not change this: since the
+address can only ever be loopback, there is no name or address a certificate
+could authenticate to. Use the tunnel or the reverse proxy for transport
+security beyond this host.
+
 Optional recolouring, every field optional, values must be literal
 `#rgb`/`#rrggbb` hex (they are written into the stylesheet, so nothing else is
 accepted):
@@ -430,8 +437,15 @@ read_timeout_sec  = 60
 write_timeout_sec = 60
 data_timeout_sec  = 300
 spool_max_gb        = 10   # 0 = no quota; counts the live queue and spool/failed together
-spool_warn_percent  = 80
+spool_warn_percent  = 80   # 0 = no warning; logs once per threshold crossing
 ```
 These are the outer bounds every listener and client operates inside; see
 `configs/smtprelayd.example.toml` for the full inline commentary on each
 field.
+
+`spool_warn_percent` is the early warning before `spool_max_gb` starts
+rejecting mail. Once the spool reaches that share of the quota the delivery
+manager logs `spool is filling up` at WARN with `used_bytes`, `max_bytes` and
+`percent`; when it falls back under, `spool is back below the quota warning
+threshold` at INFO. Only the two crossings are logged, never the steady state,
+so the line stays greppable instead of repeating every five seconds.

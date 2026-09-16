@@ -5,9 +5,7 @@ package web
 
 import (
 	"context"
-	"crypto/tls"
 	"errors"
-	"fmt"
 	"log/slog"
 	"net/http"
 	"time"
@@ -86,11 +84,21 @@ func securityHeaders(next http.Handler) http.Handler {
 	})
 }
 
-// Serve runs the dashboard HTTP listener until ctx is cancelled. Binding
-// beyond loopback requires cfg.TLS to be configured — internal/config's
-// validation refuses to start otherwise — in which case this serves HTTPS
-// with that certificate instead of plaintext HTTP; a loopback address serves
-// plain HTTP, matching the existing listener's own loopback exemption.
+// Serve runs the dashboard HTTP listener until ctx is cancelled, always in
+// plaintext HTTP.
+//
+// It is never HTTPS because config.Validate refuses a non-loopback
+// web.address outright: the dashboard has no authentication, so loopback is
+// its trust boundary and there is no address for a certificate to
+// authenticate to. This used to branch on cfg.TLS.CertFile being set, which
+// is the wrong question — that field is populated as soon as any *SMTP*
+// listener uses TLS, so configuring mail TLS silently turned the dashboard
+// into HTTPS on loopback and an operator following CONFIGURATION.md to
+// http://127.0.0.1:8025 got a handshake error with nothing explaining it.
+//
+// metrics.Serve makes the same decision from the address, which is the rule
+// that actually matters; it still has a TLS branch because a metrics
+// listener may legitimately bind beyond loopback behind a bearer token.
 func Serve(ctx context.Context, cfg *config.Config, handler http.Handler, log *slog.Logger) error {
 	srv := &http.Server{
 		Addr:              cfg.Web.Address,
@@ -106,16 +114,7 @@ func Serve(ctx context.Context, cfg *config.Config, handler http.Handler, log *s
 	}
 
 	errCh := make(chan error, 1)
-	if cfg.TLS.CertFile != "" {
-		cert, err := tls.LoadX509KeyPair(cfg.TLS.CertFile, cfg.TLS.KeyFile)
-		if err != nil {
-			return fmt.Errorf("web: loading TLS certificate: %w", err)
-		}
-		srv.TLSConfig = &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12}
-		go func() { errCh <- srv.ListenAndServeTLS("", "") }()
-	} else {
-		go func() { errCh <- srv.ListenAndServe() }()
-	}
+	go func() { errCh <- srv.ListenAndServe() }()
 
 	select {
 	case <-ctx.Done():

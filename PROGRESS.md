@@ -19,7 +19,223 @@ fix below): the MSI installs without error, exactly one service registration
 remains (no duplicate), the on-disk binary is replaced, and the service keeps
 running afterwards. Uninstall remains unverified. Log rotation and Windows ACL
 verification at startup are complete.
-**Last session**: 2026-09-15 (thirty-second session) — One feature, from
+**Last session**: 2026-09-16 (thirty-fourth session) — Five fixes from a
+second architectural review, no phase work and no schema change. The operator
+took the whole top-five list: "fix 1 2 3 4 5".
+
+**Dead code that documented a lie.** `logging.FromContext`, `WithLogger` and
+`loggerKey` had zero callers anywhere, tests included — but `WithLogger`'s
+comment claimed it was "used to carry the queue ID through the delivery path
+so that every line of one message shares a correlation key". That correlation
+key is real and is produced a completely different way, by `log.With` in
+`delivery.attempt` and `session.handle`. Deleted, along with the now-unused
+`context` import. Same class as the `spool_warn_percent` defect last session:
+something that reads as working, is documented as working, and is inert.
+
+**The dashboard was silently HTTPS whenever mail TLS was configured.**
+`web.Serve` branched on `cfg.TLS.CertFile != ""` — but that field is
+populated as soon as *any SMTP listener* uses STARTTLS or implicit TLS, which
+`Validate` requires. So turning on TLS for mail flipped the dashboard to
+HTTPS on loopback, and an operator following `CONFIGURATION.md` to
+`http://127.0.0.1:8025` got a bare handshake error. The function's own doc
+comment described a third behaviour again ("binding beyond loopback … serves
+HTTPS"), which `Validate` makes unreachable since it refuses a non-loopback
+`web.address` outright. The branch is gone: the dashboard is always plain
+HTTP, which is what the docs already told operators and what the trust
+boundary actually is — there is no address a certificate could authenticate
+to. `metrics.Serve` keeps its TLS branch and was already correct, deciding
+from the address, because a metrics listener may legitimately bind beyond
+loopback behind a bearer token. **This is the one operator-visible behaviour
+change of the session**: anyone who had been reaching the dashboard over
+`https://` on loopback must drop the `s`.
+
+**One primitive, three copies — two of them security controls.** `web`, `api`
+and `metrics` had each grown their own `bearerToken` and `sourceAddr`, byte
+for byte identical, X-Forwarded-For rationale comment included, plus a third
+copy of `parseTimeRange`. Bearer parsing is credential handling and
+`sourceAddr` decides what the failed-auth backoff counts and what the audit
+log blames; three copies is three places to fix and two to forget. New
+`internal/httpx` holds `BearerToken`, `SourceAddr` and `ParseTimeRange`, and
+it is a leaf with no internal dependencies. `api.scopeSatisfies`, a one-line
+pass-through to `config.ScopeSatisfies` that `metrics` already called
+directly, went with it.
+
+**Deliberately narrowed**: the review also listed the two `requireLoopbackHost`
+middlewares as a fourth duplication. They were left alone. Their log messages,
+their refusal text and which source field they log all differ, so sharing them
+means a function taking two message strings whose call site is as long as the
+body it replaced — indirection without a defect fixed. The substance they have
+in common, `config.IsLoopbackHostHeader`, was already shared.
+
+**A cap that was not a cap.** `api`'s `failLimiter` called `evictLocked` once
+the table passed `maxTrackedSources` (4096), but that only ever deleted
+entries whose backoff *and* failure window had both expired. A caller cycling
+source addresses fast enough keeps everything unexpired, so eviction found
+nothing and the map grew without limit — precisely what the constant existed
+to prevent, while its comment promised the opposite. New `makeRoomLocked`
+runs before a new source is admitted: expiry first, then, if the table is
+still full, it drops the entry whose backoff ends soonest. A never-blocked
+entry carries a zero `blockedUntil` and so is always chosen ahead of one
+still serving a backoff — evicting a blocked source would hand it a way out
+of its own backoff, and that now only happens once every tracked source is
+blocked, which costs five failures on each of 4096 addresses. Low reachability
+today (the API shares the dashboard's loopback-only listener) but load-bearing
+the moment the dashboard login lands.
+
+**The open-relay probe failed correct configurations.** `selftest` dials from
+the host the relay runs on, so it arrives on the listener from loopback.
+`SECURITY.md` asserted it connects "from an unlisted source" — untrue the
+moment an operator allowlists `127.0.0.1` for an application on the same
+machine, an ordinary deployment. The probe would then be permitted to relay
+and the check would report a correct configuration as an open relay. Since
+this is the check CI runs to prove the relay is not open, a false positive
+there trains operators to ignore it. `probe` now resolves its own source via
+`conn.LocalAddr` and matches it with **`listener.NewMatcher` — the relay's
+real matcher, not a second copy**, so the probe cannot pass where the running
+listener would deny. An accepted relay from an allowlisted source is a
+`note:` on stdout rather than a failure, and the note says the default-deny
+path went untested so it cannot be read as an unqualified pass. A client
+whose `cidr` covers every address still fails outright: that is an open relay
+however the match is reached. `Run` returns `([]string, error)` now; `main`
+prints the notes before the verdict.
+
+Verified: `gofmt -l .` clean, `go vet ./...` clean, `go build` for
+`linux/amd64`, `windows/amd64` and `linux/arm64` clean,
+`scripts/check-banned-imports.sh` clean for all three targets, and
+`CGO_ENABLED=1 go test -race ./...` green across all 19 packages. The
+dependency graph is still acyclic; `internal/httpx` is a leaf and
+`selftest → listener` is the one new edge. Twelve new tests:
+`internal/httpx` gets 3 (bearer scheme is case-sensitive and space-required,
+`SourceAddr` ignores X-Forwarded-For and handles IPv6 and a portless
+RemoteAddr, `ParseTimeRange` rejects a date-only value rather than guessing a
+layout), `internal/api` gets 2 for the ceiling (it holds under 8192 same-instant
+sources, and a blocked source survives that pressure), `internal/selftest`
+goes from **0 tests to 5** against a stub SMTP responder (refusal at RCPT,
+refusal at MAIL FROM, acceptance from an unmatched source failing, acceptance
+from an allowlisted source noting, and a `0.0.0.0/0` client still failing),
+and `internal/web` gets 1 proving a configured certificate no longer changes
+the dashboard's scheme. That last one was mutation-checked: restoring the TLS
+branch makes it fail with a connection refusal.
+
+**Note for the next session**: `docs/dev/PHASE4-PLAN.md:311` shows a curl
+example against `https://localhost:8025/api/v1/bounces`. That was already
+wrong before this session and is now definitively so. Left alone deliberately
+— it is a dated planning record, and rewriting one to match today's code
+loses the history it exists for. `docs/guides/CONFIGURATION.md`, which is the
+operator-facing doc, says `http://` and now states the rule explicitly.
+
+**Still deferred, from both reviews**: `Spool.Commit` reads `s.maxQuotaBytes`
+without holding `s.mu` while `SetQuota` writes it under the lock (not
+reachable today; `SetQuota` runs once before any listener binds).
+`Config.Validate()` is 611 lines and applies per-route defaults that
+`Defaults()` does not, so `Defaults()` is not the whole answer for
+`route.port`, `route.min_tls`, `route.max_concurrent` and `oauth2.scope` —
+still the largest single risk surface in the tree, and per working agreement
+4 it needs sign-off before anyone splits it. Subject redaction for
+`history.retain_subjects` is still implemented three times across `web` and
+`api` and belongs in `store`, which already receives the flag and uses it
+only on write. `session.doData` is 159 lines. `store`'s three query builders
+repeat the same seven filter clauses. `metrics` still depends concretely on
+`authms365` for one value. A new smarthost auth type still touches five
+files, two of them only to classify a route for display. And `make test`
+still cannot run: the Makefile exports `CGO_ENABLED=0` while `test:` runs
+`go test -race`, which needs cgo — pre-existing, CI sidesteps it by calling
+`go test -race` directly at `.github/workflows/ci.yml:43`.
+
+**Previous session**: 2026-09-15 (thirty-third session) — Three fixes from an
+architectural review of the whole tree, no phase work and no schema change.
+The operator picked three of eight findings: "fix 1 2 and 5".
+
+**A configured safeguard that did nothing.** `limits.spool_warn_percent` was
+defaulted to 80, range-checked 0–100 by `Validate`, documented in two places
+and shipped in the example config — and `Spool.warnQuotaPercent` was written
+by `SetQuota` and *read nowhere in the tree*. An operator who set a spool
+warning threshold got silence right up until `ErrQuotaExceeded` started
+refusing mail. Validation is what made it worse rather than better: the key
+passed every check, so it read as working. New `Spool.QuotaWarning()` reports
+`(used, quota, over)` and holds no logger — that package has none, by design —
+and `delivery.Manager.reportQuota` does the logging, `spool is filling up` at
+WARN on the rising edge and `spool is back below the quota warning threshold`
+at INFO on the falling one. Edge-triggered, because the dispatch loop polls
+every 5s and the steady state would bury the one line an operator greps for.
+The threshold is `used >= quota/100*percent`, dividing first because
+`SetQuota` can clamp the quota to `math.MaxInt64` and the multiplication
+would overflow; that loses at most 99 bytes on a threshold measured in
+gigabytes. The summation moved into an unlocked `sizeLocked()` shared with
+`spoolSize()`, so *what counts against the quota* — the live index plus
+`spool/failed`, a deliberate decision so a reliably-failing client cannot
+free its own quota — has one definition feeding both the enforced quota and
+the warned-about one, not two that can drift.
+
+**Four of five background goroutines were never awaited.** `serve()` ran
+`defer st.Close()` on the SQLite history store while the bounce notifier,
+every canary, `metrics.Serve` and `web.Serve` were still live — and
+`web.Serve` spends up to five seconds in `srv.Shutdown` draining dashboard
+requests that query that store. So the graceful HTTP shutdown already written
+in `internal/web/http.go` was never actually honoured, and a canary or digest
+enqueued during shutdown lost its journal row silently (`database/sql` is
+safe after `Close`, so these returned `sql: database is closed` into a `_ =`
+rather than crashing). Now a `sync.WaitGroup` covers all five, using Go
+1.25's `WaitGroup.Go`. The ordering is the subtle half and is commented in
+place: deferred calls run LIFO, so the cleanup calls `stop()` *itself* before
+`bg.Wait()` rather than relying on the `defer stop()` above it — otherwise
+any early-return startup path (a `web.New` failure, say) would wait on
+goroutines whose context had never been cancelled, turning a clean startup
+error into a hung process. `dm.Run` was initially left on its existing `done`
+channel and that was wrong: `done` is drained on only two of the three paths
+that can reach it, so the `web.New` failure path returned with the dispatcher
+still writing attempt rows. It is in the WaitGroup now, with `done` kept for
+the accept-loop ordering it already did.
+
+**`delivery` built canary runners it never used.** `delivery.New` called
+`canary.New` into a field whose only reader was a `Canaries()` accessor whose
+only caller was `serve()`, which ran them. The whole `delivery → canary`
+package edge existed for construction alone. Runners are now built in
+`serve()` next to the goroutine that owns them; the field, the accessor and
+the import are gone. `canaryNames` stays in `delivery.New` — `metrics.New`
+still needs it to seed the per-canary counters at zero. Deliberately *not*
+done to `bounce.Notifier` alongside it, which looks symmetric and is not:
+`m.notifier.RecordFail` is called from `Manager.fail`, so that one is
+genuinely coupled and belongs where it is.
+
+Verified: `gofmt -l .` clean, `go vet ./...` clean, `go build` for
+`linux/amd64`, `windows/amd64` and `linux/arm64` clean,
+`scripts/check-banned-imports.sh` clean for all three targets, and
+`CGO_ENABLED=1 go test -race ./...` green across all 18 test packages. Two
+new tests: `TestQuotaWarningReportsThresholdCrossing` (no quota, quota
+without threshold, and the crossing at exactly 80%) and
+`TestReportQuotaLogsOnlyOnTransition` (rising edge, staying over logging
+nothing, falling edge, staying under logging nothing, plus the zero-quota
+division guard). The second was mutation-checked: deleting
+`m.quotaWarned = over` makes it fail, so it tests the edge and not just the
+message text.
+
+**Note for the next session**: `make test` cannot work as written. The
+Makefile has `export CGO_ENABLED = 0` at the top and `test:` runs
+`go test -race ./...`, but `-race` requires cgo, so the target fails before
+running anything. This is pre-existing and not caused by this session's
+change — it fails identically on a clean checkout. CI does not hit it because
+`.github/workflows/ci.yml:43` runs `go test -race ./...` directly, outside
+the Makefile. Either the `test:` target needs `CGO_ENABLED=1`, or it should
+drop `-race` and leave the race build to CI. Not changed here because it is
+a toolchain decision, not part of what was asked.
+
+**Deliberately deferred, from the same review**: `Spool.Commit` reads
+`s.maxQuotaBytes` at `internal/spool/spool.go` without holding `s.mu` while
+`SetQuota` writes it under the lock — `SweepFailed` takes the lock for the
+sibling `failedTTL`, so `Commit` is the outlier. Not reachable today
+(`SetQuota` is called once in `serve()` before any listener binds) and
+`go test -race` cannot catch it because no test calls the two concurrently,
+but `SetQuota` is exported and its doc comment does not say it is
+configuration-time-only. Five further findings from that review were reported
+and not actioned: `Config.Validate()` is 611 lines and also applies per-route
+defaults that `Defaults()` does not (so `Defaults()` is not the whole
+answer); subject redaction for `history.retain_subjects` is implemented three
+times across `web` and `api`; `web.parseTimeRange` and
+`api.parseTimeRangeQuery` are byte-identical; `session.doData` is 159 lines;
+`internal/selftest` — the open-relay probe — has no tests.
+
+**Previous session**: 2026-09-15 (thirty-second session) — One feature, from
 "ich möchte die canary nicht nur als intervall sondern zu einem bestimmten
 zeitpunkt. (UTC)" / "z.b täglich 07:00".
 

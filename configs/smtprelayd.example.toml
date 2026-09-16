@@ -291,4 +291,8 @@ data_timeout_sec     = 300
 # negative value is a startup error rather than a silent "unlimited", which is
 # what it used to become.
 spool_max_gb         = 10
+# Logs "spool is filling up" at WARN once the spool reaches this share of
+# spool_max_gb, and "spool is back below the quota warning threshold" at INFO
+# once it drops under again. Only the crossings are logged, not every poll. 0
+# disables the warning without disabling the quota.
 spool_warn_percent   = 80

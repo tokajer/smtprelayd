@@ -5,7 +5,6 @@
 package logging
 
 import (
-	"context"
 	"io"
 	"log/slog"
 	"os"
@@ -126,19 +125,3 @@ func createRestricted(path string) error {
 	}
 	return fsmode.RestrictFile(path)
 }
-
-// FromContext returns the logger stored in ctx, or the default logger.
-func FromContext(ctx context.Context) *slog.Logger {
-	if l, ok := ctx.Value(loggerKey{}).(*slog.Logger); ok {
-		return l
-	}
-	return slog.Default()
-}
-
-// WithLogger stores a logger in ctx, used to carry the queue ID through the
-// delivery path so that every line of one message shares a correlation key.
-func WithLogger(ctx context.Context, l *slog.Logger) context.Context {
-	return context.WithValue(ctx, loggerKey{}, l)
-}
-
-type loggerKey struct{}

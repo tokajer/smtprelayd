@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -390,4 +391,49 @@ func enqueueTestMessage(t *testing.T, st *store.Store, sp *spool.Spool, route st
 		t.Fatal(err)
 	}
 	return id.String()
+}
+
+// TestFailLimiterEnforcesItsCeiling covers what maxTrackedSources is for: a
+// caller cycling source addresses fast enough that nothing ever expires used
+// to grow the table without limit, because eviction only ever removed
+// expired entries.
+func TestFailLimiterEnforcesItsCeiling(t *testing.T) {
+	l := newFailLimiter()
+	now := time.Now()
+
+	// Every entry is created within the same instant, so none is expired and
+	// the expiry sweep alone can free nothing.
+	for i := 0; i < maxTrackedSources*2; i++ {
+		l.recordFailure(fmt.Sprintf("198.51.100.%d", i), now)
+	}
+	if len(l.state) > maxTrackedSources {
+		t.Fatalf("tracked %d sources, want at most %d", len(l.state), maxTrackedSources)
+	}
+}
+
+// TestFailLimiterEvictsUnblockedSourcesFirst proves the ceiling cannot be
+// used to escape a backoff: a blocked source has to survive pressure from
+// sources that were merely seen once.
+func TestFailLimiterEvictsUnblockedSourcesFirst(t *testing.T) {
+	l := newFailLimiter()
+	now := time.Now()
+
+	const blocked = "203.0.113.9"
+	for i := 0; i < failThreshold; i++ {
+		l.recordFailure(blocked, now)
+	}
+	if _, isBlocked := l.blocked(blocked, now); !isBlocked {
+		t.Fatal("setup: the source should be in backoff after failThreshold failures")
+	}
+
+	for i := 0; i < maxTrackedSources*2; i++ {
+		l.recordFailure(fmt.Sprintf("198.51.100.%d", i), now)
+	}
+
+	if _, isBlocked := l.blocked(blocked, now); !isBlocked {
+		t.Fatal("a blocked source was evicted by table pressure, which would let it escape its own backoff")
+	}
+	if len(l.state) > maxTrackedSources {
+		t.Fatalf("tracked %d sources, want at most %d", len(l.state), maxTrackedSources)
+	}
 }

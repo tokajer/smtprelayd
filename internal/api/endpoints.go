@@ -8,35 +8,13 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
-	"strings"
 	"time"
 
+	"github.com/tokajer/smtprelayd/internal/httpx"
 	"github.com/tokajer/smtprelayd/internal/metrics"
 	"github.com/tokajer/smtprelayd/internal/spool"
 	"github.com/tokajer/smtprelayd/internal/store"
 )
-
-// parseTimeRangeQuery parses the since/until query parameters into *since
-// and *until, RFC 3339 only. It returns a message on a bad value instead of
-// guessing at another layout; an empty return means both parsed cleanly (or
-// were absent).
-func parseTimeRangeQuery(q url.Values, since, until **time.Time) string {
-	if v := strings.TrimSpace(q.Get("since")); v != "" {
-		t, err := time.Parse(time.RFC3339, v)
-		if err != nil {
-			return "since must be RFC 3339, e.g. 2026-01-01T00:00:00Z"
-		}
-		*since = &t
-	}
-	if v := strings.TrimSpace(q.Get("until")); v != "" {
-		t, err := time.Parse(time.RFC3339, v)
-		if err != nil {
-			return "until must be RFC 3339, e.g. 2026-01-01T00:00:00Z"
-		}
-		*until = &t
-	}
-	return ""
-}
 
 func limitFromQuery(q url.Values, fallback int) int {
 	n, err := strconv.Atoi(q.Get("limit"))
@@ -109,7 +87,7 @@ func (s *Server) handleBounces(w http.ResponseWriter, r *http.Request) {
 		Client: q.Get("client"), Route: q.Get("route"), Class: class,
 		Limit: c.Limit, Offset: c.Offset,
 	}
-	if msg := parseTimeRangeQuery(q, &filter.Since, &filter.Until); msg != "" {
+	if msg := httpx.ParseTimeRange(q, &filter.Since, &filter.Until); msg != "" {
 		writeJSONError(w, http.StatusBadRequest, msg)
 		return
 	}
@@ -163,7 +141,7 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 		Client: q.Get("client"), Route: q.Get("route"), Status: status,
 		Limit: c.Limit, Offset: c.Offset,
 	}
-	if msg := parseTimeRangeQuery(q, &filter.Since, &filter.Until); msg != "" {
+	if msg := httpx.ParseTimeRange(q, &filter.Since, &filter.Until); msg != "" {
 		writeJSONError(w, http.StatusBadRequest, msg)
 		return
 	}
@@ -251,7 +229,7 @@ func (s *Server) handleRequeue(w http.ResponseWriter, r *http.Request) {
 	tokenName, _ := r.Context().Value(tokenNameKey{}).(string)
 	switch err := s.spool.Requeue(id); {
 	case err == nil:
-		if aerr := s.store.RecordAudit(tokenName, sourceAddr(r), "requeue", id.String(), ""); aerr != nil {
+		if aerr := s.store.RecordAudit(tokenName, httpx.SourceAddr(r), "requeue", id.String(), ""); aerr != nil {
 			s.log.Warn("audit log write failed", "action", "requeue", "queue_id", id.String(), "error", aerr)
 		}
 		writeJSON(w, http.StatusOK, map[string]string{"status": "requeued"})
@@ -276,7 +254,7 @@ func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request) {
 		if rerr := s.store.RecordRemoval(id.String()); rerr != nil {
 			s.log.Warn("removal record write failed", "queue_id", id.String(), "error", rerr)
 		}
-		if aerr := s.store.RecordAudit(tokenName, sourceAddr(r), "delete", id.String(), ""); aerr != nil {
+		if aerr := s.store.RecordAudit(tokenName, httpx.SourceAddr(r), "delete", id.String(), ""); aerr != nil {
 			s.log.Warn("audit log write failed", "action", "delete", "queue_id", id.String(), "error", aerr)
 		}
 		writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
@@ -295,7 +273,7 @@ func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request) {
 			writeJSONError(w, http.StatusNotFound, "message not found")
 			return
 		}
-		if aerr := s.store.RecordAudit(tokenName, sourceAddr(r), "delete", id.String(), "no spool copy: history reconciled"); aerr != nil {
+		if aerr := s.store.RecordAudit(tokenName, httpx.SourceAddr(r), "delete", id.String(), "no spool copy: history reconciled"); aerr != nil {
 			s.log.Warn("audit log write failed", "action", "delete", "queue_id", id.String(), "error", aerr)
 		}
 		writeJSON(w, http.StatusOK, map[string]string{"status": "cleared"})

@@ -16,6 +16,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sync"
 	"syscall"
 	"time"
 
@@ -25,6 +26,7 @@ import (
 	_ "time/tzdata"
 
 	"github.com/tokajer/smtprelayd/internal/api"
+	"github.com/tokajer/smtprelayd/internal/canary"
 	"github.com/tokajer/smtprelayd/internal/config"
 	"github.com/tokajer/smtprelayd/internal/delivery"
 	"github.com/tokajer/smtprelayd/internal/listener"
@@ -142,7 +144,11 @@ func run(cmd, configPath string, console bool, outPath string) error {
 		if err != nil {
 			return err
 		}
-		if err := selftest.Run(cfg, 10*time.Second); err != nil {
+		notes, err := selftest.Run(cfg, 10*time.Second)
+		for _, n := range notes {
+			fmt.Println("note:", n)
+		}
+		if err != nil {
 			return err
 		}
 		fmt.Println("open relay self-test passed")
@@ -254,6 +260,19 @@ func serve(ctx context.Context, configPath string, console bool, ready chan<- er
 	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	// Every background goroutine below holds the store, and web.Serve drains
+	// in-flight dashboard requests for up to five seconds. Deferred calls run
+	// LIFO, so cancelling and waiting has to happen here, after the defers
+	// that opened the store: this one runs before them and leaves st.Close()
+	// with nothing still reading from it. stop() is called inside rather than
+	// relied on from its own defer for the same reason -- a startup error
+	// returning early must cancel the context before anything waits on it.
+	var bg sync.WaitGroup
+	defer func() {
+		stop()
+		bg.Wait()
+	}()
+
 	dm, err := delivery.New(cfg, sp, log, st)
 	if err != nil {
 		log.Error("delivery: failed to start", "error", err)
@@ -264,21 +283,22 @@ func serve(ctx context.Context, configPath string, console bool, ready chan<- er
 		return err
 	}
 	done := make(chan struct{})
-	go func() {
+	bg.Go(func() {
 		dm.Run(ctx)
 		close(done)
-	}()
-	go dm.Notifier().Run(ctx)
-	for _, c := range dm.Canaries() {
-		go c.Run(ctx)
+	})
+	bg.Go(func() { dm.Notifier().Run(ctx) })
+	for _, c := range cfg.Canaries {
+		r := canary.New(cfg, c, sp, st, log)
+		bg.Go(func() { r.Run(ctx) })
 	}
 
 	if cfg.Metrics.Enabled {
-		go func() {
+		bg.Go(func() {
 			if err := metrics.Serve(ctx, cfg, dm.Metrics(), log); err != nil {
 				log.Error("metrics listener stopped", "error", err)
 			}
-		}()
+		})
 	}
 
 	if cfg.Web.Enabled {
@@ -297,11 +317,11 @@ func serve(ctx context.Context, configPath string, console bool, ready chan<- er
 		mux.Handle("/api/v1/", http.StripPrefix("/api/v1", as.Handler()))
 		mux.Handle("/", ws.Handler())
 
-		go func() {
+		bg.Go(func() {
 			if err := web.Serve(ctx, cfg, mux, log); err != nil {
 				log.Error("web listener stopped", "error", err)
 			}
-		}()
+		})
 	}
 
 	if err := set.Bind(); err != nil {

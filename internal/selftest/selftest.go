@@ -15,11 +15,13 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/netip"
 	"os"
 	"strings"
 	"time"
 
 	"github.com/tokajer/smtprelayd/internal/config"
+	"github.com/tokajer/smtprelayd/internal/listener"
 )
 
 const probeRecipient = "open-relay-probe@example.net"
@@ -27,20 +29,46 @@ const probeRecipient = "open-relay-probe@example.net"
 // Run connects to every configured listener and attempts to relay to an
 // external domain. Any listener that accepts the attempt is reported as a
 // failure; the caller must treat a non-nil error as fatal.
-func Run(cfg *config.Config, timeout time.Duration) error {
-	var failures []string
+//
+// The notes it returns alongside are listeners that accepted the relay from a
+// source the configuration legitimately allowlists -- see probe. They are not
+// failures, but they mean the default-deny path was not exercised, so the
+// caller must show them rather than print an unqualified pass.
+func Run(cfg *config.Config, timeout time.Duration) ([]string, error) {
+	// The relay's own matcher, not a second copy of it: this has to agree
+	// with what the running listener would decide, and a reimplementation
+	// here could pass while the real one denies, or the reverse.
+	match, err := listener.NewMatcher(cfg.Clients)
+	if err != nil {
+		return nil, fmt.Errorf("selftest: %w", err)
+	}
+	var notes, failures []string
 	for _, l := range cfg.Listeners {
-		if err := probe(cfg, l, timeout); err != nil {
+		note, err := probe(cfg, match, l, timeout)
+		if err != nil {
 			failures = append(failures, fmt.Sprintf("listener %s (%s): %v", l.Name, l.Address, err))
+		}
+		if note != "" {
+			notes = append(notes, note)
 		}
 	}
 	if len(failures) > 0 {
-		return fmt.Errorf("open relay self-test failed:\n  - %s", strings.Join(failures, "\n  - "))
+		return notes, fmt.Errorf("open relay self-test failed:\n  - %s", strings.Join(failures, "\n  - "))
 	}
-	return nil
+	return notes, nil
 }
 
-func probe(cfg *config.Config, l config.Listener, timeout time.Duration) error {
+// probe attempts one relay through one listener. It returns an error when the
+// relay was accepted from a source that should not have been able to relay,
+// and a note when it was accepted from a source the configuration allowlists.
+//
+// The distinction matters because the probe dials from this host, so it
+// arrives on the listener as a connection from loopback. An operator who
+// allowlists 127.0.0.1 -- an application relaying from the same machine, an
+// ordinary deployment -- would otherwise have a correct configuration
+// reported as an open relay by the very check that is meant to prove it is
+// not one.
+func probe(cfg *config.Config, match *listener.Matcher, l config.Listener, timeout time.Duration) (string, error) {
 	addr := dialAddress(l.Address)
 	d := &net.Dialer{Timeout: timeout}
 
@@ -49,50 +77,87 @@ func probe(cfg *config.Config, l config.Listener, timeout time.Duration) error {
 	if l.TLS == "implicit" {
 		tc, terr := tlsConfig(cfg)
 		if terr != nil {
-			return terr
+			return "", terr
 		}
 		conn, err = tls.DialWithDialer(d, "tcp", addr, tc)
 	} else {
 		conn, err = d.Dial("tcp", addr)
 	}
 	if err != nil {
-		return fmt.Errorf("connect: %w", err)
+		return "", fmt.Errorf("connect: %w", err)
 	}
 	defer conn.Close()
 	_ = conn.SetDeadline(time.Now().Add(timeout))
 
 	br := bufio.NewReader(conn)
 	if _, err := expect(br, 220); err != nil {
-		return err
+		return "", err
 	}
 	if err := send(conn, "EHLO selftest.invalid"); err != nil {
-		return err
+		return "", err
 	}
 	if _, err := expect(br, 250); err != nil {
-		return err
+		return "", err
 	}
 	if err := send(conn, "MAIL FROM:<probe@selftest.invalid>"); err != nil {
-		return err
+		return "", err
 	}
 	code, line, err := expectAny(br)
 	if err != nil {
-		return err
+		return "", err
 	}
 	if code >= 400 {
-		return nil // rejected already, which is the desired outcome
+		return "", nil // rejected already, which is the desired outcome
 	}
 	if err := send(conn, "RCPT TO:<"+probeRecipient+">"); err != nil {
-		return err
+		return "", err
 	}
 	code, line, err = expectAny(br)
 	if err != nil {
-		return err
+		return "", err
 	}
 	if code >= 400 {
-		return nil
+		return "", nil
 	}
 	_ = send(conn, "RSET")
-	return fmt.Errorf("relay to %s was accepted with %d %s", probeRecipient, code, line)
+	return acceptedVerdict(match, conn, l, code, line)
+}
+
+// acceptedVerdict decides what an accepted relay means, given the source the
+// probe actually reached the listener from.
+func acceptedVerdict(match *listener.Matcher, conn net.Conn, l config.Listener, code int, line string) (string, error) {
+	src, ok := localAddr(conn)
+	if !ok {
+		return "", fmt.Errorf("relay to %s was accepted with %d %s", probeRecipient, code, line)
+	}
+	cl, bits, matched := match.Match(src)
+	if !matched {
+		return "", fmt.Errorf("relay to %s from unmatched source %s was accepted with %d %s",
+			probeRecipient, src, code, line)
+	}
+	if bits == 0 {
+		// A client whose cidr covers every address is an open relay however
+		// the match is reached, so an allowlist hit does not excuse it.
+		return "", fmt.Errorf("relay to %s was accepted from %s, allowed by client %q whose cidr covers every address: that is an open relay",
+			probeRecipient, src, cl.Name)
+	}
+	return fmt.Sprintf("listener %s accepted the relay from %s, which the configuration allowlists as client %q; "+
+		"an allowlisted source is supposed to relay, so this is not an open relay. "+
+		"The default-deny path was therefore not exercised -- to test it, run the probe from an address outside every client cidr.",
+		l.Name, src, cl.Name), nil
+}
+
+// localAddr is the address the listener sees this probe arriving from.
+func localAddr(conn net.Conn) (netip.Addr, bool) {
+	host, _, err := net.SplitHostPort(conn.LocalAddr().String())
+	if err != nil {
+		return netip.Addr{}, false
+	}
+	a, err := netip.ParseAddr(host)
+	if err != nil {
+		return netip.Addr{}, false
+	}
+	return a.Unmap(), true
 }
 
 // tlsConfig replaces chain verification with an exact pin on the listener's

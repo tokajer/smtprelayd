@@ -3,4 +3,6 @@
 *.msi
 *.wixobj
 *.wixpdb
-.claude/
+.claude
+./claude/skills/
+./claude/settings.json
