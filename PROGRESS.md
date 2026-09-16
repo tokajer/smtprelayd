@@ -158,6 +158,42 @@ what `internal/expiry` above now does by mail. A *metric* for the same value
 still does not exist, so a host with no `bounce.notify` contact gets no
 notice beyond the date printed at generation.
 
+### Field verification on the Windows server (2026-09-16)
+
+Confirmed by the operator on the real deployment, not on the dev box:
+
+- **`gen-cert` and the resulting certificate work.** TLS succeeds in both
+  modes: implicit on 465 and STARTTLS on 587.
+- **Dashboard reachable over plain `http://`** after the `web.Serve` change
+  that removed the TLS branch. This was the session's one deliberate
+  operator-visible behaviour change, and it is the confirmation that mattered.
+- **Clean shutdown** — no `sql: database is closed` in the log after a service
+  stop, which is what the `sync.WaitGroup` in `serve()` was added for.
+
+`contrib/Test-SmtpTls.ps1` was written for this and is now validated in the
+field as well as by reading. It connects with TLS 1.2 by default, prints the
+negotiated **key exchange** (the diagnostic that matters, since Go disabled
+RSA key exchange by default in 1.22, so a device that cannot do ECDHE fails
+even when the version matches), and has `-ProbeAll` for a version sweep and
+`-StartTls` for 587/25. Written against PowerShell 5.1 / .NET Framework 4.8,
+since that is what a Windows Server ships.
+
+Measured against a real listener while building it, with `min_tls = "1.0"`:
+TLS 1.0 through 1.3 all negotiate, but 1.0 and 1.1 **only** over
+`ECDHE_RSA_WITH_AES_128_CBC_SHA`. Pure RSA key exchange is refused with alert
+40 unless the process runs with `GODEBUG=tlsrsakex=1`, which was verified to
+re-enable `AES128-SHA` on TLS 1.0. On Windows that is set per service with a
+`REG_MULTI_SZ` `Environment` value under the service key. It is a real
+weakening (no forward secrecy) and would need a `MEMORY.md` decision before
+being deployed permanently.
+
+**Still untested on hardware**: the expiry warning actually arriving as mail.
+The cheapest way to trigger it is to set `oauth2.secret_expires` on the M365
+route to a date about ten days out and restart — the watcher checks
+immediately at startup, so no waiting — then revert. That exercises the whole
+collect/batch/compose/send path; only the source of the date differs from the
+certificate case, which is already verified end to end above.
+
 ## The five review fixes
 
 **Dead code that documented a lie.** `logging.FromContext`, `WithLogger` and
