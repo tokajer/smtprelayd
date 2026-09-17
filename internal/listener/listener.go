@@ -213,13 +213,16 @@ func (s *Server) accept(ctx context.Context) {
 		s.closeMu.Unlock()
 		go func() {
 			defer func() {
-				<-s.sem
-				s.wg.Done()
+				// First, so that it reads as the guard it is. recover works
+				// anywhere inside a deferred function, but placing it after
+				// the bookkeeping made a correct line look like a mistake.
 				// One malformed session must not take the process down.
 				if r := recover(); r != nil {
 					s.log.Error("session panic", "panic", fmt.Sprint(r),
 						"remote", conn.RemoteAddr().String())
 				}
+				<-s.sem
+				s.wg.Done()
 			}()
 			s.handle(ctx, conn)
 		}()

@@ -132,3 +132,54 @@ func TestCloseDoesNotRaceAcceptedConnections(t *testing.T) {
 		t.Fatal("Run did not return after its context was cancelled")
 	}
 }
+
+// A session blocked in a read must not hold the shutdown open. Before this,
+// Set.Close waited for every connected client's read deadline -- measured at
+// 30s with read_timeout_sec=30, and up to data_timeout_sec (300s shipped) for
+// a client mid-DATA. The Windows SCM allows five seconds for a stop.
+func TestShutdownDoesNotWaitForAnIdleSession(t *testing.T) {
+	cfg := &config.Config{
+		Listeners: []config.Listener{{Name: "t", Address: "127.0.0.1:0", TLS: "none"}},
+		// Deliberately far longer than the test may take: if the deadline is
+		// what ends the session, this test fails by timing out rather than
+		// passing slowly.
+		Limits:  config.Limits{MaxConnections: 10, ReadTimeoutSec: 120, DataTimeoutSec: 300},
+		Service: config.Service{Hostname: "probe"},
+	}
+	set, err := New(cfg, nil, discardLog(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := set.Bind(); err != nil {
+		t.Fatal(err)
+	}
+	addr := set.servers[0].ln.Addr().String()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { set.Run(ctx); close(done) }()
+
+	conn, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	// Read the banner, so the session is certainly past accept and blocked
+	// waiting for a command rather than still starting up.
+	buf := make([]byte, 64)
+	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	if _, err := conn.Read(buf); err != nil {
+		t.Fatalf("no banner: %v", err)
+	}
+
+	start := time.Now()
+	cancel()
+	select {
+	case <-done:
+		if elapsed := time.Since(start); elapsed > 5*time.Second {
+			t.Errorf("shutdown took %v; it waited for the session's read deadline", elapsed)
+		}
+	case <-time.After(20 * time.Second):
+		t.Fatal("shutdown is still blocked on an idle session after 20s")
+	}
+}

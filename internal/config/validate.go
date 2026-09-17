@@ -89,8 +89,8 @@ func (c *Config) Validate() error {
 	names := map[string]bool{}
 	for i, l := range c.Listeners {
 		where := fmt.Sprintf("listener[%d] %q", i, l.Name)
-		if l.Name == "" {
-			add("%s: name is required", where)
+		if !ValidName(l.Name) {
+			add("%s: name must be 1 to %d printable ASCII characters without a quote or backslash", where, maxNameLen)
 		} else if names[l.Name] {
 			add("%s: duplicate listener name", where)
 		}
@@ -149,8 +149,8 @@ func (c *Config) Validate() error {
 	for i := range c.Clients {
 		cl := &c.Clients[i]
 		where := fmt.Sprintf("client[%d] %q", i, cl.Name)
-		if cl.Name == "" {
-			add("%s: name is required", where)
+		if !ValidName(cl.Name) {
+			add("%s: name must be 1 to %d printable ASCII characters without a quote or backslash", where, maxNameLen)
 		} else if clientNames[cl.Name] {
 			add("%s: duplicate client name", where)
 		}
@@ -242,8 +242,8 @@ func (c *Config) Validate() error {
 	for i := range c.Routes {
 		r := &c.Routes[i]
 		where := fmt.Sprintf("route[%d] %q", i, r.Name)
-		if r.Name == "" {
-			add("%s: name is required", where)
+		if !ValidName(r.Name) {
+			add("%s: name must be 1 to %d printable ASCII characters without a quote or backslash", where, maxNameLen)
 		} else if routeNames[r.Name] {
 			add("%s: duplicate route name", where)
 		}
@@ -466,6 +466,9 @@ func (c *Config) Validate() error {
 		}
 	}
 	for i, t := range c.Web.Tokens {
+		if !ValidName(t.Name) {
+			add("web.token[%d]: name must be 1 to %d printable ASCII characters without a quote or backslash", i, maxNameLen)
+		}
 		if t.Scope != "read" && t.Scope != "admin" {
 			add("web.token[%d] %q: scope must be read or admin", i, t.Name)
 		}
@@ -573,8 +576,8 @@ func (c *Config) Validate() error {
 	}
 	canaryNames := map[string]bool{}
 	for i, cn := range c.Canaries {
-		if cn.Name == "" {
-			add("canary[%d]: name is required", i)
+		if !ValidName(cn.Name) {
+			add("canary[%d]: name must be 1 to %d printable ASCII characters without a quote or backslash", i, maxNameLen)
 		} else if canaryNames[cn.Name] {
 			add("canary[%d]: name %q is used by more than one [[canary]]", i, cn.Name)
 		} else if clientNames[cn.Name] {
@@ -630,6 +633,21 @@ func (c *Config) Validate() error {
 	}
 	if c.Limits.MaxHeaderBytes <= 0 {
 		add("limits.max_header_bytes must be positive")
+	}
+	if c.Limits.DeliveryTimeoutSec <= 0 {
+		add("limits.delivery_timeout_sec must be positive")
+	} else if want := c.Limits.MaxMessageMB; want > 0 {
+		// A budget that cannot carry the largest message the relay will
+		// accept turns every such message into a retry loop that only ends
+		// when queue.max_lifetime_hours expires it. 1 MB/s is a deliberately
+		// pessimistic floor; the point is to catch a budget that is orders of
+		// magnitude too small, not to model the link.
+		if need := want + 30; c.Limits.DeliveryTimeoutSec < need {
+			add("limits.delivery_timeout_sec %d is too small for limits.max_message_mb %d: "+
+				"a message that size needs at least %d seconds at 1 MB/s plus handshake, "+
+				"and a shorter budget makes large mail retry until it expires",
+				c.Limits.DeliveryTimeoutSec, want, need)
+		}
 	}
 	// Spool.SetQuota reads anything at or below zero as "no quota", and a
 	// value large enough to overflow int64 gigabytes-to-bytes used to mean the
@@ -690,6 +708,37 @@ func ParseTLSVersion(s string) (uint16, error) {
 	default:
 		return 0, fmt.Errorf("unsupported TLS version %q", s)
 	}
+}
+
+// maxNameLen bounds a configured name. Long enough for any descriptive name,
+// short enough that one cannot bloat a log line or a metrics exposition.
+const maxNameLen = 64
+
+// ValidName reports whether s is usable as a listener, client, route, canary
+// or token name.
+//
+// These names are not confined to the configuration file: they become
+// Prometheus label values, structured log fields, history journal columns and
+// dashboard text. The rule is deliberately permissive -- any printable ASCII,
+// spaces included -- and excludes exactly the three things that break a
+// downstream format: control characters (which would split a log line or a
+// Received header), the double quote and the backslash (which are what a
+// Prometheus label value has to escape).
+//
+// metrics.label escapes those anyway and should keep doing so, but until this
+// existed its comment claimed the loader guaranteed a safe character set when
+// the loader checked only for empty and duplicate names.
+func ValidName(s string) bool {
+	if s == "" || len(s) > maxNameLen {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c < 0x20 || c > 0x7e || c == '"' || c == '\\' {
+			return false
+		}
+	}
+	return true
 }
 
 // printableASCII reports whether s consists only of characters that survive a

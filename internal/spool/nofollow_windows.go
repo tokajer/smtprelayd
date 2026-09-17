@@ -5,6 +5,6 @@
 
 package spool
 
-// Windows has no O_NOFOLLOW. Reparse point handling is covered by the data
-// directory ACL set by the installer instead.
+// noFollow is zero on Windows, which has no O_NOFOLLOW. Reparse point
+// handling is covered by the data directory ACL the installer sets instead.
 const noFollow = 0

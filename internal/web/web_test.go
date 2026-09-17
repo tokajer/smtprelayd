@@ -953,3 +953,65 @@ func TestConfigPageReportsAnUnreadableCertificate(t *testing.T) {
 		t.Errorf("config page should report the unreadable certificate:\n%s", body)
 	}
 }
+
+// A bulk action whose client has gone must stop rather than finish an
+// irreversible run nobody will see the result of, and must report that it
+// stopped so the operator knows to repeat it.
+func TestQueueBulkStopsWhenTheClientDisconnects(t *testing.T) {
+	cfg := testConfig(t, "")
+	srv, st, sp := testServer(t, cfg)
+	var ids []string
+	for i := 0; i < 5; i++ {
+		ids = append(ids, enqueueMessage(t, st, sp, "m365"))
+	}
+
+	form := url.Values{
+		"csrf_delete": {srv.csrf.token("queue-delete", "", time.Now())},
+		"scope":       {"selected"},
+		"id":          ids,
+	}
+	req := httptest.NewRequest(http.MethodPost, "/queue/delete", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Host = "127.0.0.1:8025"
+
+	// Already cancelled: the loop must stop before the first message rather
+	// than finish an irreversible run whose result nobody will see.
+	ctx, cancel := context.WithCancel(req.Context())
+	cancel()
+	req = req.WithContext(ctx)
+
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	loc := rec.Header().Get("Location")
+	q, err := url.ParseQuery(strings.TrimPrefix(loc, "/queue?"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if q.Get("more") != "1" {
+		t.Errorf("the redirect does not report an incomplete run: %q", loc)
+	}
+	if q.Get("ok") != "" {
+		t.Errorf("messages were deleted despite a cancelled request: ok=%s", q.Get("ok"))
+	}
+	if n := sp.Len(); n != 5 {
+		t.Errorf("spool holds %d messages, want all 5 untouched", n)
+	}
+}
+
+// The banner has to tell the operator to repeat it, whichever bound was hit.
+func TestBulkFlashReportsAnIncompleteRun(t *testing.T) {
+	f := bulkFlash(url.Values{"done": {"delete"}, "ok": {"7"}, "more": {"1"}})
+	if f == nil {
+		t.Fatal("no banner")
+	}
+	if !strings.Contains(f.Text, "repeat the action") {
+		t.Errorf("banner does not say to repeat it: %q", f.Text)
+	}
+	if !strings.Contains(f.Text, "7 deleted") {
+		t.Errorf("banner does not report what was done: %q", f.Text)
+	}
+}

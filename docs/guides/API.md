@@ -13,6 +13,18 @@ Tokens are defined in the configuration with a scope of `read` or `admin`.
 Requeue and delete require `admin`. Comparison is constant-time; failures are
 logged with the source address and counted in `/metrics`.
 
+Generate one with:
+
+```sh
+smtprelayd token new                 # scope read
+smtprelayd -scope admin token new    # requeue and delete as well
+```
+
+It prints the token, its SHA-256 digest and a `[[web.token]]` block to paste.
+Only the digest is stored, so the token is shown once and cannot be recovered
+from the configuration — save it before closing the terminal. See
+`docs/guides/CONFIGURATION.md` section 8 for rotation and revocation.
+
 Missing or malformed token yields `401`, valid token with insufficient scope
 yields `403`.
 

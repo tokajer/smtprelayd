@@ -66,7 +66,9 @@ func New(cfg *config.Config, sp *spool.Spool, log *slog.Logger, st *store.Store)
 		rate:   newRouteLimiter(),
 	}
 	routeNames := make([]string, 0, len(cfg.Routes))
-	authTokens := map[string]*authms365.TokenSource{}
+	// Typed as the metrics interface rather than the concrete source: Go does
+	// not convert map value types, so the choice has to be made here.
+	authTokens := map[string]metrics.TokenAger{}
 	for _, r := range cfg.Routes {
 		routeNames = append(routeNames, r.Name)
 		m.routes[r.Name] = make(chan struct{}, r.MaxConcurrent)
@@ -91,7 +93,7 @@ func New(cfg *config.Config, sp *spool.Spool, log *slog.Logger, st *store.Store)
 	for _, c := range cfg.Canaries {
 		canaryNames = append(canaryNames, c.Name)
 	}
-	m.metrics = metrics.New(sp, routeNames, canaryNames, authTokens)
+	m.metrics = metrics.New(cfg, sp, routeNames, canaryNames, authTokens)
 	m.notifier = bounce.New(cfg, sp, st, log)
 	return m, nil
 }
@@ -284,7 +286,7 @@ func (m *Manager) attempt(ctx context.Context, meta *spool.Meta) {
 		To:   meta.Envelope.To,
 		Data: f,
 		Helo: m.cfg.Service.Hostname,
-	}, time.Duration(m.cfg.Limits.WriteTimeoutSec)*time.Second, m.tokens[route.Name])
+	}, time.Duration(m.cfg.Limits.DeliveryTimeoutSec)*time.Second, m.tokens[route.Name])
 	elapsed := time.Since(start)
 	closeBody()
 

@@ -4,11 +4,8 @@
 package expiry
 
 import (
-	"io"
-	"log/slog"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
@@ -16,10 +13,8 @@ import (
 	"github.com/tokajer/smtprelayd/internal/config"
 )
 
-func discardLog() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
-
-// writeCert puts a real certificate on disk expiring at the given offset
-// from now, so the parsing path is exercised rather than stubbed.
+// writeCert puts a real certificate on disk expiring at the given offset from
+// now, so the parsing path is exercised rather than stubbed.
 func writeCert(t *testing.T, validity time.Duration) string {
 	t.Helper()
 	certPEM, _, err := certgen.Generate(certgen.Options{
@@ -35,68 +30,38 @@ func writeCert(t *testing.T, validity time.Duration) string {
 	return path
 }
 
-func watcher(t *testing.T, cfg *config.Config) *Watcher {
-	t.Helper()
-	if cfg.Expiry.WarnDays == 0 {
-		cfg.Expiry.WarnDays = 30
-	}
-	// A nil notifier is fine for collect/compose tests: they never send.
-	return New(cfg, nil, discardLog())
-}
-
-func TestCertificateInsideTheWindowIsCollected(t *testing.T) {
-	now := time.Now()
-	cfg := &config.Config{TLS: config.TLS{CertFile: writeCert(t, 10*24*time.Hour)}}
-
-	items := watcher(t, cfg).collect(now)
-	if len(items) != 1 {
-		t.Fatalf("collect() = %v, want the certificate", items)
-	}
-	if items[0].Key != "tls-certificate" {
-		t.Errorf("key = %q, want %q", items[0].Key, "tls-certificate")
+// Items reports every deadline regardless of how far away it is: the window
+// is the caller's business, and the dashboard shows healthy ones too.
+func TestItemsReportsTheCertificateWhateverItsDistance(t *testing.T) {
+	for _, validity := range []time.Duration{10 * 24 * time.Hour, 900 * 24 * time.Hour} {
+		cfg := &config.Config{TLS: config.TLS{CertFile: writeCert(t, validity)}}
+		items, err := Items(cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(items) != 1 {
+			t.Fatalf("validity %v: Items() = %v, want the certificate", validity, items)
+		}
+		if items[0].Key != "tls-certificate" {
+			t.Errorf("key = %q, want %q", items[0].Key, "tls-certificate")
+		}
 	}
 }
 
-func TestCertificateOutsideTheWindowIsIgnored(t *testing.T) {
-	cfg := &config.Config{TLS: config.TLS{CertFile: writeCert(t, 90*24*time.Hour)}}
-	if items := watcher(t, cfg).collect(time.Now()); len(items) != 0 {
-		t.Fatalf("collect() = %v, want nothing 90 days out", items)
-	}
-}
-
-// An expiry that has already passed is the case an operator most needs told
-// about, so it must not fall out of range.
-func TestAlreadyExpiredCertificateIsStillReported(t *testing.T) {
-	now := time.Now()
-	// Generated against a clock two years back, so it is long expired.
-	certPEM, _, err := certgen.Generate(certgen.Options{
-		Hosts: []string{"old"}, Validity: 24 * time.Hour, Now: now.Add(-2 * 365 * 24 * time.Hour),
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	path := filepath.Join(t.TempDir(), "old.crt")
-	if err := os.WriteFile(path, certPEM, 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	items := watcher(t, &config.Config{TLS: config.TLS{CertFile: path}}).collect(now)
-	if len(items) != 1 {
-		t.Fatalf("collect() = %v, want the expired certificate", items)
-	}
-}
-
-// An unreadable certificate is a log line, not a mail: the listener would
-// not have started on one, so this is a file that changed under a running
-// service and mailing about it helps nobody.
-func TestUnreadableCertificateIsNotReportedAsAnItem(t *testing.T) {
+// An unreadable certificate is an error, not an Item: the listener would not
+// have started on one, so it means the file changed under a running service.
+func TestItemsReportsAnUnreadableCertificateAsAnError(t *testing.T) {
 	cfg := &config.Config{TLS: config.TLS{CertFile: filepath.Join(t.TempDir(), "absent.crt")}}
-	if items := watcher(t, cfg).collect(time.Now()); len(items) != 0 {
-		t.Fatalf("collect() = %v, want nothing for an unreadable file", items)
+	items, err := Items(cfg)
+	if err == nil {
+		t.Fatal("an unreadable certificate must be reported as an error")
+	}
+	if len(items) != 0 {
+		t.Errorf("Items() = %v, want nothing", items)
 	}
 }
 
-func TestOAuth2SecretExpiryIsCollectedPerRoute(t *testing.T) {
+func TestItemsCollectsOAuth2SecretsPerRoute(t *testing.T) {
 	now := time.Now()
 	soon := now.Add(5 * 24 * time.Hour).Format("2006-01-02")
 	far := now.Add(300 * 24 * time.Hour).Format("2006-01-02")
@@ -109,102 +74,62 @@ func TestOAuth2SecretExpiryIsCollectedPerRoute(t *testing.T) {
 		{Name: "undated", Auth: "xoauth2"},
 	}}
 
-	items := watcher(t, cfg).collect(now)
-	if len(items) != 1 {
-		t.Fatalf("collect() = %v, want only the m365 secret", items)
+	items, err := Items(cfg)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if items[0].Key != "oauth2-secret:m365" {
-		t.Errorf("key = %q, want %q", items[0].Key, "oauth2-secret:m365")
+	if len(items) != 2 {
+		t.Fatalf("Items() = %v, want the two dated xoauth2 routes", items)
+	}
+	// Soonest first, which is what both the mail and the dashboard rely on.
+	if items[0].Key != "oauth2-secret:m365" || items[1].Key != "oauth2-secret:later" {
+		t.Errorf("Items() = %v, want m365 before later", items)
 	}
 }
 
-// The repeat gate is what keeps a daily warning from becoming an hourly one.
-func TestAnItemIsNotRepeatedWithinTheResendInterval(t *testing.T) {
+func TestItemsSortsSoonestFirst(t *testing.T) {
 	now := time.Now()
-	w := watcher(t, &config.Config{TLS: config.TLS{CertFile: writeCert(t, 10*24*time.Hour)}})
-	w.lastSent["tls-certificate"] = now.Add(-2 * time.Hour)
-
-	var due []Item
-	for _, it := range w.collect(now) {
-		if last, ok := w.lastSent[it.Key]; ok && now.Sub(last) < resendInterval {
-			continue
-		}
-		due = append(due, it)
+	cfg := &config.Config{
+		TLS: config.TLS{CertFile: writeCert(t, 200*24*time.Hour)},
+		Routes: []config.Route{{Name: "m365", Auth: "xoauth2", OAuth2: config.OAuth2{
+			TenantID: "t", SecretExpires: now.Add(5 * 24 * time.Hour).Format("2006-01-02"),
+		}}},
 	}
-	if len(due) != 0 {
-		t.Fatalf("an item mailed 2h ago was due again: %v", due)
+	items, err := Items(cfg)
+	if err != nil {
+		t.Fatal(err)
 	}
-
-	// Once the interval has passed it must come back.
-	w.lastSent["tls-certificate"] = now.Add(-25 * time.Hour)
-	due = nil
-	for _, it := range w.collect(now) {
-		if last, ok := w.lastSent[it.Key]; ok && now.Sub(last) < resendInterval {
-			continue
-		}
-		due = append(due, it)
-	}
-	if len(due) != 1 {
-		t.Fatalf("an item mailed 25h ago was not due again: %v", due)
+	if len(items) != 2 || items[0].Key != "oauth2-secret:m365" {
+		t.Fatalf("Items() = %v, want the secret first", items)
 	}
 }
 
-func TestComposeNamesTheItemAndItsDeadline(t *testing.T) {
+func TestItemsWithNothingConfigured(t *testing.T) {
+	items, err := Items(&config.Config{})
+	if err != nil || len(items) != 0 {
+		t.Fatalf("Items() = %v, %v, want nothing and no error", items, err)
+	}
+}
+
+func TestWarnWindow(t *testing.T) {
+	if got := WarnWindow(&config.Config{Expiry: config.Expiry{WarnDays: 30}}); got != 30*24*time.Hour {
+		t.Errorf("WarnWindow(30) = %v", got)
+	}
+	// Zero switches the warnings off; the caller checks for it.
+	if got := WarnWindow(&config.Config{}); got != 0 {
+		t.Errorf("WarnWindow(0) = %v, want 0", got)
+	}
+}
+
+func TestDaysUntil(t *testing.T) {
 	now := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
-	due := []Item{{
-		Key: "tls-certificate", What: "the listener TLS certificate",
-		Detail: "/etc/smtprelayd/tls/relay.crt", Expires: now.Add(7 * 24 * time.Hour),
-	}}
-
-	subject, body := compose(due, now, "relay.internal.example.at", 30)
-	if !strings.Contains(subject, "7 day") {
-		t.Errorf("subject = %q, want the days remaining", subject)
+	// Truncating, not rounding: "1 day left" must not be printed for
+	// something lapsing in an hour.
+	if got := DaysUntil(now.Add(47*time.Hour), now); got != 1 {
+		t.Errorf("DaysUntil(47h) = %d, want 1", got)
 	}
-	for _, want := range []string{
-		"the listener TLS certificate", "/etc/smtprelayd/tls/relay.crt", "7 day(s) left",
-		"relay.internal.example.at",
-	} {
-		if !strings.Contains(body, want) {
-			t.Errorf("body is missing %q:\n%s", want, body)
-		}
-	}
-}
-
-// An already-lapsed item must read as lapsed, not as "0 days left".
-func TestComposeMarksAnExpiredItem(t *testing.T) {
-	now := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
-	due := []Item{{
-		Key: "oauth2-secret:m365", What: "the Microsoft 365 client secret for route \"m365\"",
-		Detail: "tenant contoso.onmicrosoft.com", Expires: now.Add(-3 * 24 * time.Hour),
-	}}
-
-	subject, body := compose(due, now, "relay", 30)
-	if !strings.Contains(subject, "ACTION REQUIRED") || !strings.Contains(subject, "expired") {
-		t.Errorf("subject = %q, want it to flag an expired item", subject)
-	}
-	if !strings.Contains(body, "EXPIRED 3 day(s) ago") {
-		t.Errorf("body should say how long ago it expired:\n%s", body)
-	}
-}
-
-func TestComposeBatchesSeveralItems(t *testing.T) {
-	now := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
-	due := []Item{
-		{Key: "a", What: "item A", Detail: "d", Expires: now.Add(2 * 24 * time.Hour)},
-		{Key: "b", What: "item B", Detail: "d", Expires: now.Add(9 * 24 * time.Hour)},
-	}
-	subject, body := compose(due, now, "relay", 30)
-	if !strings.Contains(subject, "2 item(s)") {
-		t.Errorf("subject = %q, want it to count both", subject)
-	}
-	if !strings.Contains(body, "item A") || !strings.Contains(body, "item B") {
-		t.Errorf("body should list both:\n%s", body)
-	}
-}
-
-func TestNoCertificateAndNoRoutesCollectsNothing(t *testing.T) {
-	if items := watcher(t, &config.Config{}).collect(time.Now()); len(items) != 0 {
-		t.Fatalf("collect() = %v, want nothing", items)
+	if got := DaysUntil(now.Add(-3*24*time.Hour), now); got != -3 {
+		t.Errorf("DaysUntil(-3d) = %d, want -3", got)
 	}
 }
 
@@ -221,32 +146,5 @@ func TestCertNotAfterSkipsNonCertificateBlocks(t *testing.T) {
 	}
 	if _, err := certNotAfter(path); err != nil {
 		t.Fatalf("certNotAfter on a combined PEM: %v", err)
-	}
-}
-
-// warn_days is the lead time, so raising it must pull a distant expiry into
-// the window -- that is how an operator triggers the mail deliberately to
-// check the path works.
-func TestWarnDaysWidensAndDisablesTheWindow(t *testing.T) {
-	now := time.Now()
-	certFile := writeCert(t, 90*24*time.Hour)
-
-	cfg := &config.Config{TLS: config.TLS{CertFile: certFile}, Expiry: config.Expiry{WarnDays: 30}}
-	if items := New(cfg, nil, discardLog()).collect(now); len(items) != 0 {
-		t.Fatalf("30 days: got %v, want nothing 90 days out", items)
-	}
-
-	cfg.Expiry.WarnDays = 120
-	if items := New(cfg, nil, discardLog()).collect(now); len(items) != 1 {
-		t.Fatalf("120 days: got %v, want the certificate", items)
-	}
-
-	// Zero switches the warnings off entirely, however close the deadline.
-	near := &config.Config{
-		TLS:    config.TLS{CertFile: writeCert(t, 24*time.Hour)},
-		Expiry: config.Expiry{WarnDays: 0},
-	}
-	if items := New(near, nil, discardLog()).collect(now); len(items) != 0 {
-		t.Fatalf("warn_days 0: got %v, want nothing", items)
 	}
 }

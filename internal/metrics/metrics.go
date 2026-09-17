@@ -10,9 +10,20 @@ import (
 	"sync"
 	"time"
 
-	"github.com/tokajer/smtprelayd/internal/authms365"
+	"github.com/tokajer/smtprelayd/internal/config"
+	"github.com/tokajer/smtprelayd/internal/expiry"
 	"github.com/tokajer/smtprelayd/internal/spool"
 )
+
+// TokenAger is the whole of what this package needs from a route's OAuth2
+// token source: how old the cached token is, and whether one has been
+// fetched at all. It is declared here, on the consumer side, so that the
+// metrics endpoint does not depend on the Microsoft 365 auth implementation
+// for the sake of a single gauge -- internal/authms365 satisfies it without
+// knowing this exists.
+type TokenAger interface {
+	TokenAge() (time.Duration, bool)
+}
 
 // Registry accumulates delivery counters and reads live gauges from the
 // spool and the cached OAuth tokens at scrape time. Everything here is
@@ -20,10 +31,13 @@ import (
 // history is needed, and persisting counters would outlive the retry state
 // they describe.
 type Registry struct {
+	// cfg is read at scrape time for the expiry gauges. Nothing here mutates
+	// it, and the configuration cannot change while the process runs.
+	cfg         *config.Config
 	spool       *spool.Spool
-	tokens      map[string]*authms365.TokenSource // route -> token source, xoauth2 routes only
-	routes      []string                          // sorted, for deterministic exposition
-	canaryNames []string                          // sorted, for deterministic exposition
+	tokens      map[string]TokenAger // route -> token source, xoauth2 routes only
+	routes      []string             // sorted, for deterministic exposition
+	canaryNames []string             // sorted, for deterministic exposition
 	start       time.Time
 
 	mu                  sync.Mutex
@@ -42,13 +56,14 @@ type Registry struct {
 // route and every configured canary, so one that has never delivered still
 // reports 0 instead of being absent from the exposition until its first
 // event.
-func New(sp *spool.Spool, routes, canaryNames []string, tokens map[string]*authms365.TokenSource) *Registry {
+func New(cfg *config.Config, sp *spool.Spool, routes, canaryNames []string, tokens map[string]TokenAger) *Registry {
 	sorted := append([]string(nil), routes...)
 	sort.Strings(sorted)
 	sortedCanaries := append([]string(nil), canaryNames...)
 	sort.Strings(sortedCanaries)
 
 	r := &Registry{
+		cfg:                cfg,
 		spool:              sp,
 		tokens:             tokens,
 		routes:             sorted,
@@ -262,6 +277,27 @@ func (r *Registry) text() string {
 		fmt.Fprintf(&b, "smtprelayd_deferred_total{route=%s} %d\n", label(st.Route), st.DeferredTotal)
 	}
 
+	// Seconds rather than a date: a scrape consumer alerts on
+	// "< 30*86400", which is one expression, where a date needs parsing and
+	// clock arithmetic in the monitoring system. Negative once it has
+	// lapsed, which is what makes "already expired" alertable with the same
+	// expression rather than a second one.
+	if items, err := expiry.Items(r.cfg); err == nil {
+		b.WriteString("# HELP smtprelayd_expiry_seconds Seconds until a certificate or credential expires; negative once it has.\n")
+		b.WriteString("# TYPE smtprelayd_expiry_seconds gauge\n")
+		for _, it := range items {
+			fmt.Fprintf(&b, "smtprelayd_expiry_seconds{item=%s} %d\n",
+				label(it.Key), int64(time.Until(it.Expires).Seconds()))
+		}
+	} else {
+		// A certificate that cannot be read is not silently absent from the
+		// exposition: a gauge that vanishes looks the same as a monitoring
+		// system that stopped scraping.
+		b.WriteString("# HELP smtprelayd_expiry_read_errors Certificate or credential deadlines that could not be read.\n")
+		b.WriteString("# TYPE smtprelayd_expiry_read_errors gauge\n")
+		b.WriteString("smtprelayd_expiry_read_errors 1\n")
+	}
+
 	b.WriteString("# HELP smtprelayd_auth_failures_total Delivery attempts rejected because of the relay's own credentials, by route.\n")
 	b.WriteString("# TYPE smtprelayd_auth_failures_total counter\n")
 	for _, st := range status {
@@ -330,9 +366,17 @@ func cloneCounts(m map[string]uint64) map[string]uint64 {
 	return out
 }
 
-// label formats a route name as a quoted Prometheus label value. Route names
-// are already restricted to a safe identifier set by the config loader; the
-// escaping here is defensive rather than load-bearing.
+// label formats a route name as a quoted Prometheus label value.
+//
+// config.ValidName already refuses a quote, a backslash or any control
+// character in a route name, so this cannot currently be reached with
+// anything to escape. It stays because a Registry can be built from route
+// names that did not come through the loader -- a test, or a future caller --
+// and because the cost of being wrong here is a malformed exposition that a
+// scraper silently misreads. Until 2026-09-17 the comment here claimed the
+// loader guaranteed a safe character set when it checked only for empty and
+// duplicate names, which made this the only thing standing between a
+// hand-written configuration and a broken exposition.
 func label(route string) string {
 	route = strings.ReplaceAll(route, `\`, `\\`)
 	route = strings.ReplaceAll(route, `"`, `\"`)

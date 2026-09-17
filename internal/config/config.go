@@ -361,16 +361,24 @@ type Expiry struct {
 }
 
 type Limits struct {
-	MaxMessageMB     int `toml:"max_message_mb"`
-	MaxHops          int `toml:"max_hops"`
-	MaxHeaders       int `toml:"max_headers"`
-	MaxHeaderBytes   int `toml:"max_header_bytes"`
-	MaxConnections   int `toml:"max_connections"`
-	ReadTimeoutSec   int `toml:"read_timeout_sec"`
-	WriteTimeoutSec  int `toml:"write_timeout_sec"`
-	DataTimeoutSec   int `toml:"data_timeout_sec"`
-	SpoolMaxGB       int `toml:"spool_max_gb"`
-	SpoolWarnPercent int `toml:"spool_warn_percent"`
+	MaxMessageMB    int `toml:"max_message_mb"`
+	MaxHops         int `toml:"max_hops"`
+	MaxHeaders      int `toml:"max_headers"`
+	MaxHeaderBytes  int `toml:"max_header_bytes"`
+	MaxConnections  int `toml:"max_connections"`
+	ReadTimeoutSec  int `toml:"read_timeout_sec"`
+	WriteTimeoutSec int `toml:"write_timeout_sec"`
+	DataTimeoutSec  int `toml:"data_timeout_sec"`
+
+	// DeliveryTimeoutSec budgets one whole outbound attempt: connect, TLS,
+	// SASL, and the entire DATA transfer. It is separate from
+	// WriteTimeoutSec, which is a per-reply deadline on an inbound
+	// connection and is reset on every reply -- one value could not mean
+	// both, and reusing it capped a 100 MB message at whatever could be
+	// pushed to the smarthost in a minute.
+	DeliveryTimeoutSec int `toml:"delivery_timeout_sec"`
+	SpoolMaxGB         int `toml:"spool_max_gb"`
+	SpoolWarnPercent   int `toml:"spool_warn_percent"`
 }
 
 // Secret holds a reference to a credential, never the credential itself as it
@@ -465,7 +473,8 @@ func Defaults() *Config {
 			MaxMessageMB: 50,
 			MaxHops:      25, MaxHeaders: 200, MaxHeaderBytes: 262144,
 			MaxConnections: 200, ReadTimeoutSec: 60, WriteTimeoutSec: 60,
-			DataTimeoutSec: 300, SpoolMaxGB: 10, SpoolWarnPercent: 80,
+			DataTimeoutSec: 300, DeliveryTimeoutSec: 600,
+			SpoolMaxGB: 10, SpoolWarnPercent: 80,
 		},
 	}
 }

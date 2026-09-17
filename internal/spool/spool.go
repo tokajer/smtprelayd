@@ -567,12 +567,23 @@ func (s *Spool) SweepFailed(now time.Time) (removed int, freed int64) {
 	s.mu.Unlock()
 
 	for _, id := range expired {
+		// Tracked across both extensions rather than acted on inside the
+		// loop: a "continue" there only advances to the next extension, so
+		// the accounting below ran even when nothing had been deleted --
+		// dropping the entry from failedIndex, reporting its bytes as freed,
+		// and leaving the files occupying the disk untracked by the quota
+		// until the next restart re-read the directory. removeRetry exists
+		// precisely because this failure is expected on Windows.
+		gone := true
 		for _, ext := range []string{".json", ".eml"} {
 			if err := removeRetry(filepath.Join(s.failed, id.String()+ext)); err != nil && !os.IsNotExist(err) {
-				// Leave it indexed so the next sweep tries again rather than
-				// losing track of bytes that are still on the disk.
-				continue
+				gone = false
 			}
+		}
+		if !gone {
+			// Leave it indexed so the next sweep tries again rather than
+			// losing track of bytes that are still on the disk.
+			continue
 		}
 		s.mu.Lock()
 		if e, still := s.failedIndex[id]; still {

@@ -11,8 +11,9 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-// Winsock reports its own code here. It is a different number from the
-// syscall package's EADDRINUSE and does not compare equal to it.
+// isAddrInUse reports whether err is "address already in use". Winsock uses
+// its own code for that: a different number from the syscall package's
+// EADDRINUSE, which does not compare equal to it.
 func isAddrInUse(err error) bool {
 	return errors.Is(err, windows.WSAEADDRINUSE)
 }

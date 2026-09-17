@@ -27,9 +27,9 @@
 		return n;
 	}
 
-	// refresh keeps the counter, the select-all box and the submit buttons in
-	// step with the actual selection. The counter names the paused refresh
-	// too: a table that visibly stops updating while boxes are ticked would
+	// refresh keeps the counter and the select-all box in step with the
+	// actual selection. The counter names the paused auto-refresh too: a
+	// table that visibly stops updating while boxes are ticked would
 	// otherwise look like a broken page.
 	function refresh() {
 		var form = bulkForm();

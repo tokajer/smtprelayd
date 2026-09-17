@@ -257,8 +257,13 @@ enabled = true
 #danger      = "#b02a2a"   # bounced
 
 # Bearer tokens for /api/v1. Scope is "read" or "admin".
-# Generate with: smtprelayd token new --name checkmk --scope read
-# The plaintext token is printed once; only its digest is stored here.
+# Generate with: smtprelayd token new          (scope read)
+#                smtprelayd -scope admin token new
+# The flag goes before the command, as with -config; after it, it is not read.
+# The plaintext token is printed once and stored nowhere -- only its digest
+# lives here, so it cannot be recovered from this file. Rename "name" after
+# whoever uses it; several entries may coexist, which is how a token is
+# rotated without an interruption.
 [[web.token]]
 name        = "checkmk"
 scope       = "read"
@@ -294,9 +299,19 @@ max_hops             = 25
 max_headers          = 200
 max_header_bytes     = 262144
 max_connections      = 200
+# Inbound, per command and per reply on a client connection; both are reset
+# on every command, so they bound one exchange rather than a whole session.
 read_timeout_sec     = 60
 write_timeout_sec    = 60
+# Inbound, for the DATA phase: the whole message body must arrive inside it.
 data_timeout_sec     = 300
+# Outbound, for one whole delivery attempt: connect, TLS, SASL and the entire
+# DATA transfer to the smarthost. Separate from write_timeout_sec because they
+# measure different things -- reusing that value capped a max_message_mb-sized
+# message at whatever could be pushed upstream in a minute, and anything
+# larger retried until queue.max_lifetime_hours expired it. The loader refuses
+# a value that cannot carry max_message_mb at 1 MB/s.
+delivery_timeout_sec = 600
 # Counts the live queue and spool/failed together. 0 means no quota; a
 # negative value is a startup error rather than a silent "unlimited", which is
 # what it used to become.

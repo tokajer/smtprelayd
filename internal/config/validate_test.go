@@ -700,3 +700,89 @@ func TestExpiryWarnDaysDefaults(t *testing.T) {
 		t.Fatalf("a configuration with no [expiry] section got warn_days %d, want 30", cfg.Expiry.WarnDays)
 	}
 }
+
+// A delivery budget that cannot carry the largest accepted message turns
+// every such message into a retry loop that ends only when it expires.
+func TestDeliveryTimeoutMustFitMaxMessageSize(t *testing.T) {
+	for _, tc := range []struct {
+		mb, sec int
+		wantErr bool
+	}{
+		{100, 600, false}, // the shipped pair
+		{50, 90, false},
+		{100, 60, true}, // what reusing write_timeout_sec used to give
+		{100, 0, true},  // not positive
+		{100, -1, true},
+	} {
+		body := baseConfig + fmt.Sprintf("\n[limits]\nmax_message_mb = %d\ndelivery_timeout_sec = %d\n", tc.mb, tc.sec)
+		_, err := Load(write(t, body))
+		if tc.wantErr && err == nil {
+			t.Errorf("max_message_mb %d with delivery_timeout_sec %d was accepted", tc.mb, tc.sec)
+		}
+		if !tc.wantErr && err != nil {
+			t.Errorf("max_message_mb %d with delivery_timeout_sec %d was rejected: %v", tc.mb, tc.sec, err)
+		}
+	}
+}
+
+// write_timeout_sec is the inbound per-reply deadline and must not be what
+// bounds an outbound attempt; the two defaults differ on purpose.
+func TestDeliveryTimeoutHasItsOwnDefault(t *testing.T) {
+	d := Defaults().Limits
+	if d.DeliveryTimeoutSec != 600 {
+		t.Errorf("default delivery_timeout_sec = %d, want 600", d.DeliveryTimeoutSec)
+	}
+	if d.DeliveryTimeoutSec == d.WriteTimeoutSec {
+		t.Error("delivery_timeout_sec and write_timeout_sec should not share a value; they measure different things")
+	}
+}
+
+func TestValidName(t *testing.T) {
+	for _, ok := range []string{"m365", "printers-vienna", "Printers Vienna", "a", "x.y_z", strings.Repeat("n", 64)} {
+		if !ValidName(ok) {
+			t.Errorf("ValidName(%q) = false, want true", ok)
+		}
+	}
+	for _, bad := range []string{
+		"",                      // a name is required
+		strings.Repeat("n", 65), // over the length bound
+		"say \"hi\"",            // breaks a Prometheus label value
+		`back\slash`,            // same
+		"line\nbreak",           // would split a log line
+		"tab\there",             // control character
+		"nul\x00byte",           // control character
+	} {
+		if ValidName(bad) {
+			t.Errorf("ValidName(%q) = true, want false", bad)
+		}
+	}
+}
+
+// The names reach Prometheus labels, log fields and journal columns, so the
+// loader has to refuse what those formats cannot carry -- at every site that
+// takes a name, not only the first one somebody thought of.
+func TestEveryConfiguredNameIsChecked(t *testing.T) {
+	for _, tc := range []struct{ what, body string }{
+		{"listener", "\n[[listener]]\nname = \"bad\\\"quote\"\naddress = \"127.0.0.1:2526\"\ntls = \"none\"\n"},
+		{"client", "\n[[client]]\nname = \"bad\\\"quote\"\ncidr = [\"10.99.0.0/24\"]\nroute = \"m365\"\n"},
+		{"route", "\n[[route]]\nname = \"bad\\\"quote\"\nhost = \"smtp.example\"\nauth = \"none\"\n"},
+		{"token", "\n[[web.token]]\nname = \"bad\\\"quote\"\nscope = \"read\"\nsha256 = \"" + strings.Repeat("a", 64) + "\"\n"},
+	} {
+		if _, err := Load(write(t, baseConfig+tc.body)); err == nil {
+			t.Errorf("a %s name with a quote was accepted", tc.what)
+		}
+	}
+}
+
+// Every name the shipped example uses must still load, or the rule broke a
+// configuration somebody is running.
+func TestShippedNamesRemainValid(t *testing.T) {
+	for _, n := range []string{
+		"smtp", "submission", "smtps", "printers-vienna", "erp", "monitoring",
+		"m365", "partner-smarthost", "legacy-internal", "m365-daily", "checkmk", "ops",
+	} {
+		if !ValidName(n) {
+			t.Errorf("the shipped name %q is rejected by ValidName", n)
+		}
+	}
+}

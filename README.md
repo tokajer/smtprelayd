@@ -135,13 +135,16 @@ surface = "#1b1710"  # cards and tables; see the example config for the rest
 An override applies to both schemes, so recolouring more than the accent
 usually goes together with pinning `mode`.
 
-Tokens are stored as SHA-256 digests, never in plaintext. There is no
-`token new` helper yet; compute the digest yourself and put it under
-`[[web.token]]` in the configuration:
+Tokens are stored as SHA-256 digests, never in plaintext. Generate one with:
 
 ```sh
-printf '%s' 'a-long-random-token' | sha256sum
+smtprelayd token new                # scope read; -scope admin for the rest
 ```
+
+It prints the token once, the digest, and a ready-to-paste `[[web.token]]`
+block. The token itself is never written anywhere — it cannot be recovered
+from the configuration, which is the point — so put it in a password manager
+before closing the terminal.
 
 ## Releases
 

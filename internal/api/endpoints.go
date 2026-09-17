@@ -97,9 +97,6 @@ func (s *Server) handleBounces(w http.ResponseWriter, r *http.Request) {
 		s.serverError(w, "bounces", err)
 		return
 	}
-	for i := range rows {
-		rows[i].Subject = s.redactSubject(rows[i].Subject)
-	}
 
 	resp := struct {
 		Bounces    []store.BounceSummary `json:"bounces"`
@@ -152,9 +149,6 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rows, hasMore := splitHasMore(rows, filter.Limit)
-	for _, m := range rows {
-		m.Subject = s.redactSubject(m.Subject)
-	}
 
 	resp := struct {
 		Messages   []*store.Message `json:"messages"`
@@ -182,7 +176,6 @@ func (s *Server) handleMessage(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusNotFound, "message not found")
 		return
 	}
-	msg.Subject = s.redactSubject(msg.Subject)
 	writeJSON(w, http.StatusOK, msg)
 }
 

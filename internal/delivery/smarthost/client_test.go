@@ -4,6 +4,7 @@
 package smarthost
 
 import (
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -12,9 +13,15 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/hex"
+	"errors"
 	"math/big"
+	"net"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/tokajer/smtprelayd/internal/config"
 )
 
 // selfSigned builds a throwaway certificate. Only its bytes matter here: the
@@ -94,5 +101,63 @@ func TestPinVerifierRejectsUnpinnedChain(t *testing.T) {
 func TestPinVerifierRejectsEmptyChain(t *testing.T) {
 	if err := pinVerifier(fingerprint(selfSigned(t, "ca")))(tls.ConnectionState{}); err == nil {
 		t.Fatal("an empty verified chain satisfied ca_pin")
+	}
+}
+
+// A cancelled context must abort an attempt that is already past the dial.
+// net/smtp takes no context, so without the deadline trick in Deliver this
+// blocks until the timeout -- tolerable under systemd's 90s default, fatal
+// under the Windows SCM's five seconds, where the service is killed for not
+// responding to a stop.
+func TestDeliverAbortsInFlightOnContextCancel(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+
+	// A server that greets and then never speaks again: Deliver is left
+	// waiting on a read it can only leave via the deadline.
+	accepted := make(chan struct{})
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		_, _ = conn.Write([]byte("220 stub ESMTP\r\n"))
+		close(accepted)
+		select {} // hold the connection open, answer nothing
+	}()
+
+	host, portStr, _ := net.SplitHostPort(ln.Addr().String())
+	port, _ := strconv.Atoi(portStr)
+	route := config.Route{Name: "stub", Host: host, Port: port, TLS: "none", Auth: "none"}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- Deliver(ctx, route, Message{
+			From: "a@example.at", To: []string{"b@example.at"},
+			Data: strings.NewReader("Subject: t\r\n\r\nbody\r\n"), Helo: "test",
+		}, time.Hour, nil) // an hour, so only cancellation can end this
+	}()
+
+	<-accepted
+	cancel()
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("Deliver returned success against a server that never replied")
+		}
+		// Temporary, so the message stays queued for the next start rather
+		// than being moved to spool/failed by a shutdown.
+		var te *TempError
+		if !errors.As(err, &te) {
+			t.Errorf("error is %T (%v), want a TempError so the message is retried", err, err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("Deliver ignored the cancelled context and was still running after 10s")
 	}
 }

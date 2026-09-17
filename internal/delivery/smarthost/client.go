@@ -110,6 +110,19 @@ func Deliver(ctx context.Context, route config.Route, msg Message, timeout time.
 	}
 	_ = conn.SetDeadline(time.Now().Add(timeout))
 
+	// net/smtp takes no context, so everything after the dial -- the
+	// handshake, SASL, and the whole DATA transfer -- would otherwise run to
+	// the deadline above regardless of a shutdown. Expiring the deadline on
+	// cancellation aborts whichever read or write is in flight at once. The
+	// resulting error is a timeout, which classify treats as temporary, so
+	// the message stays queued for the next start rather than being failed.
+	//
+	// Without this a service stop waits for the in-flight attempt: tolerable
+	// under systemd's 90s default, not under the Windows SCM's five seconds,
+	// where the service is reported as not responding and killed.
+	stopOnCancel := context.AfterFunc(ctx, func() { _ = conn.SetDeadline(time.Now()) })
+	defer stopOnCancel()
+
 	c, err := smtp.NewClient(conn, route.Host)
 	if err != nil {
 		conn.Close()

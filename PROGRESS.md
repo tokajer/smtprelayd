@@ -19,7 +19,279 @@ fix below): the MSI installs without error, exactly one service registration
 remains (no duplicate), the on-disk binary is replaced, and the service keeps
 running afterwards. Uninstall remains unverified. Log rotation and Windows ACL
 verification at startup are complete.
-**Last session**: 2026-09-16 (thirty-fourth session) — Five fixes from a
+**Last session**: 2026-09-17 (thirty-eighth session) — Four findings from a
+sixth architecture review. The review found no defect that loses mail or kills
+a service; its subject was comment drift, and most of it was mine from the two
+sessions before.
+
+**`metrics` no longer depends on `authms365`.** The last odd edge in the
+graph, open since the second review, existed for one gauge. New
+`metrics.TokenAger` — a one-method interface declared on the consumer side —
+and `delivery` builds `map[string]metrics.TokenAger` instead, since Go does
+not convert map value types. `internal/authms365` satisfies it without
+knowing it exists and was not touched.
+
+**`ExpiryWatcher.collect` now checks the window before reading anything.** It
+read the certificate and logged about it before deciding whether warnings were
+switched off at all. `Run` returns early in that case, so the path is
+unreachable in the service, but the disabled state should not cost an hourly
+file read and a log line if it ever became reachable.
+
+**Nine doc comments corrected.** Two named `WarnBefore`, a symbol renamed out
+of existence two sessions ago. Four had been orphaned onto a neighbouring
+symbol by an insertion — `maxOffset` carrying `pageCursor`'s comment,
+`parseOffset` carrying the comment of `parseTimeRange` (moved to `httpx`),
+`Redacted` carrying `journalCols`'s, and `TokenAger` carrying `Registry`'s,
+which I introduced an hour earlier in this same session. Two named the old
+name after a rename (`Watcher`/`compose`). One block of rationale — the
+explanation of why the watcher lives in `bounce` — had been left floating
+before a `const`, documenting nothing and invisible to `go doc`. Plus
+`queue.js`, whose comment claimed `refresh()` updates the submit buttons; it
+does not.
+
+**The check is now enforced in-tree, not by a linter.** `revive`'s `exported`
+rule finds this class, but cannot be separated from its other half, which
+demands a doc comment on every exported symbol — for the twenty config structs
+that mirror TOML sections that means twenty "Service is the [service] section"
+lines, precisely the what-not-why commenting CLAUDE.md forbids. So the useful
+half went into `internal/buildpolicy` as `TestDocCommentsNameTheirSymbol`,
+beside the banned-import checks: pure `go/ast`, no new dependency, runs under
+`make test` and in CI. It found all four remaining orphans on its first run,
+including two the reviewer had missed by eye.
+
+Test files are exempt by design: a test's doc comment here states the
+behaviour under test ("A page the operator visits can rebind a name...")
+rather than repeating the function name, which is worth more than the
+convention. The rule is for the API surface, and it covers files behind build
+tags too, since `parser.ParseFile` ignores them.
+
+Mutation-checked by pointing a comment at the wrong symbol; the test names the
+file, the line, the symbol and the first words found.
+
+Verified: `gofmt -l .` clean, `go vet ./...` clean, `make test` green,
+`go build` for all three targets, `scripts/check-banned-imports.sh` clean for
+each.
+
+**Note for the next session**: five reviews in, the structural findings have
+converged — the two that found real defects were the fourth (`SweepFailed`
+accounting) and the fifth (shutdown blocked for a measured 30s). A seventh
+review is not worth running without larger changes first. The one finding
+standing across five of them is `Config.Validate()` at ~660 lines with its
+defaults split from `Defaults()`, which needs sign-off under working
+agreement 4 before anyone touches it.
+
+**Previous session**: 2026-09-17 (thirty-seventh session) — Four findings from a
+fifth architecture review, which went into the protocol readers, the session
+lifecycle, the queue-ID type and the API cursors. The readers themselves are
+clean; the lifecycle was not.
+
+**The shutdown waited for every connected client, measured at 30 seconds.**
+`session.loop` reaches its ctx check only *between* commands, so a session
+blocked in a read never sees it, and `stopAccepting` closes the listener
+rather than the accepted connections. `Set.Close` then waits on `wg` for all
+of them. Measured with a throwaway probe: one idle client with
+`read_timeout_sec = 30` held `Set.Run` for **30.026 s** after cancellation,
+and the connection got EOF only then. The shipped `read_timeout_sec = 60`
+makes that a minute; a client mid-DATA sets `data_timeout_sec` on the same
+connection, **300 s shipped**. systemd's 90 s default survives the first and
+not the second; the Windows SCM allows five seconds and kills the service
+either way, on every stop where a printer happens to be connected — which is
+most of them.
+
+Same fix as yesterday's delivery one, `context.AfterFunc` expiring the
+deadline, so both halves of the relay now unwind on cancellation instead of
+on a timeout. Mutation-checked: removing the two lines makes the new test
+time out at 20 s. The client sees a dropped connection rather than the `421`
+in `loop`, which is unreachable this way — writing it from the cancellation
+goroutine would race the session's own writes.
+
+**The API cursor bounded `Offset` below but not above.** A caller with a
+valid token could send `{"o": 9223372036854775807}`; SQLite must then walk the
+whole result set before returning nothing, so one crafted cursor costs a full
+scan of `messages` per request. Now clamped at 1,000,000 — far beyond what
+`history.retention_days` accumulates at this load — failing the same way an
+invalid cursor already did, by resetting to the start.
+
+**`recover()` moved to the front of its deferred function.** It was after
+`<-s.sem` and `wg.Done()`, which is correct — `recover` works anywhere inside
+a deferred function — but read like a bug and invited a "fix".
+
+**The expiry metric now exists**, which closes the last of the three false
+documentation claims found this week. `smtprelayd_expiry_seconds{item=...}`
+in seconds rather than as a date, so one Checkmk expression
+(`< 2592000`) covers both "expiring soon" and, once negative, "already
+expired". A separate `smtprelayd_expiry_read_errors` reports a certificate
+file that cannot be read, rather than letting an unknown deadline look like a
+distant one.
+
+Getting there required splitting `internal/expiry`, which also closes the
+`web → bounce` coupling reported in the third review. The package is now a
+leaf over `config` answering only "what expires and when"; the watcher —
+the half that needs the mail path — moved to `bounce.ExpiryWatcher`, where
+the operator notification channel already lives. `web` and `metrics` now
+depend on the leaf instead of dragging `selfmail`, `spool` and `store` in
+behind a date calculation. Verified against the live endpoint:
+`smtprelayd_expiry_seconds{item="tls-certificate"} 71204276` — 824 days, for
+an 825-day certificate.
+
+Verified: `gofmt -l .` clean, `go vet ./...` clean, `make test` green,
+`go build` for all three targets, `scripts/check-banned-imports.sh` clean for
+each, and the example configuration still parses. Fourteen new tests. The
+metric is documented in `docs/guides/CHECKMK.md` with its threshold
+rationale, plus `SECURITY.md` and `CONFIGURATION.md`.
+
+**Previous session**: 2026-09-17 (thirty-sixth session) — Four findings from a
+fourth architecture review, which went into the spool's mutation paths, the
+store's write paths, the bulk actions and the packaging: areas the three
+earlier reviews had never opened.
+
+**A real accounting bug in `SweepFailed`.** The retention sweep wrote
+
+```go
+for _, ext := range []string{".json", ".eml"} {
+    if err := removeRetry(...); err != nil && !os.IsNotExist(err) {
+        // Leave it indexed so the next sweep tries again ...
+        continue
+    }
+}
+```
+
+where `continue` advances the **extension** loop and skips nothing. The
+accounting below then ran unconditionally: the entry was dropped from
+`failedIndex`, its bytes were reported as freed, and the files stayed on disk
+untracked by `limits.spool_max_gb` until a restart re-read the directory. The
+comment described the opposite of what happened. `removeRetry` exists
+precisely because this failure is expected on Windows, where a scanner or
+backup agent holds a handle — its own comment says so. Now tracked in a flag
+across both extensions, which makes the existing comment true.
+Mutation-checked against the original code: the new test then reports
+`removed=1 freed=819` for a message still on the disk. The test reproduces the
+lock portably by replacing the body with a non-empty directory, so `os.Remove`
+fails with ENOTEMPTY whatever the test runs as.
+
+**`make test` works for the first time.** The Makefile exports
+`CGO_ENABLED=0` while `test:` ran `go test -race`, which needs cgo — the
+target failed before running a single test, and had for as long as it has
+existed. CI never noticed because it calls `go test -race ./...` directly and
+never reads this file. Fixed with a target-specific `export CGO_ENABLED = 1`,
+commented so nobody "restores" it: the race detector needs cgo at *test build*
+time, which says nothing about the shipped binary, and the `CGO_ENABLED=0` at
+the top plus the build targets still enforce that. Third review in a row that
+this was reported.
+
+**Configured names are validated for the first time.** `metrics.label` carried
+the comment *"Route names are already restricted to a safe identifier set by
+the config loader; the escaping here is defensive rather than
+load-bearing."* The loader checked names for **empty** and **duplicate** and
+nothing else — no character set at all — while validating essentially
+everything else strictly. The escaping was correct, so nothing was broken, but
+it was load-bearing and the comment invited someone to remove it. New
+`config.ValidName` applied to listener, client, route, canary and token names:
+1..64 printable ASCII, excluding control characters, `"` and `\` — exactly what
+breaks a Prometheus label value, a log line or a journal column. Deliberately
+permissive (spaces are fine) so it cannot reject a reasonable existing
+configuration; every name in the shipped example is covered by a test that
+says so. `metrics.label`'s comment now describes what is actually true.
+
+**Bulk actions are bounded by time, not just by count.** "Delete everything"
+looped over up to `bulkMax` = 1000 messages on the request goroutine, each
+with an fsync and three SQLite writes, against the dashboard's 60s
+`WriteTimeout`. Past that the response is cut off mid-flight and the operator
+is left not knowing how much of an irreversible action completed. The loop now
+stops on a spent `bulkBudget` (30s, half the WriteTimeout) or a cancelled
+request context, reusing the existing `Truncated` flag — the operator repeats
+the action in either case, which is what the banner already said. Its wording
+was generalised, since "the queue held more than 1000 messages" is only one of
+the two reasons now. The tally is logged with an `incomplete` field whatever
+happens to the response, because that log line is then the only record.
+
+Verified: `gofmt -l .` clean, `go vet ./...` clean, **`make test` green**,
+`go build` for all three targets, `scripts/check-banned-imports.sh` clean for
+each, and the name rule confirmed against the real binary on a modified copy
+of the shipped configuration. Six new tests.
+
+**Previous session**: 2026-09-17 (thirty-fifth session) — Four findings from a
+third architecture review, plus the one documented command that never
+existed. "1 2 3 4 umsetzen. bitte auch noch das gen token umsetzen."
+
+**A shutdown could not interrupt a delivery in progress.** `net/smtp` takes
+no context, so everything after the dial — handshake, SASL, the whole DATA
+transfer — ran to `conn`'s deadline regardless of cancellation. The chain
+`winProgram.Stop` → `serve` → `bg.Wait` → `dm.Run` → in-flight `attempt`
+therefore blocked for up to the delivery budget. Tolerable under systemd's 90s
+default; **not** under the Windows SCM's five seconds, where the service is
+reported as not responding and killed. `Deliver` now arms
+`context.AfterFunc(ctx, …)` to expire the deadline on cancellation, which
+aborts whichever read or write is in flight at once. The resulting timeout is
+classified temporary, so the message stays queued rather than being failed.
+Mutation-checked: removing the two lines makes the new test hang for its full
+10s budget. Note that the "clean shutdown verified" entry below was obtained
+with an **empty queue**, so it never covered this.
+
+**`write_timeout_sec` meant two different things.** In the listener it is a
+per-reply deadline, reset on every reply. In delivery the same value became
+the absolute budget for a whole outbound attempt. With the shipped
+`max_message_mb = 100` that gave a 100 MB message 60 seconds to reach the
+smarthost — about 14 Mbit/s sustained — and anything slower failed
+temporarily and retried until `queue.max_lifetime_hours` expired it. Neither
+key was documented anywhere. **Schema change**, on the operator's request:
+new `limits.delivery_timeout_sec`, default 600, and `Validate` now refuses a
+value that cannot carry `max_message_mb` at a pessimistic 1 MB/s plus
+handshake, so the pair cannot be set into that state by accident. All four
+timeout keys are now commented in the example config and the guide.
+
+**Subject redaction moved into the store.** It was implemented three times —
+twice in `web`, once in `api`. It is now one `Store.redactSubject` applied on
+every read path. The existing dashboard test caught that the first attempt
+missed `FindMessageByID`, which is the per-message detail page: the gap the
+test found was real. A store test that asserted the old write-side behaviour
+(subject reads back empty) was rewritten to assert both halves that actually
+matter — the column is never written, *and* nothing readable comes back —
+plus a new test for the case the read-side policy exists for: a row stored
+while `retain_subjects` was on must stop being readable once it is turned off.
+
+**`internal/selfmail`, and the last duplicate is gone.** `bounce` and
+`canary` each had their own copy of render-headers → spool → journal →
+return-ID. Both now call `selfmail.Enqueue`. Building it surfaced a real
+distinction I had collapsed: `HeaderFrom` and `EnvelopeFrom` are separate
+fields, because a notification carries a readable `From:` while its reverse
+path stays empty — the existing loop-prevention tests caught that immediately,
+which is what they are for. `selfmail` is a leaf over `rewrite`/`spool`/
+`store` with four tests of its own.
+
+**`smtprelayd token new` now exists.** `docs/guides/SECURITY.md` had described
+it for months; running it produced "unknown command". It generates 256 bits
+from `crypto/rand`, prints the token once as RawURLEncoding (no padding, no
+`+` or `/`, so it survives a header and a shell), the SHA-256 digest, a
+ready-to-paste `[[web.token]]` block and a working `curl` line. `-scope`
+selects read or admin and is validated here rather than leaving
+`config.Validate` to refuse the pasted block later. The token is never
+written anywhere. Tested for what matters: the printed pair authenticates
+through `config.MatchToken`, a modified token does not, two runs differ, and
+the token is 32 bytes.
+
+**`token new` is documented in all five places** that previously told an
+operator to do it by hand: `README.md`, `docs/guides/SECURITY.md`,
+`docs/guides/API.md`, `configs/smtprelayd.example.toml`, and
+`docs/guides/CONFIGURATION.md` section 8, whose six-step manual walkthrough
+("There is no `token new` helper yet") became four steps around the command,
+with rotation and revocation added. The example config had been advertising
+`smtprelayd token new --name checkmk --scope read` — a `--name` flag that
+never existed, for a command that never existed.
+
+**A trap found while writing that documentation**: Go's flag package stops at
+the first non-flag argument, so `smtprelayd token new -scope admin` silently
+issued a **read** token and the operator would only find out at the first 403.
+`main` now refuses anything trailing the command and prints the corrected
+line, which is copy-pasteable. Verified both orders by hand.
+
+Verified: `gofmt -l .` clean, `go vet ./...` clean, `go build` for
+`linux/amd64`, `windows/amd64` and `linux/arm64`,
+`scripts/check-banned-imports.sh` clean for all three, and
+`CGO_ENABLED=1 go test -race ./...` green across all 23 packages. The
+dependency graph stays acyclic. Fifteen new tests.
+
+**Previous session**: 2026-09-16 (thirty-fourth session) — Five fixes from a
 second architectural review, plus one new feature. No phase work, no schema
 change.
 

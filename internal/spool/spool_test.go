@@ -560,3 +560,71 @@ func TestQuotaWarningReportsThresholdCrossing(t *testing.T) {
 		t.Fatalf("QuotaWarning() = %d, %d, %v at threshold, want 800, 1000, true", used, max, over)
 	}
 }
+
+// A file the sweep could not delete must stay indexed, or its bytes stop
+// counting against limits.spool_max_gb while still occupying the disk --
+// which is the accounting failedIndex exists to prevent. removeRetry exists
+// because this is expected on Windows, where a scanner or backup agent holds
+// a handle; the directory trick below reproduces it portably.
+func TestSweepFailedKeepsWhatItCouldNotDelete(t *testing.T) {
+	dir := t.TempDir()
+	s, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, err := s.Enqueue(Envelope{Route: "r"}, strings.NewReader(strings.Repeat("x", 512)), 0, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	meta, ok := s.Claim(time.Now().Add(time.Minute))
+	if !ok {
+		t.Fatal("nothing to claim")
+	}
+	if err := s.Fail(meta, "permanent"); err != nil {
+		t.Fatal(err)
+	}
+	if len(s.failedIndex) != 1 {
+		t.Fatalf("failedIndex holds %d entries, want 1", len(s.failedIndex))
+	}
+	sizeBefore := s.failedIndex[id].size
+
+	// Replace the body with a non-empty directory of the same name: os.Remove
+	// then fails with ENOTEMPTY rather than ErrNotExist, whatever the test
+	// runs as.
+	body := filepath.Join(dir, "spool", "failed", id.String()+".eml")
+	if err := os.Remove(body); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(body, "held"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	s.SetFailedRetention(time.Nanosecond)
+	removed, freed := s.SweepFailed(time.Now().Add(time.Hour))
+
+	if removed != 0 || freed != 0 {
+		t.Errorf("SweepFailed reported removed=%d freed=%d for a message it could not delete", removed, freed)
+	}
+	if _, still := s.failedIndex[id]; !still {
+		t.Fatal("the entry was dropped from failedIndex, so its bytes no longer count against the quota")
+	}
+	if s.failedIndex[id].size != sizeBefore {
+		t.Errorf("indexed size changed to %d, want %d", s.failedIndex[id].size, sizeBefore)
+	}
+
+	// Once the obstruction is gone the next sweep must complete it, which is
+	// the behaviour the entry was kept for.
+	if err := os.RemoveAll(body); err != nil {
+		t.Fatal(err)
+	}
+	removed, freed = s.SweepFailed(time.Now().Add(time.Hour))
+	if removed != 1 {
+		t.Errorf("the retried sweep removed %d, want 1", removed)
+	}
+	if freed != sizeBefore {
+		t.Errorf("the retried sweep freed %d bytes, want %d", freed, sizeBefore)
+	}
+	if _, still := s.failedIndex[id]; still {
+		t.Error("the entry survived a successful sweep")
+	}
+}

@@ -10,6 +10,8 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -19,7 +21,7 @@ import (
 )
 
 func TestNewSeedsZeroCountersForConfiguredRoutes(t *testing.T) {
-	r := New(nil, []string{"m365", "legacy"}, nil, nil)
+	r := New(&config.Config{}, nil, []string{"m365", "legacy"}, nil, nil)
 	text := r.text()
 	for _, want := range []string{
 		`smtprelayd_delivered_total{route="legacy"} 0`,
@@ -35,7 +37,7 @@ func TestNewSeedsZeroCountersForConfiguredRoutes(t *testing.T) {
 }
 
 func TestCountersIncrementPerRoute(t *testing.T) {
-	r := New(nil, []string{"m365"}, nil, nil)
+	r := New(&config.Config{}, nil, []string{"m365"}, nil, nil)
 	r.Delivered("m365")
 	r.Delivered("m365")
 	r.Bounced("m365")
@@ -59,7 +61,7 @@ func TestCountersIncrementPerRoute(t *testing.T) {
 }
 
 func TestLastDeliveryTimeAbsentBeforeFirstDelivery(t *testing.T) {
-	r := New(nil, []string{"m365"}, nil, nil)
+	r := New(&config.Config{}, nil, []string{"m365"}, nil, nil)
 	text := r.text()
 	if strings.Contains(text, `smtprelayd_last_delivery_time{route="m365"}`) {
 		t.Error("last_delivery_time present before any delivery")
@@ -77,7 +79,7 @@ func TestQueueSizeReflectsSpool(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	r := New(sp, []string{"m365"}, nil, nil)
+	r := New(&config.Config{}, sp, []string{"m365"}, nil, nil)
 	text := r.text()
 	if !strings.Contains(text, `smtprelayd_queue_size{route="m365",state="queued"} 1`) {
 		t.Errorf("queue size not reflected:\n%s", text)
@@ -85,7 +87,7 @@ func TestQueueSizeReflectsSpool(t *testing.T) {
 }
 
 func TestStatusSnapshotMatchesCounters(t *testing.T) {
-	r := New(nil, []string{"m365", "legacy"}, nil, nil)
+	r := New(&config.Config{}, nil, []string{"m365", "legacy"}, nil, nil)
 	r.Delivered("m365")
 	r.Bounced("m365")
 	r.Deferred("legacy")
@@ -107,7 +109,7 @@ func TestStatusSnapshotMatchesCounters(t *testing.T) {
 }
 
 func TestRouteLabelIsEscaped(t *testing.T) {
-	r := New(nil, []string{`evil"route`}, nil, nil)
+	r := New(&config.Config{}, nil, []string{`evil"route`}, nil, nil)
 	text := r.text()
 	if !strings.Contains(text, `smtprelayd_delivered_total{route="evil\"route"} 0`) {
 		t.Errorf("route label not escaped:\n%s", text)
@@ -115,7 +117,7 @@ func TestRouteLabelIsEscaped(t *testing.T) {
 }
 
 func TestServeHTTPRejectsNonGet(t *testing.T) {
-	r := New(nil, nil, nil, nil)
+	r := New(&config.Config{}, nil, nil, nil, nil)
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/metrics", nil)
 	r.ServeHTTP(rec, req)
@@ -125,7 +127,7 @@ func TestServeHTTPRejectsNonGet(t *testing.T) {
 }
 
 func TestCanaryFailureIsLabeledByNameAndDoesNotTouchRouteMetrics(t *testing.T) {
-	r := New(nil, []string{"m365"}, []string{"m365-daily"}, nil)
+	r := New(&config.Config{}, nil, []string{"m365"}, []string{"m365-daily"}, nil)
 	r.CanaryFailure("m365-daily")
 	r.CanaryFailure("m365-daily")
 
@@ -139,7 +141,7 @@ func TestCanaryFailureIsLabeledByNameAndDoesNotTouchRouteMetrics(t *testing.T) {
 }
 
 func TestCanaryFailureCountsAreIndependentPerName(t *testing.T) {
-	r := New(nil, nil, []string{"a", "b"}, nil)
+	r := New(&config.Config{}, nil, nil, []string{"a", "b"}, nil)
 	r.CanaryFailure("a")
 	r.CanaryFailure("a")
 	r.CanaryFailure("b")
@@ -154,7 +156,7 @@ func TestCanaryFailureCountsAreIndependentPerName(t *testing.T) {
 }
 
 func TestCanaryDeliveredSetsLastDeliveryTimeNotRouteDelivered(t *testing.T) {
-	r := New(nil, []string{"m365"}, []string{"m365-daily"}, nil)
+	r := New(&config.Config{}, nil, []string{"m365"}, []string{"m365-daily"}, nil)
 	text := r.text()
 	if strings.Contains(text, `smtprelayd_canary_last_delivery_time{name="m365-daily"}`) {
 		t.Error("canary_last_delivery_time present before any canary delivery")
@@ -171,7 +173,7 @@ func TestCanaryDeliveredSetsLastDeliveryTimeNotRouteDelivered(t *testing.T) {
 }
 
 func TestAPIAuthFailureIsUnlabeled(t *testing.T) {
-	r := New(nil, []string{"m365"}, nil, nil)
+	r := New(&config.Config{}, nil, []string{"m365"}, nil, nil)
 	r.APIAuthFailure()
 	r.APIAuthFailure()
 	text := r.text()
@@ -181,7 +183,7 @@ func TestAPIAuthFailureIsUnlabeled(t *testing.T) {
 }
 
 func TestUptimeAdvances(t *testing.T) {
-	r := New(nil, nil, nil, nil)
+	r := New(&config.Config{}, nil, nil, nil, nil)
 	if r.Uptime() < 0 {
 		t.Fatalf("Uptime is negative: %v", r.Uptime())
 	}
@@ -199,7 +201,7 @@ func TestStatusIncludesOldestQueued(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	r := New(sp, []string{"m365"}, nil, nil)
+	r := New(&config.Config{}, sp, []string{"m365"}, nil, nil)
 	status := r.Status()
 	if len(status) != 1 || !status[0].OldestQueued.Equal(old) {
 		t.Fatalf("got %+v, want OldestQueued %v", status, old)
@@ -207,7 +209,7 @@ func TestStatusIncludesOldestQueued(t *testing.T) {
 }
 
 func TestServeHTTPServesText(t *testing.T) {
-	r := New(nil, []string{"m365"}, nil, nil)
+	r := New(&config.Config{}, nil, []string{"m365"}, nil, nil)
 	r.Delivered("m365")
 
 	rec := httptest.NewRecorder()
@@ -303,5 +305,71 @@ func TestRequireLoopbackHostGuardsTheExposition(t *testing.T) {
 		if want != http.StatusOK && (reached || rec.Code != want) {
 			t.Errorf("Host %q: reached=%v status=%d, want %d", host, reached, rec.Code, want)
 		}
+	}
+}
+
+// The gauge Checkmk alerts on. Seconds, not a date, so one expression
+// ("< 30*86400") covers both "expiring soon" and "already expired".
+func TestExpiryGaugeIsExposed(t *testing.T) {
+	now := time.Now()
+	cfg := &config.Config{Routes: []config.Route{
+		{Name: "m365", Auth: "xoauth2", OAuth2: config.OAuth2{
+			TenantID: "t", SecretExpires: now.Add(10 * 24 * time.Hour).Format("2006-01-02"),
+		}},
+	}}
+	body := New(cfg, nil, []string{"m365"}, nil, nil).text()
+
+	if !strings.Contains(body, "# TYPE smtprelayd_expiry_seconds gauge") {
+		t.Fatalf("exposition is missing the gauge declaration:\n%s", body)
+	}
+	line := ""
+	for _, l := range strings.Split(body, "\n") {
+		if strings.HasPrefix(l, "smtprelayd_expiry_seconds{") {
+			line = l
+		}
+	}
+	if line == "" {
+		t.Fatalf("no expiry sample:\n%s", body)
+	}
+	if !strings.Contains(line, `item="oauth2-secret:m365"`) {
+		t.Errorf("sample = %q, want it labelled by item", line)
+	}
+	secs, err := strconv.ParseInt(strings.Fields(line)[1], 10, 64)
+	if err != nil {
+		t.Fatalf("sample value is not an integer: %q", line)
+	}
+	// Ten days out, give or take the day boundary the date parses to.
+	if secs < 8*86400 || secs > 11*86400 {
+		t.Errorf("gauge = %d seconds, want roughly ten days", secs)
+	}
+}
+
+// Negative once the date has passed, so "already expired" alerts through the
+// same expression rather than needing a second one.
+func TestExpiryGaugeGoesNegativeAfterTheDate(t *testing.T) {
+	cfg := &config.Config{Routes: []config.Route{
+		{Name: "m365", Auth: "xoauth2", OAuth2: config.OAuth2{
+			TenantID: "t", SecretExpires: time.Now().Add(-5 * 24 * time.Hour).Format("2006-01-02"),
+		}},
+	}}
+	body := New(cfg, nil, []string{"m365"}, nil, nil).text()
+	for _, l := range strings.Split(body, "\n") {
+		if strings.HasPrefix(l, "smtprelayd_expiry_seconds{") {
+			if !strings.Contains(l, " -") {
+				t.Errorf("an expired item reads %q, want a negative value", l)
+			}
+			return
+		}
+	}
+	t.Fatalf("no expiry sample:\n%s", body)
+}
+
+// A certificate that cannot be read must not simply drop out of the
+// exposition: a vanished gauge looks the same as a stopped scrape.
+func TestUnreadableCertificateIsExposedAsAnError(t *testing.T) {
+	cfg := &config.Config{TLS: config.TLS{CertFile: filepath.Join(t.TempDir(), "absent.crt")}}
+	body := New(cfg, nil, nil, nil, nil).text()
+	if !strings.Contains(body, "smtprelayd_expiry_read_errors 1") {
+		t.Errorf("exposition does not report the unreadable certificate:\n%s", body)
 	}
 }

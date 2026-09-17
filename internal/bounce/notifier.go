@@ -5,7 +5,6 @@ package bounce
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -13,7 +12,7 @@ import (
 	"time"
 
 	"github.com/tokajer/smtprelayd/internal/config"
-	"github.com/tokajer/smtprelayd/internal/rewrite"
+	"github.com/tokajer/smtprelayd/internal/selfmail"
 	"github.com/tokajer/smtprelayd/internal/spool"
 	"github.com/tokajer/smtprelayd/internal/store"
 )
@@ -147,19 +146,6 @@ func (n *Notifier) dispatch(now time.Time) {
 	}
 }
 
-// digestContentType is written into the digest's own header block and into
-// its journal record, so the two cannot disagree about what was sent.
-const digestContentType = "text/plain; charset=utf-8"
-
-// headerBlock returns the header part of a composed message, terminating
-// blank line included. A message with no blank line at all is all headers.
-func headerBlock(data string) string {
-	if i := strings.Index(data, "\r\n\r\n"); i >= 0 {
-		return data[:i+4]
-	}
-	return data
-}
-
 // send composes and enqueues one digest for client, listing every message in
 // ids. It is enqueued exactly like any other message — through the spool,
 // for the configured notify route — except for the three loop-prevention
@@ -234,56 +220,29 @@ func (n *Notifier) Notify(source, subject, bodyText string, now time.Time) error
 	return nil
 }
 
-// enqueue composes the header block around bodyText and spools the result.
+// enqueue hands the message to internal/selfmail, which every
+// relay-composed message goes through so that the header block and the
+// journal record cannot drift apart between the digest, the expiry warning
+// and the canary.
 //
-// The three loop-prevention properties live here so that every caller gets
-// them: an empty envelope sender (net/smtp renders Mail("") as
-// "MAIL FROM:<>", the standard null reverse path), the Notification flag (so
-// the delivery manager never treats its own failure as another bounce to
-// notify about), and never having passed through the listener at all, which
-// is what keeps it out of sender rewriting.
+// The empty envelope sender is what makes this a notification rather than
+// ordinary mail: net/smtp renders Mail("") as "MAIL FROM:<>", the standard
+// null reverse path, and Notification keeps the delivery manager from
+// treating a failure to deliver it as another bounce to report.
 func (n *Notifier) enqueue(source string, recipients []string, subject, bodyText string, now time.Time) (string, error) {
-	var msg strings.Builder
-	fmt.Fprintf(&msg, "From: %s\r\n", n.cfg.Bounce.Sender)
-	fmt.Fprintf(&msg, "To: %s\r\n", strings.Join(recipients, ", "))
-	fmt.Fprintf(&msg, "Subject: %s\r\n", subject)
-	fmt.Fprintf(&msg, "Date: %s\r\n", now.Format(time.RFC1123Z))
-	msg.WriteString("Content-Type: " + digestContentType + "\r\n\r\n")
-	msg.WriteString(bodyText)
-
-	env := spool.Envelope{
-		From:         "",
+	id, err := selfmail.Enqueue(n.spool, n.store, n.log, selfmail.Message{
+		HeaderFrom:   n.cfg.Bounce.Sender,
+		EnvelopeFrom: "",
 		To:           recipients,
+		Subject:      subject,
+		Body:         bodyText,
 		Client:       source,
 		Route:        n.cfg.Bounce.NotifyRoute,
 		Listener:     "bounce-notifier",
-		RemoteAddr:   "internal",
-		Received:     now,
 		Notification: true,
-	}
-	lifetime := time.Duration(n.cfg.Queue.MaxLifetimeHours) * time.Hour
-	data := msg.String()
-	queueID, err := n.spool.Enqueue(env, strings.NewReader(data), 0, lifetime)
+	}, time.Duration(n.cfg.Queue.MaxLifetimeHours)*time.Hour, now)
 	if err != nil {
-		return "", fmt.Errorf("bounce: enqueue notification: %w", err)
+		return "", err
 	}
-
-	recipientsJSON, _ := json.Marshal(recipients)
-	if rerr := n.store.RecordMessage(store.MessageRecord{
-		QueueID:     queueID.String(),
-		Client:      source,
-		Route:       n.cfg.Bounce.NotifyRoute,
-		Recipients:  string(recipientsJSON),
-		Subject:     subject,
-		Listener:    "bounce-notifier",
-		RemoteAddr:  "internal",
-		ContentType: digestContentType,
-		SizeBytes:   int64(len(data)),
-		HeaderCount: rewrite.HeaderCount(headerBlock(data)),
-		ReceivedAt:  now,
-		ExpiresAt:   now.Add(lifetime),
-	}); rerr != nil {
-		n.log.Warn("recording notification in history failed", "queue_id", queueID.String(), "error", rerr)
-	}
-	return queueID.String(), nil
+	return id.String(), nil
 }

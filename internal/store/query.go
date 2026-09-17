@@ -60,6 +60,23 @@ type journalScan struct {
 	helo        sql.NullString
 }
 
+// Redacted is what a subject reads as once history.retain_subjects is off.
+const Redacted = "[redacted]"
+
+// redactSubject applies the retain_subjects policy on the way out.
+//
+// RecordMessage already writes an empty subject when the setting is off, so
+// for rows written since then this changes nothing. It matters for rows
+// written while it was still on: flipping the setting has to hide those too,
+// and doing it here means neither the dashboard nor the JSON API can forget —
+// which is what each of them used to implement separately, in three places.
+func (s *Store) redactSubject(subject string) string {
+	if s.retain.retainSubjects {
+		return subject
+	}
+	return Redacted
+}
+
 // journalCols is the column list every message query selects, in the order
 // journalScan expects them. Kept in one place so a query and its scan cannot
 // drift apart; prefix is the table alias including its dot, or "".
@@ -182,6 +199,7 @@ func (s *Store) FindMessageByID(queueID string) (*Message, error) {
 	m.ExpiresAt, _ = time.Parse(time.RFC3339, expiresAtStr)
 	m.CreatedAt, _ = time.Parse(time.RFC3339, createdAtStr)
 	j.apply(&m)
+	m.Subject = s.redactSubject(m.Subject)
 
 	m.TLSUsed = tlsInt != 0
 	if err := json.Unmarshal([]byte(recipientsJSON), &m.Recipients); err != nil {
@@ -362,6 +380,7 @@ func (s *Store) FindMessages(filter MessageFilter) ([]*Message, error) {
 		}
 
 		j.apply(&m)
+		m.Subject = s.redactSubject(m.Subject)
 		m.LastCode = int(latestCode.Int64)
 		m.LastErr = latestResp.String
 		m.AttemptCount = int(attemptCount.Int64)
@@ -501,6 +520,7 @@ func (s *Store) FindBounces(filter BounceFilter) ([]*Message, error) {
 		}
 
 		j.apply(&m)
+		m.Subject = s.redactSubject(m.Subject)
 		m.LastCode = int(lastCode.Int64)
 		m.LastErr = lastResp.String
 		m.AttemptCount = int(attemptCount.Int64)
@@ -627,6 +647,7 @@ func (s *Store) FindBounceSummaries(filter BounceFilter) ([]BounceSummary, bool,
 		if err := json.Unmarshal([]byte(recipientsJSON), &b.Recipients); err != nil {
 			b.Recipients = []string{}
 		}
+		b.Subject = s.redactSubject(b.Subject)
 		b.FirstAttempt, _ = time.Parse(time.RFC3339, firstStr)
 		b.LastAttempt, _ = time.Parse(time.RFC3339, lastStr)
 		if smtpCode.Valid {
@@ -677,7 +698,8 @@ func (s *Store) DeleteMessage(queueID string) error {
 	return nil
 }
 
-// CountByRoute returns queue depth by state and route (for metrics).
+// QueueStats is one route's queue depth, as CountQueue reports it to the
+// metrics endpoint.
 type QueueStats struct {
 	Route     string
 	Queued    int64

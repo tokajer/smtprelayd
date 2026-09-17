@@ -5,21 +5,16 @@ package canary
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"log/slog"
 	"strings"
 	"time"
 
 	"github.com/tokajer/smtprelayd/internal/config"
-	"github.com/tokajer/smtprelayd/internal/rewrite"
+	"github.com/tokajer/smtprelayd/internal/selfmail"
 	"github.com/tokajer/smtprelayd/internal/spool"
 	"github.com/tokajer/smtprelayd/internal/store"
 )
-
-// contentType is written into both the message header and its journal
-// record, so the two cannot disagree about what was sent.
-const contentType = "text/plain; charset=utf-8"
 
 // Runner enqueues one canary's message on that canary's schedule, which is
 // either every canary.interval_minutes or at canary.daily_at's fixed times
@@ -162,60 +157,31 @@ func (r *Runner) send(now time.Time) error {
 	subject := fmt.Sprintf("[smtprelayd] canary %q %s", r.canary.Name, now.Format("2006-01-02 15:04:05 MST"))
 
 	var body strings.Builder
-	fmt.Fprintf(&body, "From: %s\r\n", r.canary.Sender)
-	fmt.Fprintf(&body, "To: %s\r\n", r.canary.Recipient)
-	fmt.Fprintf(&body, "Subject: %s\r\n", subject)
-	fmt.Fprintf(&body, "Date: %s\r\n", now.Format(time.RFC1123Z))
-	body.WriteString("Content-Type: " + contentType + "\r\n\r\n")
 	fmt.Fprintf(&body, "This is an automated canary message (%q) from smtprelayd on %s, sent through route %q.\r\n",
 		r.canary.Name, r.cfg.Service.Hostname, r.canary.Route)
 	body.WriteString("If it stops arriving on schedule, delivery through that route may be failing silently.\r\n")
 
-	env := spool.Envelope{
-		From:       r.canary.Sender,
-		To:         []string{r.canary.Recipient},
-		Client:     r.canary.Name,
-		Route:      r.canary.Route,
-		Listener:   "canary",
-		RemoteAddr: "internal",
-		Received:   now,
-		Canary:     true,
-	}
-	lifetime := time.Duration(r.cfg.Queue.MaxLifetimeHours) * time.Hour
-	data := body.String()
-	queueID, err := r.spool.Enqueue(env, strings.NewReader(data), 0, lifetime)
-	if err != nil {
-		return fmt.Errorf("canary %q: enqueue: %w", r.canary.Name, err)
-	}
-
-	recipientsJSON, _ := json.Marshal(env.To)
-	if rerr := r.store.RecordMessage(store.MessageRecord{
-		QueueID:      queueID.String(),
+	// Notification stays false on purpose, so that a permanent failure
+	// reaches bounce.Notifier.RecordFail through delivery.Manager.fail
+	// exactly as a real message's would -- reusing that alerting path rather
+	// than building a second one. Client is the canary's own Name, because
+	// internal/bounce groups digest entries by it and config.Validate has
+	// already guaranteed the name collides with no client.
+	queueID, err := selfmail.Enqueue(r.spool, r.store, r.log, selfmail.Message{
+		HeaderFrom:   r.canary.Sender,
+		EnvelopeFrom: r.canary.Sender,
+		To:           []string{r.canary.Recipient},
+		Subject:      subject,
+		Body:         body.String(),
 		Client:       r.canary.Name,
 		Route:        r.canary.Route,
-		EnvelopeFrom: r.canary.Sender,
-		Recipients:   string(recipientsJSON),
-		Subject:      subject,
 		Listener:     "canary",
-		RemoteAddr:   "internal",
-		ContentType:  contentType,
-		SizeBytes:    int64(len(data)),
-		HeaderCount:  rewrite.HeaderCount(headerBlock(data)),
-		ReceivedAt:   now,
-		ExpiresAt:    now.Add(lifetime),
-	}); rerr != nil {
-		r.log.Warn("recording canary in history failed", "queue_id", queueID.String(), "error", rerr)
+		Canary:       true,
+	}, time.Duration(r.cfg.Queue.MaxLifetimeHours)*time.Hour, now)
+	if err != nil {
+		return fmt.Errorf("canary %q: %w", r.canary.Name, err)
 	}
 
 	r.log.Info("canary message queued", "queue_id", queueID.String(), "route", r.canary.Route)
 	return nil
-}
-
-// headerBlock returns the header part of a composed message, terminating
-// blank line included. A message with no blank line at all is all headers.
-func headerBlock(data string) string {
-	if i := strings.Index(data, "\r\n\r\n"); i >= 0 {
-		return data[:i+4]
-	}
-	return data
 }

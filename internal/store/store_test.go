@@ -144,12 +144,61 @@ func TestSubjectRedaction(t *testing.T) {
 		t.Fatalf("RecordMessage failed: %v", err)
 	}
 
+	// Two independent guarantees, both of which matter: nothing was written
+	// to the column, and nothing readable comes back out of it. The second is
+	// what protects rows stored while retain_subjects was still on, and it is
+	// applied here rather than in the dashboard and the API separately.
+	var raw string
+	if err := s.db.QueryRow(`SELECT subject FROM messages WHERE queue_id = ?`, "SUBJECT-TEST").Scan(&raw); err != nil {
+		t.Fatal(err)
+	}
+	if raw != "" {
+		t.Errorf("subject column holds %q, want it never written", raw)
+	}
+
 	m, err := s.FindMessageByID("SUBJECT-TEST")
 	if err != nil {
 		t.Fatalf("FindMessageByID failed: %v", err)
 	}
-	if m.Subject != "" {
-		t.Errorf("Subject not redacted: got %q, want empty", m.Subject)
+	if m.Subject != Redacted {
+		t.Errorf("Subject = %q, want %q", m.Subject, Redacted)
+	}
+}
+
+// The case the read-side policy exists for: a row written while subjects
+// were retained must stop being readable once the setting is turned off.
+func TestSubjectStoredBeforeRedactionIsHiddenAfterwards(t *testing.T) {
+	dir := t.TempDir()
+	on, err := Open(dir, slog.New(slog.NewTextHandler(io.Discard, nil)), 90, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	rec := testRecord("SUBJECT-KEPT", now, now.Add(96*time.Hour))
+	rec.Subject = "Personal Subject"
+	if err := on.RecordMessage(rec); err != nil {
+		t.Fatal(err)
+	}
+	if m, err := on.FindMessageByID("SUBJECT-KEPT"); err != nil {
+		t.Fatal(err)
+	} else if m.Subject != "Personal Subject" {
+		t.Fatalf("with retention on, Subject = %q, want it kept", m.Subject)
+	}
+	if err := on.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	off, err := Open(dir, slog.New(slog.NewTextHandler(io.Discard, nil)), 90, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = off.Close() })
+	m, err := off.FindMessageByID("SUBJECT-KEPT")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.Subject != Redacted {
+		t.Errorf("after turning retention off, Subject = %q, want %q", m.Subject, Redacted)
 	}
 }
 

@@ -13,6 +13,9 @@ const (
 	maxLimit     = 1000
 )
 
+// maxOffset bounds how deep a cursor may page. See decodeCursor.
+const maxOffset = 1_000_000
+
 // pageCursor is the opaque pagination state docs/guides/API.md calls "cursor":
 // base64-encoded JSON carrying the next offset and the limit that produced
 // it, so a client does not need to remember or resend its own limit.
@@ -44,7 +47,12 @@ func decodeCursor(s string) pageCursor {
 		return pageCursor{Limit: defaultLimit}
 	}
 	c = parsed
-	if c.Offset < 0 {
+	// Bounded above as well as below. An offset past the end costs SQLite a
+	// full scan of the result set before it can return nothing, so an
+	// unbounded one lets an authenticated caller force a table scan per
+	// request. A million rows is far beyond what history.retention_days can
+	// accumulate at this relay's load, so no legitimate paging reaches it.
+	if c.Offset < 0 || c.Offset > maxOffset {
 		c.Offset = 0
 	}
 	if c.Limit <= 0 || c.Limit > maxLimit {

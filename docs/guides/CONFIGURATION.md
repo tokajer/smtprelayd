@@ -140,10 +140,10 @@ If you add a listener or change `metrics.address` later, re-run it with
 
 Two limits worth knowing before you rely on it:
 
-- The certificate is valid for **825 days**. You are warned by mail thirty
-  days ahead if `bounce.notify` is configured — see *Expiry warnings* below —
-  but there is still no expiry *metric*, so a host with no notification
-  contact gets no notice at all beyond the date printed at generation.
+- The certificate is valid for **825 days**. You are warned three ways: by
+  mail thirty days ahead if `bounce.notify` is configured (see *Expiry
+  warnings* below), on the dashboard's Configuration page, and as
+  `smtprelayd_expiry_seconds` on the metrics endpoint.
 - It is signed by no CA. A device that verifies certificates must be given
   this one explicitly, or be configured not to verify. Devices that check
   nothing — most printers and MFPs — need no further action.
@@ -170,7 +170,9 @@ only in the log.
 Both deadlines are listed at the top of the dashboard's **Configuration**
 page regardless of this setting, with a state of `ok`, `soon` or `expired`, so
 you can see a healthy certificate rather than only hearing about an unhealthy
-one.
+one. They are also exposed as `smtprelayd_expiry_seconds` on the metrics
+endpoint (`docs/guides/CHECKMK.md`) — worth alerting on independently of the
+mail, since a lapsed credential is exactly what stops mail working.
 
 - `warn_days` accepts 0 to 3650. The default is 30, matching the threshold the
   startup log already used for client secrets.
@@ -456,34 +458,48 @@ clears the entry from the view and marks the history row removed.
 
 ### API and metrics bearer tokens
 
-There is no `token new` helper yet — generate and register one by hand. The
-same `[[web.token]]` list authenticates both `/api/v1/*` (`docs/guides/API.md`) and,
-when the metrics listener is bound beyond loopback, `/metrics` too.
+The same `[[web.token]]` list authenticates both `/api/v1/*`
+(`docs/guides/API.md`) and, when the metrics listener is bound beyond
+loopback, `/metrics` too.
 
-1. Generate a random token:
+1. Generate one:
    ```sh
-   openssl rand -base64 32
+   smtprelayd token new                 # scope read
+   smtprelayd -scope admin token new    # additionally allows requeue and delete
    ```
-2. Compute its SHA-256 digest — only the digest is stored, never the token
-   itself:
-   ```sh
-   printf '%s' 'the-generated-token' | sha256sum
-   ```
-3. Add it to the configuration:
+   It prints the token, its SHA-256 digest, a ready-to-paste `[[web.token]]`
+   block and a working `curl` line. It reads no configuration and writes
+   nothing, so it can be run anywhere, including before the relay is
+   configured at all.
+
+2. **Save the token now**, in a password manager. It is printed once and
+   stored nowhere: only the digest goes into the configuration, so a leaked
+   configuration file does not hand over a working credential — and neither
+   can you recover the token from it later. Losing it means generating a new
+   one and replacing the block.
+
+3. Paste the printed block into the configuration and rename it after whoever
+   will use it:
    ```toml
    [[web.token]]
    name   = "checkmk"
-   scope  = "read"       # "admin" additionally allows requeue and delete
-   sha256 = "<digest from step 2>"
+   scope  = "read"
+   sha256 = "<the printed digest>"
    ```
-4. Validate and apply (top of this document).
-5. Use it:
-   ```sh
-   curl -H "Authorization: Bearer the-generated-token" http://127.0.0.1:8025/api/v1/queue
-   ```
-6. Save the plaintext token somewhere recoverable (password manager) — it
-   cannot be reconstructed from the configuration afterwards, only the digest
-   lives there.
+
+4. Validate and apply (top of this document), then use the `curl` line the
+   command printed.
+
+To rotate a token, generate a new one and replace the `sha256` of that block;
+to revoke one, delete the block. Both take effect at the next restart, since
+the configuration is read once at startup. Several `[[web.token]]` entries may
+coexist, which is how a rotation is done without an interruption: add the new
+one, move the consumer over, then remove the old.
+
+Doing it by hand instead is possible — `openssl rand -base64 32`, then
+`printf '%s' '<token>' | sha256sum` — but the digest must be the digest of
+exactly the bytes the caller will send, and a stray newline from `echo` is the
+usual way that goes wrong.
 
 A malformed or missing token yields `401`; a valid token with insufficient
 scope yields `403`; comparison is constant-time and failures are logged with
@@ -552,15 +568,29 @@ max_hops         = 25
 max_headers      = 200
 max_header_bytes = 262144
 max_connections  = 200
-read_timeout_sec  = 60
-write_timeout_sec = 60
-data_timeout_sec  = 300
+read_timeout_sec  = 60     # inbound, per command
+write_timeout_sec = 60     # inbound, per reply
+data_timeout_sec  = 300    # inbound, the whole DATA phase
+delivery_timeout_sec = 600 # outbound, one whole attempt
 spool_max_gb        = 10   # 0 = no quota; counts the live queue and spool/failed together
 spool_warn_percent  = 80   # 0 = no warning; logs once per threshold crossing
 ```
 These are the outer bounds every listener and client operates inside; see
 `configs/smtprelayd.example.toml` for the full inline commentary on each
 field.
+
+The first three bound an **inbound** client connection and are reset on every
+command or reply. `delivery_timeout_sec` is the **outbound** budget for one
+complete delivery attempt — connect, TLS, SASL and the full DATA transfer to
+the smarthost — set once and not extended.
+
+They are separate because they measure different things. Until 2026-09-17 the
+outbound attempt reused `write_timeout_sec`, which meant a 100 MB message had
+60 seconds to reach the smarthost — about 14 Mbit/s sustained. Anything slower
+failed, and because the failure is temporary it retried until
+`queue.max_lifetime_hours` expired it. The loader now refuses a
+`delivery_timeout_sec` that cannot carry `max_message_mb` at 1 MB/s plus
+handshake, so the pair cannot be set into that state by accident.
 
 `spool_warn_percent` is the early warning before `spool_max_gb` starts
 rejecting mail. Once the spool reaches that share of the quota the delivery

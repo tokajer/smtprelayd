@@ -118,14 +118,3 @@ func (s *Server) serverError(w http.ResponseWriter, endpoint string, err error) 
 	s.log.Error("api query failed", "endpoint", endpoint, "error", err)
 	writeJSONError(w, http.StatusInternalServerError, "internal error")
 }
-
-// redactSubject applies the same display policy as the dashboard: when
-// retain_subjects is disabled, store.RecordMessage has already written an
-// empty string for every row, so substituting a fixed marker here cannot
-// under- or over-redact relative to what is actually in the database.
-func (s *Server) redactSubject(subject string) string {
-	if s.cfg.History.RetainSubjects {
-		return subject
-	}
-	return "[redacted]"
-}

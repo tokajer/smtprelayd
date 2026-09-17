@@ -164,3 +164,89 @@ func rel(root, path string) string {
 	}
 	return path
 }
+
+// TestDocCommentsNameTheirSymbol enforces the Go convention that a doc
+// comment begins with the name of what it documents.
+//
+// It is here rather than delegated to a third-party linter because the
+// obvious candidate, revive's "exported" rule, cannot separate the two halves
+// it checks: alongside this it demands a doc comment on every exported
+// symbol, which for the twenty config structs that mirror TOML sections would
+// mean twenty "Service is the [service] section" lines -- exactly the what-
+// not-why commenting CLAUDE.md forbids. This half is the one that catches a
+// real defect, and it caught three when it was first run: two comments that
+// had been orphaned onto a neighbouring symbol by an edit, and one naming a
+// method rather than the type it sat on.
+//
+// Test files are excluded; see the loop below for why.
+//
+// Why it matters more here than in most projects: the comments in this tree
+// carry the rationale, and three documentation claims that had drifted away
+// from the code were each found by hand after they had already misled
+// somebody. A comment naming a symbol that moved is how that starts.
+func TestDocCommentsNameTheirSymbol(t *testing.T) {
+	root := repoRoot(t)
+	fset := token.NewFileSet()
+
+	for _, path := range goFiles(t, root) {
+		// Test files are exempt on purpose. A test's doc comment here states
+		// the behaviour under test ("A page the operator visits can rebind a
+		// name...") rather than repeating the function name, which says far
+		// more than "TestFoo tests Foo" ever would. The convention this
+		// enforces is for the API surface, not for prose about a scenario.
+		if strings.HasSuffix(path, "_test.go") {
+			continue
+		}
+		f, err := parser.ParseFile(fset, path, nil, parser.ParseComments)
+		if err != nil {
+			t.Fatalf("%s: %v", path, err)
+		}
+		rel, _ := filepath.Rel(root, path)
+
+		check := func(doc *ast.CommentGroup, name string, pos token.Pos) {
+			if doc == nil || name == "" || name == "_" {
+				return
+			}
+			first := strings.TrimSpace(strings.TrimPrefix(doc.List[0].Text, "//"))
+			// Build tags and directives are not prose about the symbol.
+			if strings.HasPrefix(first, "go:") || strings.HasPrefix(first, "+build") {
+				return
+			}
+			if first == "" || strings.HasPrefix(first, name) {
+				return
+			}
+			t.Errorf("%s:%d: doc comment on %s starts with %q; a doc comment must begin with the name of what it documents, or it is describing something else",
+				rel, fset.Position(pos).Line, name, firstWords(first))
+		}
+
+		for _, decl := range f.Decls {
+			switch d := decl.(type) {
+			case *ast.FuncDecl:
+				check(d.Doc, d.Name.Name, d.Pos())
+			case *ast.GenDecl:
+				// A parenthesised block documents the group, not one symbol,
+				// so only a lone declaration is checked against its name.
+				if d.Lparen.IsValid() || len(d.Specs) != 1 {
+					continue
+				}
+				switch spec := d.Specs[0].(type) {
+				case *ast.TypeSpec:
+					check(d.Doc, spec.Name.Name, d.Pos())
+				case *ast.ValueSpec:
+					if len(spec.Names) == 1 {
+						check(d.Doc, spec.Names[0].Name, d.Pos())
+					}
+				}
+			}
+		}
+	}
+}
+
+// firstWords shortens a comment for the failure message, so the report names
+// what was found without reprinting a paragraph.
+func firstWords(s string) string {
+	if fields := strings.Fields(s); len(fields) > 4 {
+		return strings.Join(fields[:4], " ") + " ..."
+	}
+	return s
+}

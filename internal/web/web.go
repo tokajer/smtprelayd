@@ -61,6 +61,16 @@ const pageSize = 50
 // work on the request goroutine.
 const bulkMax = 1000
 
+// bulkBudget bounds how long one bulk action spends on the request
+// goroutine. It is half the server's WriteTimeout (internal/web/http.go), so
+// the redirect that reports what happened is still written: past that
+// deadline the response is cut off mid-flight and the operator is left not
+// knowing how much of an irreversible action completed.
+//
+// Stopping early is reported exactly like hitting bulkMax, because the
+// operator does the same thing in both cases -- repeat it.
+const bulkBudget = 30 * time.Second
+
 // Server renders the read-only observability dashboard: live queue,
 // search, bounces, per-message detail, route status and a read-only
 // configuration view. It never reads a message body and never exposes a
@@ -158,34 +168,11 @@ func (s *Server) base(page string, r *http.Request) baseData {
 	if len(recent) > 5 {
 		recent = recent[:5]
 	}
-	s.redactSubjects(recent)
 	return baseData{
 		Version: s.version, Page: page, Theme: s.theme,
 		Routes: routes, Totals: sum, RecentBounces: recent,
 		CurrentURL: r.URL.RequestURI(),
 	}
-}
-
-// redactSubjects overwrites Subject with a fixed marker when the operator
-// has disabled subject retention. store.RecordMessage already writes an
-// empty string in that case for every row, so this cannot under- or
-// over-redact relative to what is actually in the database: it is display
-// policy for what the store already enforced at write time, not a second
-// independent check.
-func (s *Server) redactSubjects(msgs []*store.Message) {
-	if s.cfg.History.RetainSubjects {
-		return
-	}
-	for _, m := range msgs {
-		m.Subject = "[redacted]"
-	}
-}
-
-func (s *Server) redactSubject(m *store.Message) {
-	if m == nil || s.cfg.History.RetainSubjects {
-		return
-	}
-	m.Subject = "[redacted]"
 }
 
 // render executes a named page into a buffer first, so a template error
@@ -253,7 +240,6 @@ func (s *Server) handleQueue(w http.ResponseWriter, r *http.Request) {
 		s.serverError(w, "queue", err)
 		return
 	}
-	s.redactSubjects(msgs)
 	hasMore := len(msgs) > pageSize
 	if hasMore {
 		msgs = msgs[:pageSize]
@@ -336,7 +322,6 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	s.redactSubjects(msgs)
 	hasMore := len(msgs) > pageSize
 	if hasMore {
 		msgs = msgs[:pageSize]
@@ -411,7 +396,6 @@ func (s *Server) handleBounces(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	s.redactSubjects(msgs)
 	hasMore := len(msgs) > pageSize
 	if hasMore {
 		msgs = msgs[:pageSize]
@@ -461,7 +445,6 @@ func (s *Server) handleMessage(w http.ResponseWriter, r *http.Request) {
 		s.serverError(w, "message", err)
 		return
 	}
-	s.redactSubject(msg)
 	data := struct {
 		baseData
 		Message      *store.Message
@@ -628,8 +611,9 @@ type bulkCounts struct {
 	Busy    int
 	Missing int
 	Failed  int
-	// Truncated says the queue held more than bulkMax active messages, so
-	// the action covered a prefix of it and has to be repeated.
+	// Truncated says the action covered only part of what was asked and has
+	// to be repeated: either the queue held more than bulkMax active
+	// messages, or bulkBudget ran out before the rest could be processed.
 	Truncated bool
 }
 
@@ -707,7 +691,17 @@ func (s *Server) handleQueueBulk(w http.ResponseWriter, r *http.Request, action 
 	}
 
 	details := "bulk (" + scope + ")"
+	deadline := time.Now().Add(bulkBudget)
 	for _, id := range ids {
+		// Two reasons to stop: the operator's connection has gone, so the
+		// remaining irreversible work benefits nobody; or the budget is
+		// spent, and continuing would cost the report of what was already
+		// done. Each message is finished before the check, so nothing is
+		// left half-applied.
+		if r.Context().Err() != nil || time.Now().After(deadline) {
+			res.Truncated = true
+			break
+		}
 		var outcome actionOutcome
 		if action == "requeue" {
 			outcome = s.requeueMessage(r, id, details)
@@ -727,8 +721,12 @@ func (s *Server) handleQueueBulk(w http.ResponseWriter, r *http.Request, action 
 			res.Failed++
 		}
 	}
+	// Logged whatever happens to the response: if the budget ran out or the
+	// operator navigated away, this line is the only record of how far an
+	// irreversible action got.
 	s.log.Info("bulk queue action", "action", action, "scope", scope, "source", r.RemoteAddr,
-		"ok", res.OK, "cleared", res.Cleared, "busy", res.Busy, "missing", res.Missing, "failed", res.Failed)
+		"ok", res.OK, "cleared", res.Cleared, "busy", res.Busy, "missing", res.Missing,
+		"failed", res.Failed, "incomplete", res.Truncated)
 
 	http.Redirect(w, r, "/queue?"+res.query(action).Encode(), http.StatusSeeOther)
 }
@@ -825,7 +823,7 @@ func bulkFlash(q url.Values) *flash {
 
 	text := strings.Join(parts, ", ") + "."
 	if c.Truncated {
-		text += fmt.Sprintf(" The queue held more than %d messages; repeat the action to continue.", bulkMax)
+		text += " Not every message was covered; repeat the action to continue."
 	}
 	level := "ok"
 	if c.Busy > 0 || c.Missing > 0 || c.Failed > 0 {
@@ -898,9 +896,10 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 	s.render(w, "config", data)
 }
 
-// parseTimeRange parses the since/until query parameters into *dst, RFC 3339
-// only, leaving *dst nil and returning a message on a bad value rather than
-// guessing at another layout.
+// parseOffset reads a pagination offset from a query parameter. Anything
+// unparsable or negative is the first page rather than an error: an offset is
+// a position in a list, and refusing the request over one would be a worse
+// answer than showing the start.
 func parseOffset(s string) int {
 	n, err := strconv.Atoi(s)
 	if err != nil || n < 0 {

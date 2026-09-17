@@ -75,6 +75,20 @@ type session struct {
 func (s *Server) handle(ctx context.Context, conn net.Conn) {
 	defer conn.Close()
 
+	// loop only reaches its ctx check between commands, so a session blocked
+	// in a read holds shutdown for read_timeout_sec -- or data_timeout_sec
+	// mid-DATA, five minutes by default. Set.Close waits on every one of
+	// them, which is long past what the Windows SCM allows for a stop and
+	// past systemd's default for the DATA case. Expiring the deadline on
+	// cancellation ends the blocked read at once; the message was never
+	// acknowledged, so the client retries and nothing is lost.
+	//
+	// The 421 in loop is not reached this way -- a dropped connection is what
+	// the client sees. Writing it from here would race the session's own
+	// writes on the same buffer.
+	stopOnCancel := context.AfterFunc(ctx, func() { _ = conn.SetDeadline(time.Now()) })
+	defer stopOnCancel()
+
 	host, _, err := net.SplitHostPort(conn.RemoteAddr().String())
 	if err != nil {
 		return

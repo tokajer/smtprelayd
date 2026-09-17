@@ -16,6 +16,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -26,10 +27,10 @@ import (
 	_ "time/tzdata"
 
 	"github.com/tokajer/smtprelayd/internal/api"
+	"github.com/tokajer/smtprelayd/internal/bounce"
 	"github.com/tokajer/smtprelayd/internal/canary"
 	"github.com/tokajer/smtprelayd/internal/config"
 	"github.com/tokajer/smtprelayd/internal/delivery"
-	"github.com/tokajer/smtprelayd/internal/expiry"
 	"github.com/tokajer/smtprelayd/internal/listener"
 	"github.com/tokajer/smtprelayd/internal/logging"
 	"github.com/tokajer/smtprelayd/internal/metrics"
@@ -44,7 +45,7 @@ var version = "dev"
 
 const usage = `smtprelayd %s — Open Source SMTP Relay for Windows & Linux
 
-usage: smtprelayd [-config <file>] [-out <file>] [-force] [-days N] <command>
+usage: smtprelayd [-config <file>] [-out <file>] [-force] [-days N] [-scope read|admin] <command>
 
 commands:
   run        start the relay in the foreground (default)
@@ -55,6 +56,9 @@ commands:
              with no CA behind it; refuses to overwrite either file unless
              -force is given, and -days N sets a validity other than the
              default (flags must come before the command, like -config)
+  token new  generate an API token, print it once, and print the
+             [[web.token]] block to paste into the configuration; -scope
+             selects read (default) or admin
   version    print the version and exit
 
 Windows only, requires an elevated prompt:
@@ -85,6 +89,7 @@ func main() {
 	outPath := fs.String("out", "", "output file for protect-secret (Windows only)")
 	force := fs.Bool("force", false, "allow gen-cert to overwrite an existing certificate and key")
 	days := fs.Int("days", 0, "validity in days for gen-cert (0 uses the default)")
+	scope := fs.String("scope", "read", "scope for token new: read or admin")
 	fs.Usage = func() { fmt.Fprintf(os.Stderr, usage, version) }
 	_ = fs.Parse(os.Args[1:])
 
@@ -114,13 +119,34 @@ func main() {
 		return
 	}
 
-	if err := run(cmd, *configPath, *console, *outPath, *force, *days); err != nil {
+	// "token new" is the one two-word command; the verb is checked here so
+	// run keeps taking a single command string like every other path.
+	if cmd == "token" {
+		if fs.NArg() > 1 && fs.Arg(1) != "new" {
+			fmt.Fprintf(os.Stderr, "smtprelayd: unknown token command %q, only \"new\" exists\n", fs.Arg(1))
+			os.Exit(1)
+		}
+		// Anything past "token new" is a flag the parser already stopped
+		// reading: Go's flag package ends at the first non-flag argument, so
+		// "token new -scope admin" would silently issue a read token and the
+		// operator would find out at the first 403. Refuse rather than
+		// quietly do something other than what was asked.
+		if fs.NArg() > 2 {
+			trailing := strings.Join(fs.Args()[2:], " ")
+			fmt.Fprintf(os.Stderr,
+				"smtprelayd: %q came after the command, where flags are not read.\n"+
+					"Put it first:  smtprelayd %s token new\n", trailing, trailing)
+			os.Exit(1)
+		}
+	}
+
+	if err := run(cmd, *configPath, *console, *outPath, *force, *days, *scope); err != nil {
 		fmt.Fprintln(os.Stderr, "smtprelayd:", err)
 		os.Exit(1)
 	}
 }
 
-func run(cmd, configPath string, console bool, outPath string, force bool, days int) error {
+func run(cmd, configPath string, console bool, outPath string, force bool, days int, scope string) error {
 	switch cmd {
 	case "version":
 		fmt.Println("smtprelayd", version)
@@ -134,6 +160,9 @@ func run(cmd, configPath string, console bool, outPath string, force bool, days 
 
 	case "protect-secret":
 		return protectSecret(outPath)
+
+	case "token":
+		return newToken(scope, os.Stdout)
 
 	case "gen-cert":
 		return genCert(configPath, force, days, os.Stdout)
@@ -306,7 +335,7 @@ func serve(ctx context.Context, configPath string, console bool, ready chan<- er
 	// Started unconditionally: it reports through the notifier, which
 	// declines to send when bounce.notify is empty, so an unconfigured
 	// contact costs one idle ticker rather than needing a switch of its own.
-	expiryWatcher := expiry.New(cfg, dm.Notifier(), log)
+	expiryWatcher := bounce.NewExpiryWatcher(cfg, dm.Notifier(), log)
 	bg.Go(func() { expiryWatcher.Run(ctx) })
 
 	if cfg.Metrics.Enabled {
