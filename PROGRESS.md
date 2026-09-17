@@ -560,6 +560,73 @@ immediately at startup, so no waiting — then revert. That exercises the whole
 collect/batch/compose/send path; only the source of the date differs from the
 certificate case, which is already verified end to end above.
 
+## The ninth review (2026-09-17)
+
+Two of the three findings were **test gaps on security-relevant code, not
+defects** -- the code did the right thing in both cases. After the eighth
+review reported a bug that one test run would have disproved, every finding
+here was proved by running it before it was written down.
+
+**`loginAuth` had no test at all.** Its `Start` carries two guards: the
+refusal to offer LOGIN on an unencrypted connection, and the check that the
+server name matches the configured host. Removing the cleartext refusal left
+the **entire suite green**. That guard is load-bearing, not belt and braces:
+`config.Validate` only rejects `auth` against `tls = "none"`, and `Deliver`'s
+own check compares against that same literal, so a `config.Route` whose TLS is
+neither `"none"` nor `"starttls"` reaches AUTH with neither having fired --
+exactly the "hand-edited or future in-memory Route" the comment at
+`client.go:153` names as the thing to defend against. `smtp.PlainAuth` blocks
+this itself and `xoauth2Auth` had the test; `login` had neither. Both guards
+plus the `Next` challenge dispatch are now covered.
+
+**No test bound `client`, `route`, `since` or `until` in any of the three
+query builders.** Deleting the client and route clauses outright from
+`FindMessages` left the suite green, and the same block appeared three times,
+each equally undetected. `TestEveryFilterFieldBinds` now exercises every field
+against `FindMessages`, `FindBounces` and `FindBounceSummaries`; all three
+copies were mutation-checked individually. A silently dropped filter is
+invisible and shows an operator other clients' mail in a view that claims to
+be filtered -- the same shape as `spool_warn_percent`.
+
+**Only then were the three copies merged** into `commonFilters.apply`. Doing
+it the other way round would have consolidated three unverified copies. The
+`Since`/`Until` column differs between the queue views and the bounce summary,
+so it is a parameter -- given a defined `timeColumn` type with exactly two
+package-level values, because it is interpolated rather than bound. Verified
+by capturing the generated SQL and the bound values from all three builders
+for a fully populated filter, before and after: **byte-identical**.
+
+**`<-done` on the bind-failure path was not synchronisation.** The deferred
+`stop(); bg.Wait()` already covers every return path, which is why the
+`web.New` failure path returns without draining and is still correct. The
+explicit `stop()` there went with it for the same reason. The remaining
+`<-done` does earn its place, and now says so: it orders the final
+`queued` count after the delivery manager stops draining the spool.
+`TestServeReturnsWhenTheListenerCannotBind` was added because that path had no
+coverage at all -- it fails in 20 seconds if the deferred `stop()` is ever
+dropped, and passes in under 20 ms otherwise.
+
+### Verified clean, with evidence
+
+Recorded so the next review does not re-derive them:
+
+- **`query.go:354` interpolates the sort column into SQL under a `#nosec
+  G202`, and the claim is true.** `col` comes from a `messageSortColumns`
+  lookup with a fallback; the request value is never passed through. `order`
+  is a two-branch choice between literals.
+- **`InsecureSkipVerify` occurs once in the tree**, in the selftest probe,
+  replaced by an exact pin -- and the comment reasons correctly about there
+  being no session cache, which is the resumption path that would otherwise
+  bypass the pin.
+- **`pinVerifier` is on `VerifyConnection`, not `VerifyPeerCertificate`**, for
+  two correct reasons: the latter is handed the certificates sent rather than
+  the chain built (an appended pinned cert would satisfy it), and it is
+  skipped entirely on a resumed session.
+- **STARTTLS never downgrades.** A smarthost not offering it produces a
+  temporary error and the message stays queued.
+- **Shutdown ordering in `serve()` is correct**: `bg.Wait()` runs before
+  `st.Close()` because the defers are registered after the store is opened.
+
 ## The eighth review (2026-09-17)
 
 **The review's headline finding was wrong, and that is the most useful thing

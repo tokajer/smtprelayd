@@ -168,6 +168,83 @@ type BounceFilter struct {
 	Offset    int
 }
 
+// timeColumn is the column a Since/Until window applies to. It is a defined
+// type with exactly two values so that the one fragment apply interpolates
+// rather than binds can only come from this file, never from a request.
+type timeColumn string
+
+const (
+	byReceivedAt  timeColumn = "m.received_at"
+	byLastAttempt timeColumn = "agg.last_attempt"
+)
+
+// commonFilters is the filtering MessageFilter and BounceFilter have in
+// common. The clauses used to be written out once per query builder, three
+// times over, and nothing detected a dropped one: deleting a clause from a
+// single copy left the whole suite green until TestEveryFilterFieldBinds
+// existed. One copy means the clause text -- and, more easily missed, the
+// order the values are bound in -- cannot disagree between them.
+type commonFilters struct {
+	Since, Until *time.Time
+	Client       string
+	Route        string
+	Sender       string
+	Recipient    string
+	Subject      string
+}
+
+func (f MessageFilter) common() commonFilters {
+	return commonFilters{
+		Since: f.Since, Until: f.Until, Client: f.Client, Route: f.Route,
+		Sender: f.Sender, Recipient: f.Recipient, Subject: f.Subject,
+	}
+}
+
+func (f BounceFilter) common() commonFilters {
+	return commonFilters{
+		Since: f.Since, Until: f.Until, Client: f.Client, Route: f.Route,
+		Sender: f.Sender, Recipient: f.Recipient, Subject: f.Subject,
+	}
+}
+
+// apply appends the shared clauses and the values they bind. The queue and
+// bounce views window on when a message arrived; the bounce summary windows
+// on when it last failed, which is why the column is a parameter.
+func (f commonFilters) apply(query string, args []interface{}, col timeColumn) (string, []interface{}) {
+	if f.Since != nil {
+		query += " AND " + string(col) + " >= ?"
+		args = append(args, f.Since.UTC().Format(time.RFC3339))
+	}
+	if f.Until != nil {
+		query += " AND " + string(col) + " <= ?"
+		args = append(args, f.Until.UTC().Format(time.RFC3339))
+	}
+	if f.Client != "" {
+		query += " AND m.client = ?"
+		args = append(args, f.Client)
+	}
+	if f.Route != "" {
+		query += " AND m.route = ?"
+		args = append(args, f.Route)
+	}
+	if f.Sender != "" {
+		query += " AND m.envelope_from LIKE ?"
+		args = append(args, "%"+f.Sender+"%")
+	}
+	if f.Recipient != "" {
+		// Substring match via LIKE; the value is bound as a parameter, never
+		// interpolated, so characters meaningful to LIKE (% and _) only ever
+		// widen or narrow the match, they cannot change the query structure.
+		query += " AND m.recipients LIKE ?"
+		args = append(args, "%"+f.Recipient+"%")
+	}
+	if f.Subject != "" {
+		query += " AND m.subject LIKE ?"
+		args = append(args, "%"+f.Subject+"%")
+	}
+	return query, args
+}
+
 // FindMessageByID retrieves a single message with all its attempts.
 func (s *Store) FindMessageByID(queueID string) (*Message, error) {
 	var m Message
@@ -292,37 +369,7 @@ func (s *Store) FindMessages(filter MessageFilter) ([]*Message, error) {
 	`
 	args := []interface{}{}
 
-	if filter.Since != nil {
-		query += " AND m.received_at >= ?"
-		args = append(args, filter.Since.UTC().Format(time.RFC3339))
-	}
-	if filter.Until != nil {
-		query += " AND m.received_at <= ?"
-		args = append(args, filter.Until.UTC().Format(time.RFC3339))
-	}
-	if filter.Client != "" {
-		query += " AND m.client = ?"
-		args = append(args, filter.Client)
-	}
-	if filter.Route != "" {
-		query += " AND m.route = ?"
-		args = append(args, filter.Route)
-	}
-	if filter.Sender != "" {
-		query += " AND m.envelope_from LIKE ?"
-		args = append(args, "%"+filter.Sender+"%")
-	}
-	if filter.Recipient != "" {
-		// Substring match via LIKE; the value is bound as a parameter, never
-		// interpolated, so characters meaningful to LIKE (% and _) only ever
-		// widen or narrow the match, they cannot change the query structure.
-		query += " AND m.recipients LIKE ?"
-		args = append(args, "%"+filter.Recipient+"%")
-	}
-	if filter.Subject != "" {
-		query += " AND m.subject LIKE ?"
-		args = append(args, "%"+filter.Subject+"%")
-	}
+	query, args = filter.common().apply(query, args, byReceivedAt)
 	switch filter.Status {
 	case "":
 		// No filter.
@@ -453,34 +500,7 @@ func (s *Store) FindBounces(filter BounceFilter) ([]*Message, error) {
 	`
 	args := []interface{}{}
 
-	if filter.Since != nil {
-		query += " AND m.received_at >= ?"
-		args = append(args, filter.Since.UTC().Format(time.RFC3339))
-	}
-	if filter.Until != nil {
-		query += " AND m.received_at <= ?"
-		args = append(args, filter.Until.UTC().Format(time.RFC3339))
-	}
-	if filter.Client != "" {
-		query += " AND m.client = ?"
-		args = append(args, filter.Client)
-	}
-	if filter.Route != "" {
-		query += " AND m.route = ?"
-		args = append(args, filter.Route)
-	}
-	if filter.Sender != "" {
-		query += " AND m.envelope_from LIKE ?"
-		args = append(args, "%"+filter.Sender+"%")
-	}
-	if filter.Recipient != "" {
-		query += " AND m.recipients LIKE ?"
-		args = append(args, "%"+filter.Recipient+"%")
-	}
-	if filter.Subject != "" {
-		query += " AND m.subject LIKE ?"
-		args = append(args, "%"+filter.Subject+"%")
-	}
+	query, args = filter.common().apply(query, args, byReceivedAt)
 	if filter.Class != "" {
 		// On last.class, not on the a subquery: a selects queue_id alone, so
 		// "AND a.class = ?" was a guaranteed SQL error and the dashboard's
@@ -593,34 +613,7 @@ func (s *Store) FindBounceSummaries(filter BounceFilter) ([]BounceSummary, bool,
 		WHERE 1=1
 	`
 	args := []interface{}{}
-	if filter.Since != nil {
-		query += " AND agg.last_attempt >= ?"
-		args = append(args, filter.Since.UTC().Format(time.RFC3339))
-	}
-	if filter.Until != nil {
-		query += " AND agg.last_attempt <= ?"
-		args = append(args, filter.Until.UTC().Format(time.RFC3339))
-	}
-	if filter.Client != "" {
-		query += " AND m.client = ?"
-		args = append(args, filter.Client)
-	}
-	if filter.Route != "" {
-		query += " AND m.route = ?"
-		args = append(args, filter.Route)
-	}
-	if filter.Sender != "" {
-		query += " AND m.envelope_from LIKE ?"
-		args = append(args, "%"+filter.Sender+"%")
-	}
-	if filter.Recipient != "" {
-		query += " AND m.recipients LIKE ?"
-		args = append(args, "%"+filter.Recipient+"%")
-	}
-	if filter.Subject != "" {
-		query += " AND m.subject LIKE ?"
-		args = append(args, "%"+filter.Subject+"%")
-	}
+	query, args = filter.common().apply(query, args, byLastAttempt)
 	if filter.Class != "" {
 		query += " AND last.class = ?"
 		args = append(args, filter.Class)

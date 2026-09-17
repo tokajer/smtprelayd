@@ -910,3 +910,115 @@ func TestForeignKeysAreOn(t *testing.T) {
 		t.Fatal("foreign_keys is off; ON DELETE CASCADE would be a no-op")
 	}
 }
+
+// Every filter field, against all three query builders. The filter clauses
+// and their argument binding are written out three times -- FindMessages,
+// FindBounces, FindBounceSummaries -- and nothing detected a dropped one:
+// deleting the client and route clauses from FindMessages outright left the
+// whole suite green. A silently ignored filter is invisible, and it shows an
+// operator other clients' mail in a view that claims to be filtered.
+//
+// The two rows differ in every filterable field, so a clause that fails to
+// bind returns both instead of one.
+func TestEveryFilterFieldBinds(t *testing.T) {
+	s := testStore(t)
+	early := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	late := early.Add(48 * time.Hour)
+
+	for _, d := range []struct {
+		id, client, route, from, rcpt, subj string
+		at                                  time.Time
+	}{
+		{"aaaaaaaa", "alpha", "r-alpha", "from-alpha@x.test", `["to-alpha@y.test"]`, "subject-alpha", early},
+		{"bbbbbbbb", "beta", "r-beta", "from-beta@x.test", `["to-beta@y.test"]`, "subject-beta", late},
+	} {
+		if err := s.RecordMessage(MessageRecord{
+			QueueID: d.id, Client: d.client, Route: d.route, EnvelopeFrom: d.from,
+			Recipients: d.rcpt, Subject: d.subj, Listener: "l", RemoteAddr: "127.0.0.1",
+			ReceivedAt: d.at, ExpiresAt: d.at.Add(time.Hour),
+		}); err != nil {
+			t.Fatal(err)
+		}
+		// Permanent, so the same rows are visible to the bounce builders.
+		if err := s.RecordAttempt(d.id, 1, 550, "rejected", "permanent", nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	afterEarly := late.Add(-time.Hour) // excludes the early row
+	beforeLate := early.Add(time.Hour) // excludes the late row
+
+	t.Run("FindMessages", func(t *testing.T) {
+		for name, f := range map[string]MessageFilter{
+			"client":    {Client: "alpha"},
+			"route":     {Route: "r-alpha"},
+			"sender":    {Sender: "from-alpha"},
+			"recipient": {Recipient: "to-alpha"},
+			"subject":   {Subject: "subject-alpha"},
+			"since":     {Since: &afterEarly},
+			"until":     {Until: &beforeLate},
+		} {
+			got, err := s.FindMessages(f)
+			if err != nil {
+				t.Fatalf("%s: %v", name, err)
+			}
+			if len(got) != 1 {
+				t.Errorf("filter %q matched %d rows, want 1: the clause is not being applied", name, len(got))
+			}
+		}
+	})
+
+	t.Run("FindBounces", func(t *testing.T) {
+		for name, f := range map[string]BounceFilter{
+			"client":    {Client: "alpha"},
+			"route":     {Route: "r-alpha"},
+			"sender":    {Sender: "from-alpha"},
+			"recipient": {Recipient: "to-alpha"},
+			"subject":   {Subject: "subject-alpha"},
+			"since":     {Since: &afterEarly},
+			"until":     {Until: &beforeLate},
+		} {
+			got, err := s.FindBounces(f)
+			if err != nil {
+				t.Fatalf("%s: %v", name, err)
+			}
+			if len(got) != 1 {
+				t.Errorf("filter %q matched %d rows, want 1: the clause is not being applied", name, len(got))
+			}
+		}
+	})
+
+	t.Run("FindBounceSummaries", func(t *testing.T) {
+		for name, f := range map[string]BounceFilter{
+			"client":    {Client: "alpha"},
+			"route":     {Route: "r-alpha"},
+			"sender":    {Sender: "from-alpha"},
+			"recipient": {Recipient: "to-alpha"},
+			"subject":   {Subject: "subject-alpha"},
+		} {
+			got, _, err := s.FindBounceSummaries(f)
+			if err != nil {
+				t.Fatalf("%s: %v", name, err)
+			}
+			if len(got) != 1 {
+				t.Errorf("filter %q matched %d rows, want 1: the clause is not being applied", name, len(got))
+			}
+		}
+
+		// Since and Until filter on the latest attempt here, not on
+		// received_at, and both attempts were recorded in the same instant.
+		// A window around now must therefore keep both rows and a window in
+		// the past must drop both -- enough to prove the clause binds.
+		future := time.Now().Add(24 * time.Hour)
+		past := time.Now().Add(-24 * time.Hour)
+		if got, _, err := s.FindBounceSummaries(BounceFilter{Since: &past, Until: &future}); err != nil || len(got) != 2 {
+			t.Errorf("a window spanning now matched %d rows (err %v), want 2", len(got), err)
+		}
+		if got, _, err := s.FindBounceSummaries(BounceFilter{Since: &future}); err != nil || len(got) != 0 {
+			t.Errorf("since in the future matched %d rows (err %v), want 0", len(got), err)
+		}
+		if got, _, err := s.FindBounceSummaries(BounceFilter{Until: &past}); err != nil || len(got) != 0 {
+			t.Errorf("until in the past matched %d rows (err %v), want 0", len(got), err)
+		}
+	})
+}

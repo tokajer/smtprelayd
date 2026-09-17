@@ -371,14 +371,16 @@ func serve(ctx context.Context, configPath string, console bool, ready chan<- er
 
 	if err := set.Bind(); err != nil {
 		log.Error("listener: failed to bind", "error", err)
-		stop()
-		<-done
 		return err
 	}
 	// Everything that can fail synchronously has now succeeded; only the
 	// accept loop, which runs until shutdown, remains.
 	notifyReady(nil)
 	set.Run(ctx)
+	// Not shutdown synchronisation -- the deferred bg.Wait above is that, on
+	// every return path. This waits only so that the count below is taken
+	// after the delivery manager has stopped draining the spool, rather than
+	// reporting a queue length that was already stale when it was read.
 	<-done
 	log.Info("stopped", "queued", sp.Len())
 	return nil
