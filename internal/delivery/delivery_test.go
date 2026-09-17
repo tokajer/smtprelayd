@@ -7,8 +7,10 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
+	"net/textproto"
 	"strings"
 	"testing"
 	"time"
@@ -197,3 +199,95 @@ func TestReportQuotaLogsOnlyOnTransition(t *testing.T) {
 // delivery actually stores, so a signature drift there fails this test file
 // to build rather than silently type-checking against something else.
 var _ smarthost.TokenSource = fakeTokenSource{}
+
+// backoff, isPermanent, isAuthFailure and extractSMTPError are pure and were
+// all at 0% coverage, yet between them they decide whether a message is
+// retried or given up on. isPermanent answering wrong in one direction empties
+// the whole queue into spool/failed -- which is precisely the reasoning the
+// comment above attempt's 535 handling gives for not classifying an
+// authentication failure as permanent.
+
+// docs/guides/CONFIGURATION.md documents the schedule as "minutes between
+// attempts, then the last interval repeats". Both ends are clamped: attempt
+// numbering starts at 1, and nothing past the end of the schedule may index
+// out of it.
+func TestBackoffFollowsTheScheduleAndRepeatsTheLast(t *testing.T) {
+	m := &Manager{cfg: &config.Config{
+		Queue: config.Queue{RetryScheduleMin: []int{1, 5, 15, 30, 60, 120}},
+	}}
+	for _, tc := range []struct {
+		attempt int
+		want    time.Duration
+	}{
+		{0, 1 * time.Minute},  // clamped up: there is no attempt zero
+		{-3, 1 * time.Minute}, // and nothing below it either
+		{1, 1 * time.Minute},
+		{2, 5 * time.Minute},
+		{6, 120 * time.Minute}, // the last entry
+		{7, 120 * time.Minute}, // and it repeats from here on
+		{999, 120 * time.Minute},
+	} {
+		if got := m.backoff(tc.attempt); got != tc.want {
+			t.Errorf("backoff(%d) = %v, want %v", tc.attempt, got, tc.want)
+		}
+	}
+}
+
+// A single-entry schedule is the edge the clamp is really protecting: every
+// index resolves to the same element, and none may fall outside it.
+func TestBackoffWithASingleEntrySchedule(t *testing.T) {
+	m := &Manager{cfg: &config.Config{Queue: config.Queue{RetryScheduleMin: []int{7}}}}
+	for _, attempt := range []int{0, 1, 2, 50} {
+		if got := m.backoff(attempt); got != 7*time.Minute {
+			t.Errorf("backoff(%d) = %v, want 7m", attempt, got)
+		}
+	}
+}
+
+// The classifiers must look through wrapping: attempt wraps the smarthost
+// error with route context before these ever see it.
+func TestFailureClassifiersSeeThroughWrapping(t *testing.T) {
+	perm := &smarthost.PermError{Err: errors.New("550 mailbox unavailable")}
+	temp := &smarthost.TempError{Err: errors.New("451 try later")}
+	auth := &smarthost.AuthError{Err: errors.New("535 rejected")}
+
+	for _, tc := range []struct {
+		name               string
+		err                error
+		permanent, badAuth bool
+	}{
+		{"permanent", perm, true, false},
+		{"permanent, wrapped", fmt.Errorf("route r: %w", perm), true, false},
+		{"temporary", temp, false, false},
+		{"temporary, wrapped", fmt.Errorf("route r: %w", temp), false, false},
+		// An authentication failure is the relay's problem, never the
+		// message's: it must be neither permanent nor silently temporary.
+		{"authentication", auth, false, true},
+		{"authentication, wrapped", fmt.Errorf("route r: %w", auth), false, true},
+		{"plain error", errors.New("connection reset"), false, false},
+	} {
+		if got := isPermanent(tc.err); got != tc.permanent {
+			t.Errorf("%s: isPermanent = %v, want %v", tc.name, got, tc.permanent)
+		}
+		if got := isAuthFailure(tc.err); got != tc.badAuth {
+			t.Errorf("%s: isAuthFailure = %v, want %v", tc.name, got, tc.badAuth)
+		}
+	}
+}
+
+func TestExtractSMTPError(t *testing.T) {
+	te := &textproto.Error{Code: 550, Msg: "mailbox unavailable"}
+	if code, msg := extractSMTPError(te); code != 550 || msg != "mailbox unavailable" {
+		t.Errorf("extractSMTPError(textproto) = %d, %q; want 550, \"mailbox unavailable\"", code, msg)
+	}
+	// Still found once attempt has wrapped it in route context.
+	if code, _ := extractSMTPError(fmt.Errorf("route r: %w", te)); code != 550 {
+		t.Errorf("a wrapped textproto.Error yielded code %d, want 550", code)
+	}
+	// No SMTP code in sight: the contract is code 0 and the error's own text,
+	// which is what the attempt record then stores.
+	code, msg := extractSMTPError(errors.New("connection reset by peer"))
+	if code != 0 || msg != "connection reset by peer" {
+		t.Errorf("extractSMTPError(plain) = %d, %q; want 0 and the error text", code, msg)
+	}
+}

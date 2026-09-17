@@ -5,7 +5,7 @@ LDFLAGS := -s -w -X main.version=$(VERSION)
 GOFLAGS := -trimpath
 export CGO_ENABLED = 0
 
-.PHONY: build build-all test lint check selftest sbom dist dist-dir clean license
+.PHONY: build build-all test lint check selftest selftest-ci sbom dist dist-dir clean license
 
 build:
 	go build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o bin/$(BINARY) $(PKG)
@@ -40,9 +40,14 @@ CONFIG ?= configs/smtprelayd.example.toml
 check: build
 	./bin/$(BINARY) -config $(CONFIG) check
 
-# Active open relay probe against a running instance.
+# Active open relay probe against an instance you are already running.
 selftest: build
 	./bin/$(BINARY) -config $(CONFIG) selftest
+
+# The same probe, but it starts and stops its own throwaway instance, so it
+# needs nothing running. This is what CI gates on.
+selftest-ci: build
+	./scripts/selftest-ci.sh
 
 sbom: | dist-dir
 	cyclonedx-gomod app -json -licenses -main $(PKG) -output dist/$(BINARY)-$(VERSION).cdx.json .

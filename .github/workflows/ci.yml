@@ -57,6 +57,15 @@ jobs:
       - name: Static security analysis
         run: go run github.com/securego/gosec/v2/cmd/gosec@${{ env.GOSEC_VERSION }} -severity=medium ./...
 
+      # internal/selftest probes the built binary the way a device reaches
+      # it, but it needs a running instance, so it had never run here: the
+      # refusal of an unmatched source could regress with every other gate
+      # still green. The unit tests added alongside this cover the refusal in
+      # the session; this covers the shipped binary and its configuration
+      # loader together.
+      - name: Open relay probe against a running instance
+        run: make build && ./scripts/selftest-ci.sh
+
   build:
     name: Cross-compile
     runs-on: ubuntu-latest

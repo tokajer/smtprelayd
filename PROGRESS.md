@@ -560,6 +560,67 @@ immediately at startup, so no waiting — then revert. That exercises the whole
 collect/batch/compose/send path; only the source of the date differs from the
 certificate case, which is already verified end to end above.
 
+## The tenth review (2026-09-17)
+
+Measured instead of asserted. Coverage per package put `internal/listener` at
+**42.9%** with every SMTP verb handler at 0.0%, so a mutation sweep was run
+over the session's security controls. All six survived -- deleting any one of
+them left the whole suite green:
+
+```
+SURVIVED  open relay: unmatched source may MAIL FROM
+SURVIVED  require_tls no longer enforced
+SURVIVED  MAIL accepted before HELO
+SURVIVED  declared SIZE over the limit accepted
+SURVIVED  SMTP smuggling: session kept open after a bare-LF dot
+SURVIVED  hop limit not enforced
+```
+
+The first line means the default-deny refusal -- the one guarantee
+`docs/guides/SECURITY.md` says cannot be recovered from cheaply, and which
+CLAUDE.md names as a required negative test -- could be removed with CI still
+green. `.github/workflows/ci.yml` runs the unit tests, gofmt, vet,
+banned-imports, govulncheck and gosec; it did not run `selftest`, which needs
+a running instance. Two controls had half coverage that is easy to mistake for
+whole: `TestMatcherDefaultDeny` proves `Matcher.Match` does not match, and
+`TestDotReaderFlagsNonConformingEndOfData` proves `dotReader` sets the
+smuggling flag. Neither proved the **session acts on it**.
+
+All six are now killed by tests that speak the protocol over a real socket
+(`internal/listener/session_smtp_test.go`). Four need no spool or store,
+because `doMail` touches neither; the hop limit and the smuggling refusal use
+a real spool and history store in a temp dir. `internal/listener` went from
+42.9% to **77.5%**.
+
+`internal/delivery` was at 25.3% with `backoff`, `isPermanent`,
+`isAuthFailure` and `extractSMTPError` -- all pure, all deciding whether a
+message is retried or given up on -- at 0.0%. Four mutations there are now
+killed too, including "isPermanent treats an authentication failure as
+permanent", which is the exact scenario the code's own comment about the 535
+warns would empty the queue into `spool/failed` on a secret rotation.
+
+`scripts/selftest-ci.sh` starts a throwaway instance on loopback and probes
+it, wired into CI and available as `make selftest-ci`. The client CIDR
+deliberately excludes the loopback address the probe dials from: allowlisting
+it makes the probe report "allowlisted, so the default-deny path was not
+exercised" and still exit 0 -- true, and useless as a gate. Readiness is taken
+from the instance's own `"listening"` log line rather than from `nc`, which is
+not installed on every runner.
+
+Both of the gate's failure modes were verified. Removing the guard from
+`doMail` makes it fail with `EOF`, because `doMail` then dereferences a nil
+client and the connection drops -- a crash, not a demonstrated open relay. A
+genuine open relay (a client CIDR of `0.0.0.0/0`) is reported properly:
+`relay to open-relay-probe@example.net was accepted from 127.0.0.1, allowed by
+client "devices" whose cidr covers every address: that is an open relay`.
+
+### Verified clean, with evidence
+
+- **The documented retry semantics are true.** `CONFIGURATION.md:315` says
+  "then the last interval repeats"; `backoff` clamps the index to
+  `len(sched)-1` and does exactly that. Now pinned by a test.
+- **Every package has tests.** No `no test files` anywhere in the tree.
+
 ## The ninth review (2026-09-17)
 
 Two of the three findings were **test gaps on security-relevant code, not
