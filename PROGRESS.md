@@ -560,6 +560,67 @@ immediately at startup, so no waiting — then revert. That exercises the whole
 collect/batch/compose/send path; only the source of the date differs from the
 certificate case, which is already verified end to end above.
 
+## The eleventh review (2026-09-17)
+
+Mutation sweeps at three trust boundaries that had never been tested that
+way. **Two of the three came back clean**, which is the more useful half of
+the result: the pattern from the ninth and tenth reviews does not generalise.
+
+**The HTTP authorization layer holds completely.** Six mutations, six killed:
+no bearer token required at all; the scope check removed so a read token could
+requeue and delete; `ScopeSatisfies` always permitting; the failed-auth
+backoff never blocking; the dashboard's bulk action skipping CSRF
+verification; `MatchToken` accepting any non-empty token. **Sender rewriting
+likewise** -- an unauthorized sender passing through unrewritten, and
+`if_unauthorized` with an empty allowlist behaving as `force` while reading as
+selective, both caught.
+
+**The spool's crash-recovery path was the gap.** Two of five mutations
+survived, and the consequence of the worse one was demonstrated rather than
+argued. `recover` drops metadata whose body is gone; with the guard removed,
+the same probe reports:
+
+```
+with the guard:    indexed=false  metadata still on disk=false
+without the guard: indexed=true   metadata still on disk=true
+                   and it is claimable for delivery: true
+```
+
+So the message is not merely listed -- it is handed out, fails on the missing
+body, and retries until `queue.max_lifetime_hours` expires it. That is
+reachable without any operator mistake (a crash between the two unlinks, an
+interrupted removal, a hand-deleted spool file), and `store.ReconcileRemoved`
+exists precisely to clean up the history row it leaves behind. The second
+survivor was the `spool/tmp` sweep: without it, interrupted stages accumulate
+across restarts while counting toward no quota, so the disk fills without
+`limits.spool_max_gb` ever firing.
+
+**`attempt` was entirely unexecuted** -- its pure helpers were covered by the
+tenth review, the wiring between them was not. There is no seam to inject a
+smarthost through, and adding one only for the test would be a production
+change made for the test's benefit; the route's host and port come from the
+configuration, so `attempt_test.go` points them at a scripted SMTP server on
+loopback and drives the real path. All four outcomes are covered: delivered,
+permanent, deferred with backoff, and expired.
+
+One assumption of mine was wrong while writing these and is worth recording:
+`Spool.Has` returns true for a **permanently failed** message too, by design
+-- it reports "the spool still holds files for this", and a failed message
+keeps them under `spool/failed` so the quota still counts them. The test
+asserts on `Len` and on `Claim` instead.
+
+All ten mutations across the four items are now killed. `internal/spool` went
+from 79.4% to **83.5%**, `internal/delivery` from 33.3% to **61.3%**.
+
+### Verified clean, with evidence
+
+- Six of six authorization mutations killed (API bearer check, scope check,
+  `ScopeSatisfies`, failed-auth backoff, dashboard CSRF, `MatchToken`).
+- Two of two sender-rewriting policy mutations killed.
+- Three of five spool recovery mutations were already killed before this
+  session: orphaned body removal, `spool/failed` accounting at startup, and
+  the failed body's bytes counting toward the quota.
+
 ## The tenth review (2026-09-17)
 
 Measured instead of asserted. Coverage per package put `internal/listener` at

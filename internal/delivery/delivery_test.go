@@ -291,3 +291,60 @@ func TestExtractSMTPError(t *testing.T) {
 		t.Errorf("extractSMTPError(plain) = %d, %q; want 0 and the error text", code, msg)
 	}
 }
+
+// hold defers a message that hit the route rate limit. Its doc comment makes
+// a promise the code has to keep: the message was never offered to the
+// smarthost, so pacing must consume neither its retry budget nor its
+// lifetime. Break that and a paced message runs out of attempts, or expires,
+// for reasons that have nothing to do with the smarthost.
+func TestHoldDoesNotConsumeTheRetryBudget(t *testing.T) {
+	m, sp := testManager(t)
+	env := spool.Envelope{From: "a@example.at", To: []string{"b@example.net"},
+		Route: "m365", Client: "printers", Received: time.Now()}
+	if _, err := sp.Enqueue(env, strings.NewReader("x"), 0, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	meta, ok := sp.Claim(time.Now())
+	if !ok {
+		t.Fatal("claim failed")
+	}
+	attemptsBefore, expiresBefore := meta.Attempts, meta.Expires
+
+	m.hold(meta, 5*time.Minute)
+
+	if meta.Attempts != attemptsBefore {
+		t.Errorf("hold moved the attempt counter from %d to %d; pacing must not spend a retry",
+			attemptsBefore, meta.Attempts)
+	}
+	if !meta.Expires.Equal(expiresBefore) {
+		t.Errorf("hold moved the expiry from %v to %v", expiresBefore, meta.Expires)
+	}
+	if want := time.Now().Add(5 * time.Minute); meta.NextAttempt.Sub(want) > time.Minute || want.Sub(meta.NextAttempt) > time.Minute {
+		t.Errorf("next attempt at %v, want about %v", meta.NextAttempt, want)
+	}
+}
+
+// The deferral is capped at the message's own expiry: pushing it past that
+// would leave a message that can never be tried again yet is not expired
+// either, so nothing would ever clear it.
+func TestHoldNeverDefersPastExpiry(t *testing.T) {
+	m, sp := testManager(t)
+	env := spool.Envelope{From: "a@example.at", To: []string{"b@example.net"},
+		Route: "m365", Client: "printers", Received: time.Now()}
+	if _, err := sp.Enqueue(env, strings.NewReader("x"), 0, 2*time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	meta, ok := sp.Claim(time.Now())
+	if !ok {
+		t.Fatal("claim failed")
+	}
+
+	m.hold(meta, time.Hour)
+
+	if meta.NextAttempt.After(meta.Expires) {
+		t.Errorf("next attempt %v is past the expiry %v", meta.NextAttempt, meta.Expires)
+	}
+	if !meta.NextAttempt.Equal(meta.Expires) {
+		t.Errorf("next attempt %v, want it pinned to the expiry %v", meta.NextAttempt, meta.Expires)
+	}
+}

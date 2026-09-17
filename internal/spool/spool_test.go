@@ -628,3 +628,65 @@ func TestSweepFailedKeepsWhatItCouldNotDelete(t *testing.T) {
 		t.Error("the entry survived a successful sweep")
 	}
 }
+
+// recover drops metadata whose body is gone rather than indexing it. Without
+// that, the message is not merely listed -- it is claimable, so every
+// delivery attempt fails on the missing body and retries until
+// queue.max_lifetime_hours expires it. That state is reachable without any
+// operator mistake (a crash between the two unlinks, an interrupted removal,
+// a hand-deleted spool file), and store.ReconcileRemoved exists precisely to
+// clean up the history row it leaves behind.
+func TestRecoverDropsMetadataWhoseBodyIsGone(t *testing.T) {
+	dir := t.TempDir()
+	s, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	env := Envelope{From: "a@example.at", To: []string{"b@example.net"}, Client: "c", Route: "r",
+		Received: time.Now().UTC()}
+	id, err := s.Enqueue(env, strings.NewReader("Subject: x\r\n\r\nbody\r\n"), 0, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(s.dataPath(id)); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, indexed := reopened.index[id]; indexed {
+		t.Error("a message whose body is gone was indexed at startup")
+	}
+	if _, err := os.Stat(reopened.metaPath(id)); err == nil {
+		t.Error("the orphaned metadata was left on disk, so the next start finds it again")
+	}
+	if m, ok := reopened.Claim(time.Now()); ok {
+		t.Errorf("a message with no body was handed out for delivery (queue_id %s)", m.ID)
+	}
+}
+
+// An interrupted stage leaves a body in spool/tmp that no metadata refers to.
+// recover sweeps the directory at startup; without that they accumulate over
+// every restart while counting toward no quota, so the filesystem fills up
+// without limits.spool_max_gb ever firing. Staged's own comment names this
+// sweep as what covers a crash before Discard.
+func TestRecoverSweepsInterruptedStages(t *testing.T) {
+	dir := t.TempDir()
+	s, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	leftover := filepath.Join(s.tmp, "interrupted.eml")
+	if err := os.WriteFile(leftover, []byte("half a message"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := Open(dir); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(leftover); err == nil {
+		t.Error("an interrupted stage survived a restart; they accumulate and count toward no quota")
+	}
+}
