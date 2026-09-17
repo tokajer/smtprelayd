@@ -560,6 +560,63 @@ immediately at startup, so no waiting — then revert. That exercises the whole
 collect/batch/compose/send path; only the source of the date differs from the
 certificate case, which is already verified end to end above.
 
+## The eighth review (2026-09-17)
+
+**The review's headline finding was wrong, and that is the most useful thing
+in this entry.** I reported that `web.activeQueueIDs` could never detect
+truncation, because it asks `store.FindMessages` for `Limit: bulkMax` (1000)
+and then tests `len(msgs) > bulkMax`, while `FindMessages` clamps
+`filter.Limit` to at most 1000. I had read the clamp and never opened the
+`LIMIT` binding 85 lines below it:
+
+```go
+args = append(args, filter.Limit+1, filter.Offset) // +1 to detect "has more"
+```
+
+The clamp runs first and leaves 1000 unchanged; the query then binds 1001.
+Proved with a throwaway probe: 1005 active rows, `Limit: 1000`, **1001 rows
+returned**, so `len(msgs) > bulkMax` is true and the "repeat the action"
+banner appears. `FindBounces` and `FindBounceSummaries` bind `Limit+1` the
+same way, so the sidebar's `len(recent) > 5` guard is load-bearing too, not a
+defensive check against an impossible state as I claimed. `bulkMax`'s own
+comment states the behaviour correctly and I should have read it.
+
+**Do not re-report this.** Every `FindMessages`/`FindBounces` caller in the
+tree relies on the `Limit+1` contract, and all of them are correct: the queue
+and search pages' next-page links, `/api/v1/messages`'s `next_cursor` via
+`splitHasMore`, and the bulk truncation flag.
+
+What was actually implemented from that review:
+
+**`web.go` split**, 1084 lines to 650. `internal/web/format.go` holds the
+twelve presentation helpers (link building, paging parameters, the value
+formatting the configuration page renders) -- none of them touch the store,
+the spool or the request, which is why they can sit apart from the handlers.
+`internal/web/bulk.go` holds the queue's bulk actions with `bulkMax` and
+`bulkBudget`. The per-message primitives stayed in `web.go`, where the
+single-message endpoints use them too.
+
+**`routes()` split**, the 158-line residue of the previous session's
+`Validate` work, into `routeIdentity`, `routeTLS`, `routeAuth`, `routeCAPin`,
+`routeDomains` and `routeSources`; `routes()` itself is 23 lines. The
+file-order check used last session no longer proves anything here, because
+the extracted methods are defined below their caller -- verified instead by
+running a configuration that trips fifteen route errors across two routes,
+including the cross-route domain and source claims, through the old and new
+code: the error list is byte-identical.
+
+**`logging.redact` no longer redacts a credential's name.** `secretKeys`
+matches key substrings and contains `"token"`, so `token_name` -- the field
+that says *which* API token performed an audited action -- would have been
+replaced with `[redacted]`, leaving a line recording that somebody did
+something. Nothing logs it today (no slog key in the tree matches any
+`secretKeys` entry, so `redact` has never fired in production; it is
+deliberate insurance against a future call site). `secretKeyNames` now exempts
+it, with a test that fails if the exemption is removed.
+
+**`maxInt` replaced with the builtin `max`**, available since Go 1.21 against
+this module's `go 1.25.13`.
+
 ## The seventh review's five fixes (2026-09-17)
 
 **A token request to Microsoft blocked the whole observability surface.**

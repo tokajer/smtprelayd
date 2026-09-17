@@ -357,154 +357,189 @@ func (v *validator) routes() {
 	for i := range v.c.Routes {
 		r := &v.c.Routes[i]
 		where := fmt.Sprintf("route[%d] %q", i, r.Name)
-		if !ValidName(r.Name) {
-			v.add("%s: name must be 1 to %d printable ASCII characters without a quote or backslash", where, maxNameLen)
-		} else if v.routeNames[r.Name] {
-			v.add("%s: duplicate route name", where)
-		}
-		v.routeNames[r.Name] = true
-		if r.Default {
-			v.defaults++
-		}
-		if r.Host == "" {
-			v.add("%s: host is required", where)
-		}
-		if r.Port < 1 || r.Port > 65535 {
-			v.add("%s: port %d is out of range", where, r.Port)
-		}
-		switch r.TLS {
-		case defaultRouteTLS, "implicit":
-		case "none":
-			// Cleartext delivery exists for smarthosts on a segment the
-			// operator controls end to end. It is never a fallback: a route
-			// asking for TLS that cannot negotiate it defers, it does not
-			// downgrade. Settings that only describe a handshake are an
-			// error here rather than silently ignored, because a route
-			// carrying min_tls reads as if it were still encrypted.
-			if r.MinTLS != "" {
-				v.add("%s: min_tls is meaningless with tls none, remove it", where)
-			}
-			if r.CAPin != "" {
-				v.add("%s: ca_pin is meaningless with tls none, remove it", where)
-			}
-		default:
-			v.add("%s: tls must be none, starttls or implicit", where)
-		}
-		if r.TLS == "none" {
-			// Credentials are never put on an unprotected wire. A bearer
-			// token read off it grants mailbox access far beyond this relay,
-			// and PLAIN hands over the password outright; net/smtp refuses
-			// PlainAuth on an unencrypted connection anyway, so accepting it
-			// here would only turn a startup error into a delivery failure.
-			if r.Auth != "" && r.Auth != "none" {
-				v.add("%s: auth %s requires tls starttls or implicit; "+
-					"tls none supports auth none only", where, r.Auth)
-			}
-		} else if r.MinTLS == "" {
-			r.MinTLS = "1.2"
-		} else if ver, err := ParseTLSVersion(r.MinTLS); err != nil {
-			v.add("%s: min_tls: %v", where, err)
-		} else if ver < tls.VersionTLS12 {
-			v.add("%s: min_tls must be at least 1.2 for outbound connections", where)
-		}
-		switch r.Auth {
-		case "none":
-		case "plain", "login":
-			if r.Credentials.Username == "" || r.Credentials.Password.Empty() {
-				v.add("%s: auth %s requires credentials.username and credentials.password", where, r.Auth)
-			}
-		case "xoauth2":
-			o := r.OAuth2
-			switch {
-			case o.TenantID == "" || o.ClientID == "" || o.ClientSecret.Empty() || o.Mailbox == "":
-				v.add("%s: auth xoauth2 requires oauth2 tenant_id, client_id, client_secret and mailbox", where)
-			default:
-				if !ValidTenantID(o.TenantID) {
-					v.add("%s: oauth2.tenant_id must be a tenant GUID or domain name", where)
-				}
-				// The mailbox is concatenated into the XOAUTH2 payload around
-				// \x01 separators, so anything outside printable ASCII could
-				// forge a field.
-				if !printableASCII(o.Mailbox) || !strings.Contains(o.Mailbox, "@") {
-					v.add("%s: oauth2.mailbox must be an ASCII email address", where)
-				}
-				if o.Scope == "" {
-					r.OAuth2.Scope = DefaultScope
-				} else if !strings.HasPrefix(o.Scope, "https://") || !strings.HasSuffix(o.Scope, "/.default") {
-					v.add("%s: oauth2.scope must be an https resource scope ending in /.default", where)
-				}
-				if o.SecretExpires != "" {
-					if _, err := time.Parse(secretExpiresLayout, o.SecretExpires); err != nil {
-						v.add("%s: oauth2.secret_expires must be YYYY-MM-DD", where)
-					}
-				}
-			}
-		case "":
-			v.add("%s: auth is required (none, plain, login or xoauth2)", where)
-		default:
-			v.add("%s: auth must be none, plain, login or xoauth2", where)
-		}
-		if r.CAPin != "" {
-			// A truncated pin decodes cleanly and then never matches the
-			// full-length comparison in smarthost, so the route fails closed
-			// -- but at delivery time, with an error blaming the smarthost's
-			// certificate for what is a typo in the configuration.
-			b, err := hex.DecodeString(strings.ReplaceAll(r.CAPin, ":", ""))
-			switch {
-			case err != nil:
-				v.add("%s: ca_pin must be a hex SHA-256 fingerprint", where)
-			case len(b) != sha256.Size:
-				v.add("%s: ca_pin must be a SHA-256 fingerprint of %d hex characters, got %d",
-					where, sha256.Size*2, len(b)*2)
-			}
-		}
+		v.routeIdentity(r, where)
+		v.routeTLS(r, where)
+		v.routeAuth(r, where)
+		v.routeCAPin(r, where)
 		if r.RateLimitPerMin < 0 {
 			v.add("%s: rate_limit_per_min must not be negative (0 means unpaced)", where)
 		}
-
-		// Recipient domains take precedence over the route named by the
-		// client, so a domain claimed twice would silently pick one of them.
-		for j, d := range r.Domains {
-			dl := strings.ToLower(strings.TrimSpace(d))
-			if !ValidDomain(dl) {
-				v.add("%s: domains[%d] %q is not a valid domain name", where, j, d)
-				continue
-			}
-			if owner, dup := domainOwner[dl]; dup {
-				v.add("%s: domain %q is already routed by route %q", where, dl, owner)
-				continue
-			}
-			domainOwner[dl] = r.Name
-			r.Domains[j] = dl
-		}
-
-		// Source networks may deliberately overlap a client CIDR -- that is
-		// how a site-wide route coexists with a per-device one -- but two
-		// routes claiming the same network would be ambiguous.
-		for j, src := range r.Sources {
-			p, err := netip.ParsePrefix(src)
-			if err != nil {
-				v.add("%s: sources[%d] %q: %v", where, j, src, err)
-				continue
-			}
-			if p.Addr() != p.Masked().Addr() {
-				v.add("%s: sources[%d] %q has host bits set, use %s", where, j, src, p.Masked())
-				continue
-			}
-			for _, o := range sourcePrefixes {
-				if o.prefix.Overlaps(p) {
-					v.add("%s: sources %s overlaps %s of route %q: matching would be ambiguous",
-						where, p, o.prefix, o.owner)
-				}
-			}
-			sourcePrefixes = append(sourcePrefixes, owned{prefix: p, owner: r.Name})
-		}
+		v.routeDomains(r, where, domainOwner)
+		v.routeSources(r, where, &sourcePrefixes)
 	}
 	if len(v.c.Routes) == 0 {
 		v.add("at least one [[route]] is required")
 	}
 	if v.defaults > 1 {
 		v.add("more than one route is marked default")
+	}
+}
+
+// routeIdentity checks a route's name, host and port, and records whether it
+// is the default one.
+func (v *validator) routeIdentity(r *Route, where string) {
+	if !ValidName(r.Name) {
+		v.add("%s: name must be 1 to %d printable ASCII characters without a quote or backslash", where, maxNameLen)
+	} else if v.routeNames[r.Name] {
+		v.add("%s: duplicate route name", where)
+	}
+	v.routeNames[r.Name] = true
+	if r.Default {
+		v.defaults++
+	}
+	if r.Host == "" {
+		v.add("%s: host is required", where)
+	}
+	if r.Port < 1 || r.Port > 65535 {
+		v.add("%s: port %d is out of range", where, r.Port)
+	}
+}
+
+// routeTLS checks the transport settings and the version floor they imply.
+// It is also where a cleartext route is refused the credentials it could not
+// protect.
+func (v *validator) routeTLS(r *Route, where string) {
+	switch r.TLS {
+	case defaultRouteTLS, "implicit":
+	case "none":
+		// Cleartext delivery exists for smarthosts on a segment the
+		// operator controls end to end. It is never a fallback: a route
+		// asking for TLS that cannot negotiate it defers, it does not
+		// downgrade. Settings that only describe a handshake are an
+		// error here rather than silently ignored, because a route
+		// carrying min_tls reads as if it were still encrypted.
+		if r.MinTLS != "" {
+			v.add("%s: min_tls is meaningless with tls none, remove it", where)
+		}
+		if r.CAPin != "" {
+			v.add("%s: ca_pin is meaningless with tls none, remove it", where)
+		}
+	default:
+		v.add("%s: tls must be none, starttls or implicit", where)
+	}
+	if r.TLS == "none" {
+		// Credentials are never put on an unprotected wire. A bearer
+		// token read off it grants mailbox access far beyond this relay,
+		// and PLAIN hands over the password outright; net/smtp refuses
+		// PlainAuth on an unencrypted connection anyway, so accepting it
+		// here would only turn a startup error into a delivery failure.
+		if r.Auth != "" && r.Auth != "none" {
+			v.add("%s: auth %s requires tls starttls or implicit; "+
+				"tls none supports auth none only", where, r.Auth)
+		}
+	} else if r.MinTLS == "" {
+		r.MinTLS = "1.2"
+	} else if ver, err := ParseTLSVersion(r.MinTLS); err != nil {
+		v.add("%s: min_tls: %v", where, err)
+	} else if ver < tls.VersionTLS12 {
+		v.add("%s: min_tls must be at least 1.2 for outbound connections", where)
+	}
+}
+
+// routeAuth checks that the chosen mechanism has the credentials it needs and
+// that each one is shaped the way the wire format requires.
+func (v *validator) routeAuth(r *Route, where string) {
+	switch r.Auth {
+	case "none":
+	case "plain", "login":
+		if r.Credentials.Username == "" || r.Credentials.Password.Empty() {
+			v.add("%s: auth %s requires credentials.username and credentials.password", where, r.Auth)
+		}
+	case "xoauth2":
+		o := r.OAuth2
+		switch {
+		case o.TenantID == "" || o.ClientID == "" || o.ClientSecret.Empty() || o.Mailbox == "":
+			v.add("%s: auth xoauth2 requires oauth2 tenant_id, client_id, client_secret and mailbox", where)
+		default:
+			if !ValidTenantID(o.TenantID) {
+				v.add("%s: oauth2.tenant_id must be a tenant GUID or domain name", where)
+			}
+			// The mailbox is concatenated into the XOAUTH2 payload around
+			// \x01 separators, so anything outside printable ASCII could
+			// forge a field.
+			if !printableASCII(o.Mailbox) || !strings.Contains(o.Mailbox, "@") {
+				v.add("%s: oauth2.mailbox must be an ASCII email address", where)
+			}
+			if o.Scope == "" {
+				r.OAuth2.Scope = DefaultScope
+			} else if !strings.HasPrefix(o.Scope, "https://") || !strings.HasSuffix(o.Scope, "/.default") {
+				v.add("%s: oauth2.scope must be an https resource scope ending in /.default", where)
+			}
+			if o.SecretExpires != "" {
+				if _, err := time.Parse(secretExpiresLayout, o.SecretExpires); err != nil {
+					v.add("%s: oauth2.secret_expires must be YYYY-MM-DD", where)
+				}
+			}
+		}
+	case "":
+		v.add("%s: auth is required (none, plain, login or xoauth2)", where)
+	default:
+		v.add("%s: auth must be none, plain, login or xoauth2", where)
+	}
+}
+
+// routeCAPin checks the pinned fingerprint; see the comment inside for why a
+// malformed pin has to fail here rather than at delivery time.
+func (v *validator) routeCAPin(r *Route, where string) {
+	if r.CAPin != "" {
+		// A truncated pin decodes cleanly and then never matches the
+		// full-length comparison in smarthost, so the route fails closed
+		// -- but at delivery time, with an error blaming the smarthost's
+		// certificate for what is a typo in the configuration.
+		b, err := hex.DecodeString(strings.ReplaceAll(r.CAPin, ":", ""))
+		switch {
+		case err != nil:
+			v.add("%s: ca_pin must be a hex SHA-256 fingerprint", where)
+		case len(b) != sha256.Size:
+			v.add("%s: ca_pin must be a SHA-256 fingerprint of %d hex characters, got %d",
+				where, sha256.Size*2, len(b)*2)
+		}
+	}
+}
+
+// routeDomains lower-cases each recipient domain and rejects one already
+// claimed by another route. domainOwner carries the claims across routes.
+func (v *validator) routeDomains(r *Route, where string, domainOwner map[string]string) {
+	// Recipient domains take precedence over the route named by the
+	// client, so a domain claimed twice would silently pick one of them.
+	for j, d := range r.Domains {
+		dl := strings.ToLower(strings.TrimSpace(d))
+		if !ValidDomain(dl) {
+			v.add("%s: domains[%d] %q is not a valid domain name", where, j, d)
+			continue
+		}
+		if owner, dup := domainOwner[dl]; dup {
+			v.add("%s: domain %q is already routed by route %q", where, dl, owner)
+			continue
+		}
+		domainOwner[dl] = r.Name
+		r.Domains[j] = dl
+	}
+}
+
+// routeSources checks each source network and rejects one that overlaps
+// another route's. sourcePrefixes carries the claims across routes.
+func (v *validator) routeSources(r *Route, where string, sourcePrefixes *[]owned) {
+	// Source networks may deliberately overlap a client CIDR -- that is
+	// how a site-wide route coexists with a per-device one -- but two
+	// routes claiming the same network would be ambiguous.
+	for j, src := range r.Sources {
+		p, err := netip.ParsePrefix(src)
+		if err != nil {
+			v.add("%s: sources[%d] %q: %v", where, j, src, err)
+			continue
+		}
+		if p.Addr() != p.Masked().Addr() {
+			v.add("%s: sources[%d] %q has host bits set, use %s", where, j, src, p.Masked())
+			continue
+		}
+		for _, o := range *sourcePrefixes {
+			if o.prefix.Overlaps(p) {
+				v.add("%s: sources %s overlaps %s of route %q: matching would be ambiguous",
+					where, p, o.prefix, o.owner)
+			}
+		}
+		*sourcePrefixes = append(*sourcePrefixes, owned{prefix: p, owner: r.Name})
 	}
 }
 

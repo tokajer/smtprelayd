@@ -11,8 +11,6 @@ import (
 	"html/template"
 	"log/slog"
 	"net/http"
-	"net/url"
-	"strconv"
 	"strings"
 	"time"
 
@@ -53,23 +51,6 @@ var templateFS embed.FS
 // the plan's default page size for the eventual JSON API in phase 4d, so
 // the two do not disagree about what "a page" means.
 const pageSize = 50
-
-// bulkMax bounds one bulk action. store.FindMessages caps its own result at
-// 1000 rows, so "everything in the queue" processes at most that many per
-// submission and says that more remain; the same ceiling is applied to an
-// explicit selection so that a hand-built request cannot ask for unbounded
-// work on the request goroutine.
-const bulkMax = 1000
-
-// bulkBudget bounds how long one bulk action spends on the request
-// goroutine. It is half the server's WriteTimeout (internal/web/http.go), so
-// the redirect that reports what happened is still written: past that
-// deadline the response is cut off mid-flight and the operator is left not
-// knowing how much of an irreversible action completed.
-//
-// Stopping early is reported exactly like hitting bulkMax, because the
-// operator does the same thing in both cases -- repeat it.
-const bulkBudget = 30 * time.Second
 
 // Server renders the read-only observability dashboard: live queue,
 // search, bounces, per-message detail, route status and a read-only
@@ -287,7 +268,7 @@ func (s *Server) handleQueue(w http.ResponseWriter, r *http.Request) {
 		data.NextHref = pageHref("/queue", nil, sortCol, order, offset+pageSize)
 	}
 	if offset > 0 {
-		data.PrevHref = pageHref("/queue", nil, sortCol, order, maxInt(0, offset-pageSize))
+		data.PrevHref = pageHref("/queue", nil, sortCol, order, max(0, offset-pageSize))
 	}
 	s.render(w, "queue", data)
 }
@@ -351,7 +332,7 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		data.NextHref = pageHref("/search", extra, "", "", offset+pageSize)
 	}
 	if offset > 0 {
-		data.PrevHref = pageHref("/search", extra, "", "", maxInt(0, offset-pageSize))
+		data.PrevHref = pageHref("/search", extra, "", "", max(0, offset-pageSize))
 	}
 	s.render(w, "search", data)
 }
@@ -425,7 +406,7 @@ func (s *Server) handleBounces(w http.ResponseWriter, r *http.Request) {
 		data.NextHref = pageHref("/bounces", extra, "", "", offset+pageSize)
 	}
 	if offset > 0 {
-		data.PrevHref = pageHref("/bounces", extra, "", "", maxInt(0, offset-pageSize))
+		data.PrevHref = pageHref("/bounces", extra, "", "", max(0, offset-pageSize))
 	}
 	s.render(w, "bounces", data)
 }
@@ -604,234 +585,6 @@ func (s *Server) handleDeleteAction(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// bulkCounts is the outcome of one bulk action, counted per message.
-type bulkCounts struct {
-	OK      int
-	Cleared int
-	Busy    int
-	Missing int
-	Failed  int
-	// Truncated says the action covered only part of what was asked and has
-	// to be repeated: either the queue held more than bulkMax active
-	// messages, or bulkBudget ran out before the rest could be processed.
-	Truncated bool
-}
-
-// flash is the one-line outcome banner the queue page renders after a bulk
-// action. It is rebuilt from the redirect's query string rather than kept in
-// server-side state, so a reload cannot repeat the action and there is no
-// session to hold.
-type flash struct {
-	Level string // "ok" or "warn"
-	Text  string
-}
-
-func (s *Server) handleQueueRequeue(w http.ResponseWriter, r *http.Request) {
-	s.handleQueueBulk(w, r, "requeue")
-}
-
-func (s *Server) handleQueueDelete(w http.ResponseWriter, r *http.Request) {
-	s.handleQueueBulk(w, r, "delete")
-}
-
-// handleQueueBulk applies one action to a set of messages: either the rows
-// the operator ticked, or every message the queue view currently lists.
-//
-// "All" is resolved from the history store rather than from the spool index
-// because the queue view is what the operator is looking at when they ask
-// for it, and the two can differ -- a message with no spool copy is listed
-// there and is precisely the kind of entry that needs clearing.
-func (s *Server) handleQueueBulk(w http.ResponseWriter, r *http.Request, action string) {
-	// PostFormValue, not FormValue: the token and the selection must come
-	// from the submitted body, so a bare GET-shaped link carrying the same
-	// parameters cannot drive a bulk action.
-	if !s.csrf.verify(r.PostFormValue("csrf_"+action), "queue-"+action, "", time.Now()) {
-		http.Error(w, "invalid or expired form token", http.StatusForbidden)
-		return
-	}
-
-	var (
-		ids   []spool.ID
-		res   bulkCounts
-		scope = r.PostFormValue("scope")
-	)
-	switch scope {
-	case "selected":
-		selected := r.PostForm["id"]
-		if len(selected) > bulkMax {
-			http.Error(w, "too many messages selected", http.StatusBadRequest)
-			return
-		}
-		ids = make([]spool.ID, 0, len(selected))
-		for _, v := range selected {
-			id, err := spool.ParseID(v)
-			if err != nil {
-				http.Error(w, "invalid queue id", http.StatusBadRequest)
-				return
-			}
-			ids = append(ids, id)
-		}
-	case "all":
-		// Emptying the whole queue is irreversible, so the form that can do
-		// it is only rendered behind the confirmation interstitial. This is
-		// belt and braces for a request built by hand.
-		if action == "delete" && r.PostFormValue("confirm") != "delete-all" {
-			http.Error(w, "deleting the whole queue must be confirmed", http.StatusBadRequest)
-			return
-		}
-		var err error
-		ids, res.Truncated, err = s.activeQueueIDs()
-		if err != nil {
-			s.serverError(w, "queue", err)
-			return
-		}
-	default:
-		http.Error(w, "scope must be selected or all", http.StatusBadRequest)
-		return
-	}
-
-	details := "bulk (" + scope + ")"
-	deadline := time.Now().Add(bulkBudget)
-	for _, id := range ids {
-		// Two reasons to stop: the operator's connection has gone, so the
-		// remaining irreversible work benefits nobody; or the budget is
-		// spent, and continuing would cost the report of what was already
-		// done. Each message is finished before the check, so nothing is
-		// left half-applied.
-		if r.Context().Err() != nil || time.Now().After(deadline) {
-			res.Truncated = true
-			break
-		}
-		var outcome actionOutcome
-		if action == "requeue" {
-			outcome = s.requeueMessage(r, id, details)
-		} else {
-			outcome = s.deleteMessage(r, id, details)
-		}
-		switch outcome {
-		case outcomeDone:
-			res.OK++
-		case outcomeCleared:
-			res.Cleared++
-		case outcomeBusy:
-			res.Busy++
-		case outcomeMissing:
-			res.Missing++
-		default:
-			res.Failed++
-		}
-	}
-	// Logged whatever happens to the response: if the budget ran out or the
-	// operator navigated away, this line is the only record of how far an
-	// irreversible action got.
-	s.log.Info("bulk queue action", "action", action, "scope", scope, "source", r.RemoteAddr,
-		"ok", res.OK, "cleared", res.Cleared, "busy", res.Busy, "missing", res.Missing,
-		"failed", res.Failed, "incomplete", res.Truncated)
-
-	http.Redirect(w, r, "/queue?"+res.query(action).Encode(), http.StatusSeeOther)
-}
-
-// activeQueueIDs lists the queue IDs the queue view currently shows, capped
-// at bulkMax with a flag saying the cap was hit.
-func (s *Server) activeQueueIDs() ([]spool.ID, bool, error) {
-	msgs, err := s.store.FindMessages(store.MessageFilter{Status: "active", Limit: bulkMax})
-	if err != nil {
-		return nil, false, err
-	}
-	truncated := len(msgs) > bulkMax
-	if truncated {
-		msgs = msgs[:bulkMax]
-	}
-	ids := make([]spool.ID, 0, len(msgs))
-	for _, m := range msgs {
-		id, err := spool.ParseID(m.QueueID)
-		if err != nil {
-			// Nothing the listener writes can produce this; a row that
-			// cannot name a spool file is skipped rather than failing the
-			// whole action for the rows that can.
-			s.log.Warn("queue row skipped: queue id does not parse", "error", err)
-			continue
-		}
-		ids = append(ids, id)
-	}
-	return ids, truncated, nil
-}
-
-// query encodes the counts for the redirect back to /queue. Every value is
-// an integer this process just counted and every key is a literal, so the
-// banner is rebuilt from numbers, never from text that came in with the
-// request.
-func (c bulkCounts) query(action string) url.Values {
-	v := url.Values{}
-	v.Set("done", action)
-	for key, n := range map[string]int{
-		"ok": c.OK, "cleared": c.Cleared, "busy": c.Busy, "missing": c.Missing, "failed": c.Failed,
-	} {
-		if n > 0 {
-			v.Set(key, strconv.Itoa(n))
-		}
-	}
-	if c.Truncated {
-		v.Set("more", "1")
-	}
-	return v
-}
-
-// bulkFlash rebuilds the outcome banner from the redirect's query string. An
-// unknown action yields no banner at all, so a crafted link cannot put an
-// arbitrary sentence on the page; the numbers are parsed, not echoed.
-func bulkFlash(q url.Values) *flash {
-	action := q.Get("done")
-	var verb string
-	switch action {
-	case "requeue":
-		verb = "requeued"
-	case "delete":
-		verb = "deleted"
-	default:
-		return nil
-	}
-
-	c := bulkCounts{
-		OK:        parseOffset(q.Get("ok")),
-		Cleared:   parseOffset(q.Get("cleared")),
-		Busy:      parseOffset(q.Get("busy")),
-		Missing:   parseOffset(q.Get("missing")),
-		Failed:    parseOffset(q.Get("failed")),
-		Truncated: q.Get("more") == "1",
-	}
-
-	var parts []string
-	if c.OK > 0 {
-		parts = append(parts, fmt.Sprintf("%d %s", c.OK, verb))
-	}
-	if c.Cleared > 0 {
-		parts = append(parts, fmt.Sprintf("%d had no spool copy left and were cleared from the queue view", c.Cleared))
-	}
-	if c.Busy > 0 {
-		parts = append(parts, fmt.Sprintf("%d skipped, currently being delivered", c.Busy))
-	}
-	if c.Missing > 0 {
-		parts = append(parts, fmt.Sprintf("%d no longer in the queue", c.Missing))
-	}
-	if c.Failed > 0 {
-		parts = append(parts, fmt.Sprintf("%d failed, see the log", c.Failed))
-	}
-	if len(parts) == 0 {
-		return &flash{Level: "warn", Text: "No message was selected, so nothing was " + verb + "."}
-	}
-
-	text := strings.Join(parts, ", ") + "."
-	if c.Truncated {
-		text += " Not every message was covered; repeat the action to continue."
-	}
-	level := "ok"
-	if c.Busy > 0 || c.Missing > 0 || c.Failed > 0 {
-		level = "warn"
-	}
-	return &flash{Level: level, Text: text}
-}
-
 // expiryRow is one deadline as the configuration page renders it. The state
 // drives the pill colour and is derived here rather than in the template, so
 // the threshold stays the one internal/expiry actually mails on.
@@ -894,191 +647,4 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 		BounceText:    formatBounce(s.cfg.Bounce),
 	}
 	s.render(w, "config", data)
-}
-
-// parseOffset reads a pagination offset from a query parameter. Anything
-// unparsable or negative is the first page rather than an error: an offset is
-// a position in a list, and refusing the request over one would be a worse
-// answer than showing the start.
-func parseOffset(s string) int {
-	n, err := strconv.Atoi(s)
-	if err != nil || n < 0 {
-		return 0
-	}
-	return n
-}
-
-func maxInt(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
-}
-
-// filterQueryValues copies the named parameters out of q, dropping paging
-// and sort parameters, so a pagination link can carry the active filters
-// forward without also carrying along a stale offset.
-func filterQueryValues(q url.Values, keys ...string) url.Values {
-	out := url.Values{}
-	for _, k := range keys {
-		if v := q.Get(k); v != "" {
-			out.Set(k, v)
-		}
-	}
-	return out
-}
-
-func cloneValues(v url.Values) url.Values {
-	out := url.Values{}
-	for k, vals := range v {
-		out[k] = append([]string(nil), vals...)
-	}
-	return out
-}
-
-// sortLinks builds the header link for each sortable queue column. Clicking
-// the active column toggles its order; clicking any other column sorts by
-// it descending first, which for a log-like table surfaces the newest or
-// highest-cardinality rows first.
-func sortLinks(path string, extra url.Values, currentSort, currentOrder string) map[string]string {
-	effSort := currentSort
-	if effSort == "" {
-		effSort = "received_at"
-	}
-	effOrder := currentOrder
-	if effOrder != "asc" {
-		effOrder = "desc"
-	}
-	cols := []string{"received_at", "status", "client", "route"}
-	out := make(map[string]string, len(cols))
-	for _, col := range cols {
-		order := "desc"
-		if col == effSort && effOrder == "desc" {
-			order = "asc"
-		}
-		v := cloneValues(extra)
-		v.Set("sort", col)
-		v.Set("order", order)
-		out[col] = path + "?" + v.Encode()
-	}
-	return out
-}
-
-func pageHref(path string, extra url.Values, sortCol, order string, offset int) string {
-	v := cloneValues(extra)
-	if sortCol != "" {
-		v.Set("sort", sortCol)
-	}
-	if order != "" {
-		v.Set("order", order)
-	}
-	if offset > 0 {
-		v.Set("offset", strconv.Itoa(offset))
-	}
-	if enc := v.Encode(); enc != "" {
-		return path + "?" + enc
-	}
-	return path
-}
-
-// formatBytes renders a spooled size for a table cell. Below a kilobyte the
-// exact octet count is kept, since that range is where a truncated or empty
-// message is being diagnosed and rounding would hide it.
-func formatBytes(n int64) string {
-	switch {
-	case n < 1024:
-		return strconv.FormatInt(n, 10) + " B"
-	case n < 1024*1024:
-		return fmt.Sprintf("%.1f KB", float64(n)/1024)
-	default:
-		return fmt.Sprintf("%.1f MB", float64(n)/(1024*1024))
-	}
-}
-
-// localtimeFunc builds the "localtime" template func. It accepts both
-// time.Time (e.g. Message.ReceivedAt) and *time.Time (e.g. Attempt.NextAt,
-// which templates already guard with {{if .NextAt}} before calling this) so
-// every timestamp field in the dashboard can go through the same helper.
-func localtimeFunc(loc *time.Location) func(any, string) string {
-	return func(v any, layout string) string {
-		var t time.Time
-		switch x := v.(type) {
-		case time.Time:
-			t = x
-		case *time.Time:
-			if x == nil {
-				return ""
-			}
-			t = *x
-		default:
-			return ""
-		}
-		if loc != nil {
-			t = t.In(loc)
-		}
-		return t.Format(layout)
-	}
-}
-
-func orNone(s string) string {
-	if s == "" {
-		return "(none)"
-	}
-	return s
-}
-
-// formatListeners, formatClients, formatRoutes and formatBounce render the
-// read-only configuration view as plain text. None of them ever calls
-// Secret.Value(): a client secret or SMTP password is written as the fixed
-// string "[redacted]" regardless of what Secret.String() would already
-// return, so there are two independent reasons this can never leak, not one.
-func formatListeners(ls []config.Listener) string {
-	if len(ls) == 0 {
-		return "(none configured)"
-	}
-	var b strings.Builder
-	for _, l := range ls {
-		fmt.Fprintf(&b, "[listener %q]\naddress     = %s\ntls         = %s\nmin_tls     = %s\nrequire_tls = %v\n\n",
-			l.Name, l.Address, orNone(l.TLS), orNone(l.MinTLS), l.RequireTLS)
-	}
-	return strings.TrimRight(b.String(), "\n")
-}
-
-func formatClients(cs []config.Client) string {
-	if len(cs) == 0 {
-		return "(none configured)"
-	}
-	var b strings.Builder
-	for _, c := range cs {
-		fmt.Fprintf(&b, "[client %q]\ncidr               = %s\nroute              = %s\nmax_message_mb     = %d\nmax_recipients     = %d\nrate_limit_per_min = %d\nmax_connections    = %d\nrewrite.mode       = %s\n\n",
-			c.Name, strings.Join(c.CIDR, ", "), c.Route, c.MaxMessageMB, c.MaxRecipients,
-			c.RateLimitPerMin, c.MaxConnections, orNone(c.Rewrite.Mode))
-	}
-	return strings.TrimRight(b.String(), "\n")
-}
-
-func formatRoutes(rs []config.Route) string {
-	if len(rs) == 0 {
-		return "(none configured)"
-	}
-	var b strings.Builder
-	for _, r := range rs {
-		fmt.Fprintf(&b, "[route %q]\ndefault            = %v\nhost               = %s\nport               = %d\ntls                = %s\nauth               = %s\ndomains            = %s\nsources            = %s\nmax_concurrent     = %d\nrate_limit_per_min = %d\n",
-			r.Name, r.Default, r.Host, r.Port, orNone(r.TLS), orNone(r.Auth),
-			strings.Join(r.Domains, ", "), strings.Join(r.Sources, ", "), r.MaxConcurrent, r.RateLimitPerMin)
-		switch r.Auth {
-		case "xoauth2":
-			fmt.Fprintf(&b, "oauth2.tenant_id     = %s\noauth2.client_id     = %s\noauth2.mailbox       = %s\noauth2.client_secret = [redacted]\n",
-				r.OAuth2.TenantID, r.OAuth2.ClientID, r.OAuth2.Mailbox)
-		case "plain", "login":
-			fmt.Fprintf(&b, "credentials.username = %s\ncredentials.password = [redacted]\n", r.Credentials.Username)
-		}
-		b.WriteString("\n")
-	}
-	return strings.TrimRight(b.String(), "\n")
-}
-
-func formatBounce(b config.Bounce) string {
-	return fmt.Sprintf("sender         = %s\nnotify         = %s\nnotify_route   = %s\ndigest_minutes = %d\nmax_per_hour   = %d",
-		orNone(b.Sender), strings.Join(b.Notify, ", "), orNone(b.NotifyRoute), b.DigestMinutes, b.MaxPerHour)
 }

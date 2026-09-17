@@ -140,6 +140,41 @@ func TestSecretsAreRedactedInTheFile(t *testing.T) {
 	}
 }
 
+// token_name contains "token", so a substring match redacts it -- but it
+// names the API token that performed an audited action rather than carrying
+// it. Redacting it would turn the one line that says who did something into
+// a line that says somebody did.
+func TestCredentialNamesSurviveRedaction(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "smtprelayd.log")
+	log, closer, err := New(Options{Level: slog.LevelInfo, File: path})
+	if err != nil {
+		t.Fatal(err)
+	}
+	log.Info("queue delete", "token_name", "ops-laptop", "token", "t0ps3cr3t")
+	if err := closer.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(b), "t0ps3cr3t") {
+		t.Fatalf("a secret reached the log file: %s", b)
+	}
+
+	var line map[string]any
+	if err := json.Unmarshal(b, &line); err != nil {
+		t.Fatalf("log line is not JSON: %v (%s)", err, b)
+	}
+	if line["token_name"] != "ops-laptop" {
+		t.Fatalf("token_name was redacted, leaving the audit line anonymous: %v", line)
+	}
+	if line["token"] != Redacted {
+		t.Fatalf("expected token to be %q, got %v", Redacted, line)
+	}
+}
+
 // A configured Location must move the record's timestamp into that zone
 // rather than leaving it in whatever zone time.Now() happened to return.
 func TestLocationConvertsTheTimestamp(t *testing.T) {

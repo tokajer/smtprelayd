@@ -24,6 +24,13 @@ const Redacted = "[redacted]"
 
 var secretKeys = []string{"secret", "password", "token", "authorization", "credential", "bearer", "client_secret"}
 
+// secretKeyNames are keys that contain one of secretKeys but name a
+// credential instead of carrying one. A substring match cannot tell the two
+// apart, and getting it wrong in this direction is silent: token_name says
+// which API token performed an audited action, so redacting it would leave a
+// line recording that somebody did something.
+var secretKeyNames = map[string]bool{"token_name": true}
+
 // Options configures the logger.
 type Options struct {
 	Level      slog.Level
@@ -99,6 +106,9 @@ func newReplaceAttr(loc *time.Location) func([]string, slog.Attr) slog.Attr {
 
 func redact(a slog.Attr) slog.Attr {
 	k := strings.ToLower(a.Key)
+	if secretKeyNames[k] {
+		return a
+	}
 	for _, s := range secretKeys {
 		if strings.Contains(k, s) {
 			return slog.String(a.Key, Redacted)
