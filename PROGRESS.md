@@ -560,6 +560,51 @@ immediately at startup, so no waiting — then revert. That exercises the whole
 collect/batch/compose/send path; only the source of the date differs from the
 certificate case, which is already verified end to end above.
 
+## The twelfth review (2026-09-17)
+
+With this review every trust boundary in the program has been measured by
+mutation: SMTP session, HTTP authorization, sender rewriting, spool crash
+recovery, delivery outcomes, the Host-header check, the startup trust checks
+and the expiry warning. **Recommendation recorded here on purpose: do not run
+a thirteenth architecture review until a feature has changed.** There is no
+surface left that has not been measured; it would find wording, not defects.
+
+Three mutations survived and are now killed.
+
+**A test that tested its own copy.** `TestAnItemIsNotRepeatedWithinTheResendInterval`
+existed and was named for exactly the guarantee in question -- the once-a-day
+resend gate on expiry warnings -- yet deleting that gate from
+`ExpiryWatcher.check` left it green. It rebuilt the gate inside a closure and
+asserted on the closure; it never called `check`, which sat at 0.0% coverage.
+It would have passed with no gate in the product at all. It was replaced, not
+supplemented: the new version drives `check` through a real notifier at +0,
++1h, +23h and +25h and counts the warnings actually queued. What the gate
+prevents: `check` runs hourly and `expiry.warn_days` defaults to 30, so one
+expiring certificate would produce up to 720 mails instead of 30 -- and an
+operator filters those away, losing the warning the feature exists for.
+
+Worth remembering as a pattern: a test's name is not evidence. Only a
+mutation shows whether it guards anything.
+
+**The startup trust check.** `checkTrusted` has three refusals. The
+group/world-writable one was already covered via `checkSecretFile`; the
+**symlink** refusal was not, and neither was `CheckDir` itself -- returning
+`nil` unconditionally went unnoticed. That is the check on `service.data_dir`
+and the binary's directory in a process that may be privileged enough to bind
+port 25. `TestCheckDirRefusesASymlink` covers both. The **ownership** refusal
+is still untested and stays that way deliberately: it needs a directory owned
+by another uid, which an unprivileged test run cannot create.
+
+`internal/bounce` went from 72.7% to 81.1%.
+
+### Verified clean, with evidence
+
+- DNS-rebinding defence (`config.IsLoopbackHostHeader`, used by the dashboard
+  and `/metrics`): accepting any Host header is caught.
+- The expiry warning's window filter: reporting deadlines outside
+  `warn_days` is caught.
+- `checkTrusted`'s writable-directory refusal is caught.
+
 ## The eleventh review (2026-09-17)
 
 Mutation sweeps at three trust boundaries that had never been tested that

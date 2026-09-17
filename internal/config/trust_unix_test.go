@@ -55,3 +55,35 @@ func TestCheckSecretFileStillRejectsAReadableSecret(t *testing.T) {
 		t.Fatal("a world-readable secret was accepted")
 	}
 }
+
+// checkTrusted refuses a symlink rather than following it: service.data_dir
+// and the directory the binary runs from are checked at startup by a process
+// that may be privileged enough to bind port 25, and a link lets whoever can
+// replace it point that process somewhere else. The writable-directory branch
+// is covered through checkSecretFile above; this branch and CheckDir itself
+// had no test, so either could be deleted with the suite green.
+//
+// The ownership branch is not covered here: it needs a directory owned by
+// another uid, which an unprivileged test run cannot create.
+func TestCheckDirRefusesASymlink(t *testing.T) {
+	base := t.TempDir()
+	real := filepath.Join(base, "data")
+	if err := os.Mkdir(real, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := CheckDir(real); err != nil {
+		t.Fatalf("a 0700 directory owned by this user was rejected: %v", err)
+	}
+
+	link := filepath.Join(base, "data-link")
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatal(err)
+	}
+	err := CheckDir(link)
+	if err == nil {
+		t.Fatal("CheckDir followed a symlink to the data directory")
+	}
+	if !strings.Contains(err.Error(), "symlink") {
+		t.Fatalf("failed for an unrelated reason: %v", err)
+	}
+}

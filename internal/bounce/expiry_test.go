@@ -90,33 +90,36 @@ func TestUnreadableCertificateIsNotCollected(t *testing.T) {
 	}
 }
 
-// The repeat gate is what keeps a daily warning from becoming an hourly one.
+// The repeat gate is what keeps a daily warning from becoming an hourly one:
+// check runs every hour, and warn_days defaults to 30, so without it a single
+// expiring certificate produces up to 720 mails instead of 30 -- and an
+// operator filters those away, which loses exactly the warning this exists
+// for.
+//
+// This drives check itself through a real notifier and counts what was
+// queued. The test it replaces copied check's gate into a closure and tested
+// the copy, so deleting the gate from check left it green.
 func TestAnItemIsNotRepeatedWithinTheResendInterval(t *testing.T) {
+	cfg := baseCfg()
+	cfg.TLS = config.TLS{CertFile: certExpiringIn(t, 10*24*time.Hour)}
+	cfg.Expiry = config.Expiry{WarnDays: 30}
+	n, sp, _ := testNotifier(t, cfg)
+	w := NewExpiryWatcher(cfg, n, discardLog())
 	now := time.Now()
-	cfg := &config.Config{
-		TLS:    config.TLS{CertFile: certExpiringIn(t, 10*24*time.Hour)},
-		Expiry: config.Expiry{WarnDays: 30},
-	}
-	w := watcherFor(t, cfg)
 
-	due := func() []expiry.Item {
-		var out []expiry.Item
-		for _, it := range w.collect(now) {
-			if last, ok := w.lastSent[it.Key]; ok && now.Sub(last) < resendInterval {
-				continue
-			}
-			out = append(out, it)
+	for _, step := range []struct {
+		after time.Duration
+		want  int
+	}{
+		{0, 1},              // first sight: warn
+		{time.Hour, 1},      // the next hourly check stays quiet
+		{23 * time.Hour, 1}, // and so does the last one inside the day
+		{25 * time.Hour, 2}, // a day on, it is due again
+	} {
+		w.check(now.Add(step.after))
+		if got := sp.Len(); got != step.want {
+			t.Fatalf("after check at +%v: %d warning(s) queued, want %d", step.after, got, step.want)
 		}
-		return out
-	}
-
-	w.lastSent["tls-certificate"] = now.Add(-2 * time.Hour)
-	if got := due(); len(got) != 0 {
-		t.Fatalf("an item mailed 2h ago was due again: %v", got)
-	}
-	w.lastSent["tls-certificate"] = now.Add(-25 * time.Hour)
-	if got := due(); len(got) != 1 {
-		t.Fatalf("an item mailed 25h ago was not due again: %v", got)
 	}
 }
 
