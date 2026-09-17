@@ -560,6 +560,69 @@ immediately at startup, so no waiting — then revert. That exercises the whole
 collect/batch/compose/send path; only the source of the date differs from the
 certificate case, which is already verified end to end above.
 
+## The seventh review's five fixes (2026-09-17)
+
+**A token request to Microsoft blocked the whole observability surface.**
+`TokenSource.Token` holds `s.mu` across `fetch` — an HTTPS request with a
+15-second timeout — and `TokenAge` took the same mutex. `TokenAge` is reached
+from the metrics registry, and through its snapshot from every dashboard page
+and `/api/v1/health`. With `failCooldown = 30s`, an M365 outage left that
+surface blocked roughly half the time, exactly when an operator is trying to
+find out what is wrong; a liveness endpoint hanging on a third party's HTTP
+call reports "dead" for a relay that is up and accepting mail. `issuedAt` is
+now an `atomic.Pointer[time.Time]` and `TokenAge` is lock-free. The serialised
+fetch — the reason the lock exists — is untouched.
+
+The first attempt at this stored `now.UnixNano()` in an `atomic.Int64`, which
+two reviewers caught: a `time.Time` rebuilt from a nanosecond count carries no
+monotonic reading, so `time.Since` falls back to wall-clock subtraction and a
+backwards NTP step or a VM resume would emit a *negative*
+`smtprelayd_oauth_token_age_seconds`. Storing the `time.Time` keeps the
+monotonic reading and makes nil the "no token yet" sentinel.
+
+**`Config.Validate()` split, after standing in five consecutive reviews.**
+637 lines in one function became a `validator` struct with one method per
+configuration section, called in the file's own order. The requirement was
+that nothing change: same checks, same error strings, same *order* of the
+accumulated list, since `Validate` joins them into one message. Verified three
+ways — all 112 error format strings identical and in identical sequence, a
+mechanical normalised diff showing no altered condition or argument list, and
+a differential run of the old and new `Validate` over **66,360 generated
+configurations** comparing both the error text and the mutated `Config`:
+zero mismatches.
+
+The per-element defaults that `Defaults()` cannot hold (they belong to slice
+entries that do not exist until the file is decoded) moved into `normalize()`,
+which `newValidator` calls so no section method can be reached without it.
+`route.oauth2.scope` deliberately stayed inline — it is conditional on the
+route actually using OAuth2, and defaulting it unconditionally would populate
+the field on routes that do not — as did the domain lower-casing, which is
+interleaved with duplicate-domain detection.
+
+**`Spool.Commit` read the quota without the lock.** `SetQuota` writes
+`maxQuotaBytes` under `s.mu`; `Commit` read it outside, while calling
+`spoolSize()` — which does lock — in the same expression, so the unlocked read
+looked deliberate. Not reachable today (`SetQuota` runs once before the
+listeners bind) but `SetQuota` is exported and says nothing of the sort. Now
+one locked `overQuota`, which also makes the size and the quota consistent
+with each other rather than sampled a moment apart. `&&` still short-circuits
+inside the lock, so no quota still means no walk of the index.
+
+**`doData` split**, 180 lines into `stageMessage`, `commitCopies` and
+`journalAccepted`. `defer staged.Discard()` deliberately stayed in `doData`:
+moving it into `stageMessage` would discard the stage before the copies are
+committed, which is the one thing this extraction could easily have got wrong.
+
+**`retentionCleanup` lost an error return that was never non-nil**, so the
+call site's `_ =` stops reading as a swallowed error.
+
+Both new tests were mutation-checked: restoring the mutex in `TokenAge` fails
+`TestTokenAgeDoesNotBlockOnTheFetchLock` cleanly (it was rewritten to assert
+on the main goroutine — the original shape would have *panicked* with "Log in
+goroutine after test has completed", hiding the regression it exists to
+catch), and breaking the route port default fails
+`TestElementDefaultsAreApplied`.
+
 ## The five review fixes
 
 **Dead code that documented a lie.** `logging.FromContext`, `WithLogger` and
@@ -3184,6 +3247,41 @@ here rather than only in that file:
   set `Host` to the configured address.
 
 ## Open defects
+
+### Deferred findings from the seventh review (2026-09-17)
+
+Found by the review agents while checking the five fixes above. All three are
+**pre-existing**, none was introduced by that change, and all three were left
+alone deliberately to keep it behaviour-preserving. Recorded so they are not
+rediscovered from scratch a fourth time.
+
+- **`internal/listener/session.go`, `journalAccepted` re-parses the header
+  block 3–4 times per route group.** `rewrite.HeaderValue` and
+  `rewrite.HeaderCount` each call `parseBlock`, which allocates per header
+  line; with the default `limits.max_headers = 200` that is up to ~400
+  allocations per parse, taken once for Message-ID, once for Content-Type,
+  once for the count and once more for the subject when
+  `history.retain_subjects` is on (the default). All four results are
+  invariant across groups. The fix is one helper in `internal/rewrite` that
+  parses once and returns all four, called once before the loop — but that is
+  a new exported API in another package and wants its own sign-off.
+- **`internal/spool/spool.go`, `Claim` is an O(N) walk plus a slice allocation
+  plus an O(N·logN) sort, under `s.mu`, called in a drain loop.** Draining a
+  backlog of N messages therefore costs N walks and N sorts. It wants a single
+  oldest-due message, so a one-pass minimum scan replaces both the slice and
+  the sort. This is the mutex `Commit`'s `overQuota` now also takes, so an
+  inbound burst during a backlog drain queues behind it.
+- **`internal/store/store.go`, `retentionCleanup` runs a full-table `DELETE`
+  while holding `s.mu`, from inside `RecordAttempt`.** Once an hour, one
+  delivery worker's attempt write blocks every other store writer for the
+  duration. It belongs on the existing ticker in `internal/delivery`, with
+  `s.mu` held only around the `lastCleanup` timestamp.
+
+Also noted and *not* acted on: `routes()` is still 158 lines with four-deep
+nesting after the `Validate` split — the one section the split did not
+actually break up. Splitting it further into `routeTLS`/`routeAuth`/
+`routeNetworks` is a new finding beyond what was approved.
+
 
 ### An upgraded package leaves the old binary running (2026-08-11)
 

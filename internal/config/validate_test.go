@@ -43,6 +43,26 @@ func write(t *testing.T, body string) string {
 	return p
 }
 
+// TestElementDefaultsAreApplied pins what normalize is responsible for: a
+// listener with no tls, a client with no rewrite.mode and a route with no
+// port must come out of Validate with "none", "off" and 587 respectively.
+func TestElementDefaultsAreApplied(t *testing.T) {
+	body := strings.Replace(baseConfig, `tls = "none"`+"\n", "", 1)
+	cfg, err := Load(write(t, body))
+	if err != nil {
+		t.Fatalf("a listener with no tls was rejected: %v", err)
+	}
+	if got := cfg.Listeners[0].TLS; got != "none" {
+		t.Fatalf("listener tls defaulted to %q, want none", got)
+	}
+	if got := cfg.Clients[0].Rewrite.Mode; got != "off" {
+		t.Fatalf("client rewrite.mode defaulted to %q, want off", got)
+	}
+	if got := cfg.Routes[0].Port; got != 587 {
+		t.Fatalf("route port defaulted to %d, want 587", got)
+	}
+}
+
 func TestLoadBaseline(t *testing.T) {
 	if _, err := Load(write(t, baseConfig)); err != nil {
 		t.Fatalf("baseline configuration rejected: %v", err)

@@ -323,7 +323,7 @@ func (s *Store) RecordAttempt(queueID string, attemptNum int, smtpCode int, smtp
 	// Retention cleanup — run periodically, not on every attempt.
 	if now.Sub(s.lastCleanup) > 1*time.Hour {
 		s.lastCleanup = now
-		_ = s.retentionCleanup(now)
+		s.retentionCleanup(now)
 	}
 
 	return nil
@@ -431,18 +431,19 @@ type AuditEntry struct {
 	Details    string
 }
 
-// retentionCleanup deletes messages and cascaded attempts/audit older than retention TTL.
-func (s *Store) retentionCleanup(now time.Time) error {
+// retentionCleanup deletes messages and cascaded attempts/audit older than
+// retention TTL. The journal is best-effort: a failed cleanup must not take
+// down delivery, so it logs and returns rather than propagating the error.
+func (s *Store) retentionCleanup(now time.Time) {
 	cutoff := now.Add(-s.retentionTTL).UTC().Format(time.RFC3339)
 	result, err := s.db.Exec(`DELETE FROM messages WHERE created_at < ?`, cutoff)
 	if err != nil {
 		s.log.Warn("store: retention cleanup failed", "error", err)
-		return nil // Log but don't fail the service.
+		return
 	}
 
 	affected, err := result.RowsAffected()
 	if err == nil && affected > 0 {
 		s.log.Info("store: retention cleanup", "deleted_rows", affected, "cutoff", cutoff)
 	}
-	return nil
 }

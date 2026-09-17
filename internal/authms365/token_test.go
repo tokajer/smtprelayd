@@ -196,6 +196,36 @@ func TestTokenAgeReflectsCachedToken(t *testing.T) {
 	}
 }
 
+// TokenAge must not block behind a token request: Token holds s.mu across a
+// 15-second HTTPS request to Microsoft, and a metrics read must not block
+// behind it.
+func TestTokenAgeDoesNotBlockOnTheFetchLock(t *testing.T) {
+	issued := time.Now().Add(-time.Minute)
+	s := &TokenSource{}
+	s.issuedAt.Store(&issued)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	type result struct {
+		age time.Duration
+		ok  bool
+	}
+	results := make(chan result, 1)
+	go func() {
+		age, ok := s.TokenAge()
+		results <- result{age, ok}
+	}()
+
+	select {
+	case r := <-results:
+		if !r.ok || r.age < time.Second {
+			t.Errorf("TokenAge() = %v, %v, want a positive age close to 1 minute", r.age, r.ok)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("TokenAge blocked while s.mu was held")
+	}
+}
+
 func TestContextCancellationIsHonoured(t *testing.T) {
 	ts := newTestSource(t, func(w http.ResponseWriter, _ *http.Request) {
 		time.Sleep(200 * time.Millisecond)

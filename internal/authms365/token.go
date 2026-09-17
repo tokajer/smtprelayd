@@ -16,6 +16,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/tokajer/smtprelayd/internal/config"
@@ -54,7 +55,7 @@ type TokenSource struct {
 
 	mu         sync.Mutex
 	token      string
-	issued     time.Time
+	issuedAt   atomic.Pointer[time.Time]
 	expires    time.Time
 	lastErr    error
 	retryAfter time.Time
@@ -144,20 +145,23 @@ func (s *TokenSource) Token(ctx context.Context) (string, error) {
 		return "", err
 	}
 	s.token, s.expires, s.lastErr = token, expires, nil
-	s.issued = now
+	s.issuedAt.Store(&now)
 	return token, nil
 }
 
 // TokenAge reports how long the currently cached token has been held, and
-// whether one is cached at all. It is read by the metrics endpoint only;
-// the token value itself never leaves this package.
+// whether one is cached at all. It deliberately does not take s.mu: that
+// mutex is held across an HTTPS request to Microsoft with a 15-second
+// timeout, and a metrics read must not block behind the outage it exists to
+// diagnose. The time.Time is stored rather than a Unix nanosecond count so
+// that its monotonic reading survives: a wall-clock step backwards must not
+// turn into a negative age.
 func (s *TokenSource) TokenAge() (time.Duration, bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.token == "" {
+	p := s.issuedAt.Load()
+	if p == nil {
 		return 0, false
 	}
-	return time.Since(s.issued), true
+	return time.Since(*p), true
 }
 
 func (s *TokenSource) fetch(ctx context.Context) (string, time.Time, error) {

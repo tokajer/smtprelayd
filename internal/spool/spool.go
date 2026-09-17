@@ -295,7 +295,7 @@ func (s *Spool) Commit(st *Staged, env Envelope, lifetime time.Duration, prefix 
 		return "", errors.New("spool: commit of a discarded stage")
 	}
 
-	if s.maxQuotaBytes > 0 && s.spoolSize()+st.size > s.maxQuotaBytes {
+	if s.overQuota(st.size) {
 		return "", ErrQuotaExceeded
 	}
 
@@ -781,12 +781,22 @@ func (s *Spool) sizeLocked() int64 {
 }
 
 // spoolSize returns the total size in bytes the spool occupies. See
-// sizeLocked for what counts and why; this wrapper exists because Commit
-// calls it without holding the lock.
+// sizeLocked for what counts and why; this is the locked accessor the tests
+// use.
 func (s *Spool) spoolSize() int64 {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.sizeLocked()
+}
+
+// overQuota reports whether committing n more bytes would exceed the
+// configured quota. Size and quota are read together under one lock: sampling
+// them separately lets a concurrent SetQuota be compared against a size from
+// before it.
+func (s *Spool) overQuota(n int64) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.maxQuotaBytes > 0 && s.sizeLocked()+n > s.maxQuotaBytes
 }
 
 // QuotaWarning reports whether the spool has reached limits.spool_warn_percent

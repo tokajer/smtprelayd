@@ -21,6 +21,7 @@ import (
 
 	"github.com/tokajer/smtprelayd/internal/config"
 	"github.com/tokajer/smtprelayd/internal/rewrite"
+	"github.com/tokajer/smtprelayd/internal/router"
 	"github.com/tokajer/smtprelayd/internal/spool"
 	"github.com/tokajer/smtprelayd/internal/store"
 )
@@ -365,15 +366,47 @@ func (s *session) doData() bool {
 
 	dr := newDotReader(s.br)
 	hr := bufio.NewReader(dr)
+	staged, res, ok := s.stageMessage(hr)
+	if !ok {
+		return false
+	}
+	defer staged.Discard()
+
+	lifetime := time.Duration(s.srv.cfg.Queue.MaxLifetimeHours) * time.Hour
+	ids, ok := s.commitCopies(staged, res, groups, lifetime)
+	if !ok {
+		return false
+	}
+
+	s.reply(250, "2.0.0 OK queued as "+strings.Join(ids, " "))
+	s.resetTransaction()
+
+	// End of data on anything other than <CRLF>.<CRLF>. The message is
+	// acknowledged -- it is queued and a legacy device must not be told
+	// otherwise -- but the stream is not handed back to the command loop,
+	// because whatever follows the dot was chosen by whoever wrote the body.
+	if dr.smuggled {
+		s.log.Warn("data ended on a bare LF dot line, closing the session",
+			"queue_ids", strings.Join(ids, " "))
+		return false
+	}
+	return true
+}
+
+// stageMessage reads the message body, applies the client's rewriting rules
+// and stages one copy of the result. It replies to the client itself on every
+// failure, so a false return means the session is finished with this message.
+// The caller owns the returned stage and must Discard it.
+func (s *session) stageMessage(hr *bufio.Reader) (*spool.Staged, rewrite.Result, bool) {
 	headers, hops, err := scanHeaders(hr, s.srv.cfg.Limits)
 	if err != nil {
 		s.replyDataError(err)
-		return false
+		return nil, rewrite.Result{}, false
 	}
 	if hops >= s.srv.cfg.Limits.MaxHops {
 		s.log.Warn("hop count exceeded", "hops", hops)
 		s.reply(554, "5.4.6 too many hops, routing loop suspected")
-		return false
+		return nil, rewrite.Result{}, false
 	}
 
 	res, err := s.srv.rules[s.client.Name].Apply(rewrite.Input{
@@ -385,18 +418,23 @@ func (s *session) doData() bool {
 		// client supplied. Rejecting permanently is the only honest answer.
 		s.log.Warn("sender rewriting refused the message", "error", err)
 		s.reply(550, "5.6.0 message headers cannot be rewritten safely")
-		return false
+		return nil, rewrite.Result{}, false
 	}
 
 	staged, err := s.srv.spool.Stage(
 		io.MultiReader(strings.NewReader(res.Headers), hr), s.maxMessageBytes())
 	if err != nil {
 		s.replyDataError(err)
-		return false
+		return nil, rewrite.Result{}, false
 	}
-	defer staged.Discard()
+	return staged, res, true
+}
 
-	lifetime := time.Duration(s.srv.cfg.Queue.MaxLifetimeHours) * time.Hour
+// commitCopies makes one queued copy per route group. A partial accept would
+// be delivered once and again when the client retries, so a failure withdraws
+// the copies already made before replying. It replies to the client itself on
+// failure; a false return means the session is finished with this message.
+func (s *session) commitCopies(staged *spool.Staged, res rewrite.Result, groups []router.Group, lifetime time.Duration) ([]string, bool) {
 	committed := make([]spool.ID, 0, len(groups))
 	ids := make([]string, 0, len(groups))
 
@@ -425,43 +463,12 @@ func (s *session) doData() bool {
 			}
 			s.log.Error("enqueue failed", "route", g.Route, "error", err)
 			s.replyDataError(err)
-			return false
+			return nil, false
 		}
 		committed = append(committed, id)
 		ids = append(ids, id.String())
 
-		// Record message in history store. Subject is stored only if
-		// retain_subjects is enabled; store.RecordMessage redacts it again
-		// regardless, this just avoids parsing the header block for nothing.
-		recipientsJSON, _ := json.Marshal(g.Recipients)
-		subject := ""
-		if s.srv.cfg.History.RetainSubjects {
-			subject = sanitizeSubject(rewrite.HeaderValue(res.Headers, "Subject"))
-		}
-		// Journal metadata describes what was spooled, so it is read from
-		// the rewritten header block and the staged size rather than from
-		// the headers the client sent or the size it announced.
-		messageID := sanitizeHeaderMeta(rewrite.HeaderValue(res.Headers, "Message-ID"), maxStoredMessageID)
-		contentType := sanitizeHeaderMeta(rewrite.HeaderValue(res.Headers, "Content-Type"), maxStoredContentType)
-		_ = s.srv.store.RecordMessage(store.MessageRecord{
-			QueueID:      id.String(),
-			Client:       s.client.Name,
-			Route:        g.Route,
-			EnvelopeFrom: res.EnvelopeFrom,
-			OriginalFrom: res.OriginalFrom,
-			Recipients:   string(recipientsJSON),
-			Subject:      subject,
-			Listener:     s.srv.lc.Name,
-			RemoteAddr:   s.remote.String(),
-			MessageID:    messageID,
-			ContentType:  contentType,
-			SizeBytes:    staged.Size(),
-			HeaderCount:  rewrite.HeaderCount(res.Headers),
-			Helo:         sanitizeHeaderMeta(s.helo, maxStoredHelo),
-			ReceivedAt:   env.Received,
-			ExpiresAt:    env.Received.Add(lifetime),
-			TLSUsed:      s.isTLS,
-		})
+		messageID := s.journalAccepted(id, g, res, env.Received, staged.Size(), lifetime)
 
 		s.log.Info("message accepted",
 			"queue_id", id.String(), "from", res.EnvelopeFrom,
@@ -470,19 +477,46 @@ func (s *session) doData() bool {
 			"message_id", messageID, "size_bytes", staged.Size())
 	}
 
-	s.reply(250, "2.0.0 OK queued as "+strings.Join(ids, " "))
-	s.resetTransaction()
+	return ids, true
+}
 
-	// End of data on anything other than <CRLF>.<CRLF>. The message is
-	// acknowledged -- it is queued and a legacy device must not be told
-	// otherwise -- but the stream is not handed back to the command loop,
-	// because whatever follows the dot was chosen by whoever wrote the body.
-	if dr.smuggled {
-		s.log.Warn("data ended on a bare LF dot line, closing the session",
-			"queue_ids", strings.Join(ids, " "))
-		return false
+// journalAccepted records one queued copy in the history store. The write is
+// best-effort: the message is already queued for delivery, and a problem in
+// the history store must not undo that or fail the session over it.
+func (s *session) journalAccepted(id spool.ID, g router.Group, res rewrite.Result, received time.Time, size int64, lifetime time.Duration) string {
+	// Subject is stored only if retain_subjects is enabled; store.RecordMessage
+	// redacts it again regardless, this just avoids parsing the header block
+	// for nothing.
+	recipientsJSON, _ := json.Marshal(g.Recipients)
+	subject := ""
+	if s.srv.cfg.History.RetainSubjects {
+		subject = sanitizeSubject(rewrite.HeaderValue(res.Headers, "Subject"))
 	}
-	return true
+	// Journal metadata describes what was spooled, so it is read from
+	// the rewritten header block and the staged size rather than from
+	// the headers the client sent or the size it announced.
+	messageID := sanitizeHeaderMeta(rewrite.HeaderValue(res.Headers, "Message-ID"), maxStoredMessageID)
+	contentType := sanitizeHeaderMeta(rewrite.HeaderValue(res.Headers, "Content-Type"), maxStoredContentType)
+	_ = s.srv.store.RecordMessage(store.MessageRecord{
+		QueueID:      id.String(),
+		Client:       s.client.Name,
+		Route:        g.Route,
+		EnvelopeFrom: res.EnvelopeFrom,
+		OriginalFrom: res.OriginalFrom,
+		Recipients:   string(recipientsJSON),
+		Subject:      subject,
+		Listener:     s.srv.lc.Name,
+		RemoteAddr:   s.remote.String(),
+		MessageID:    messageID,
+		ContentType:  contentType,
+		SizeBytes:    size,
+		HeaderCount:  rewrite.HeaderCount(res.Headers),
+		Helo:         sanitizeHeaderMeta(s.helo, maxStoredHelo),
+		ReceivedAt:   received,
+		ExpiresAt:    received.Add(lifetime),
+		TLSUsed:      s.isTLS,
+	})
+	return messageID
 }
 
 // Bounds on the header values kept in the history store. These are display
