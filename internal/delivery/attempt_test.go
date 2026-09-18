@@ -35,6 +35,22 @@ type fakeSmarthost struct {
 	// waiting for QUIT. Exchange does this, and so does any connection that
 	// dies in the gap between the 250 and the goodbye.
 	dropAfterData bool
+	// rcptReplies answers the nth RCPT with rcptReplies[n-1] when one is
+	// given, so a message can be driven to a partial acceptance. An index
+	// past the end falls back to accepting.
+	rcptReplies []string
+	rcptSeen    int
+}
+
+// startSelectiveSmarthost accepts the body but answers each RCPT from
+// rcptReplies, which is how a distribution list with one dead mailbox
+// behaves.
+func startSelectiveSmarthost(t *testing.T, rcptReplies ...string) *fakeSmarthost {
+	t.Helper()
+	return startSmarthost(t, &fakeSmarthost{
+		dataReply:   "250 2.0.0 accepted",
+		rcptReplies: rcptReplies,
+	})
 }
 
 func startFakeSmarthost(t *testing.T, dataReply string) *fakeSmarthost {
@@ -87,6 +103,11 @@ func (f *fakeSmarthost) handle(conn net.Conn) {
 		case strings.HasPrefix(cmd, "MAIL"):
 			say("250 2.1.0 sender ok")
 		case strings.HasPrefix(cmd, "RCPT"):
+			f.rcptSeen++
+			if i := f.rcptSeen - 1; i < len(f.rcptReplies) {
+				say(f.rcptReplies[i])
+				continue
+			}
 			say("250 2.1.5 recipient ok")
 		case strings.HasPrefix(cmd, "DATA"):
 			say("354 end with <CRLF>.<CRLF>")

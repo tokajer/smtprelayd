@@ -21,6 +21,7 @@ env:
   GO_VERSION: "1.25.13"
   GOVULNCHECK_VERSION: "v1.6.0"
   GOSEC_VERSION: "v2.28.0"
+  STATICCHECK_VERSION: "2025.1.1"
 
 jobs:
   check:
@@ -65,6 +66,17 @@ jobs:
       # inheriting a blanket exemption.
       - name: Static security analysis
         run: go run github.com/securego/gosec/v2/cmd/gosec@${{ env.GOSEC_VERSION }} -severity=medium ./...
+
+      # gofmt, go vet, govulncheck and gosec between them do not report an
+      # unexported function nobody calls, which is how listener.domainOf
+      # survived as a copy of router.domainOf long after routing moved out of
+      # that package -- doc comment still claiming a purpose it no longer had.
+      # Run over the whole tree this found three things in ~23k lines, so this
+      # gate is prevention rather than cleanup. The one suppression it needs
+      # is a //lint:ignore at the line it applies to, naming the reason, the
+      # same rule the #nosec annotations follow.
+      - name: Static analysis
+        run: go run honnef.co/go/tools/cmd/staticcheck@${{ env.STATICCHECK_VERSION }} ./...
 
       # internal/selftest probes the built binary the way a device reaches
       # it, but it needs a running instance, so it had never run here: the

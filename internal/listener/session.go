@@ -761,10 +761,8 @@ func (d *dotReader) Read(p []byte) (int, error) {
 			return 0, io.EOF
 		}
 		d.prevCRLF = crlf
-		if strings.HasPrefix(line, ".") {
-			line = line[1:]
-		}
-		d.rest = []byte(line + "\r\n")
+		// Undo dot-stuffing: exactly one leading dot, per RFC 5321 4.5.2.
+		d.rest = []byte(strings.TrimPrefix(line, ".") + "\r\n")
 	}
 	n := copy(p, d.rest)
 	d.rest = d.rest[n:]

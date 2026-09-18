@@ -55,6 +55,43 @@ type QuitError struct{ Err error }
 func (e *QuitError) Error() string { return e.Err.Error() }
 func (e *QuitError) Unwrap() error { return e.Err }
 
+// Rejection is one recipient the smarthost refused permanently, with the
+// reply it gave. The reply is kept whole because it is what names the address
+// and the reason, and it is what the operator needs to act on.
+type Rejection struct {
+	Recipient string
+	Err       error
+}
+
+// PartialError reports that the message was delivered, but not to every
+// recipient: the smarthost permanently refused the ones listed here and no
+// retry will change that.
+//
+// The delivery succeeded for everyone else, so a caller must treat this as
+// success. Retrying would deliver the message a second time to the recipients
+// who did accept it -- the same rule QuitError carries, for the same reason.
+// What it must not do is treat it as an ordinary success and say nothing:
+// the refusals are how an operator learns which address to fix.
+type PartialError struct {
+	Route    string
+	Rejected []Rejection
+}
+
+func (e *PartialError) Error() string {
+	return fmt.Sprintf("route %s: delivered, but %d recipient(s) were refused: %s",
+		e.Route, len(e.Rejected), describeRejections(e.Rejected))
+}
+
+// describeRejections renders the refusals as one line for a log field or an
+// error string.
+func describeRejections(rejected []Rejection) string {
+	parts := make([]string, 0, len(rejected))
+	for _, r := range rejected {
+		parts = append(parts, fmt.Sprintf("%s (%v)", r.Recipient, r.Err))
+	}
+	return strings.Join(parts, "; ")
+}
+
 func temp(format string, a ...any) error { return &TempError{Err: fmt.Errorf(format, a...)} }
 func perm(format string, a ...any) error { return &PermError{Err: fmt.Errorf(format, a...)} }
 
@@ -195,10 +232,9 @@ func Deliver(ctx context.Context, route config.Route, msg Message, timeout time.
 	if err := c.Mail(msg.From); err != nil {
 		return classify(err)
 	}
-	for _, rcpt := range msg.To {
-		if err := c.Rcpt(rcpt); err != nil {
-			return classify(err)
-		}
+	rejected, err := offerRecipients(c, route, msg.To)
+	if err != nil {
+		return err
 	}
 	w, err := c.Data()
 	if err != nil {
@@ -223,10 +259,67 @@ func Deliver(ctx context.Context, route config.Route, msg Message, timeout time.
 	// This is the mirror of the rule the listener already applies on the way
 	// in, where commitCopies withdraws partial copies rather than let a
 	// client's retry duplicate them.
-	if err := c.Quit(); err != nil {
-		return &QuitError{Err: err}
+	quitErr := c.Quit()
+	// A partial delivery outranks a failed goodbye: both mean "delivered,
+	// do not retry", and the rejected addresses are the half an operator has
+	// to act on. The QUIT failure is dropped in that case rather than
+	// wrapped, because nothing downstream would do anything different with it.
+	if len(rejected) > 0 {
+		return &PartialError{Route: route.Name, Rejected: rejected}
+	}
+	if quitErr != nil {
+		return &QuitError{Err: quitErr}
 	}
 	return nil
+}
+
+// offerRecipients issues one RCPT per recipient and decides what a refusal
+// means for the message as a whole.
+//
+// A permanently refused recipient is that recipient's problem, not the
+// message's: a mailbox that no longer exists must not stop the message
+// reaching everyone else on a distribution list, which is what returning at
+// the first refusal used to do -- measured, with a three-recipient message
+// permanently bounced after its middle recipient was refused, while the other
+// two had already been accepted with 250 in that same session.
+//
+// A *temporarily* refused recipient is different, and deliberately still ends
+// the whole attempt before anything is sent. The message has to be retried
+// for that recipient, and it cannot be retried for one recipient without
+// being delivered a second time to the others, because a queued message is
+// one envelope and not one per address. Deferring everything costs a delay;
+// the alternative costs a duplicate, and duplicates are the thing this file
+// spends most of its rules avoiding.
+func offerRecipients(c *smtp.Client, route config.Route, to []string) ([]Rejection, error) {
+	var rejected []Rejection
+	accepted := 0
+	for _, rcpt := range to {
+		err := c.Rcpt(rcpt)
+		switch {
+		case err == nil:
+			accepted++
+		case isPermanentReply(err):
+			rejected = append(rejected, Rejection{Recipient: rcpt, Err: err})
+		default:
+			return nil, classify(err)
+		}
+	}
+	if accepted == 0 {
+		// Nobody is left to send to, and no retry changes that. Reported as
+		// one permanent failure so the message is moved aside exactly as it
+		// was before this distinction existed.
+		return nil, &PermError{Err: fmt.Errorf("route %s: every recipient was refused: %s",
+			route.Name, describeRejections(rejected))}
+	}
+	return rejected, nil
+}
+
+// isPermanentReply reports whether a reply will never succeed on retry. It
+// asks classify rather than reading the code itself, so there is one
+// definition of permanent in this package.
+func isPermanentReply(err error) bool {
+	var pe *PermError
+	return errors.As(classify(err), &pe)
 }
 
 func authFor(ctx context.Context, route config.Route, tokens TokenSource) (smtp.Auth, error) {

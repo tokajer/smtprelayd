@@ -320,10 +320,16 @@ auth = "login"
 	if r.Credentials.Password.Value() != "topsecret" {
 		t.Fatal("secret was not resolved from the environment")
 	}
+	// The Sprintf calls are the point, not an oversight: this asserts that
+	// every formatting verb redacts, which is how a secret reaches a log line
+	// or an error string in practice. Calling String() directly, as S1025
+	// suggests, would test the one path that was never in doubt.
+	//lint:ignore S1025 the %s verb is the behaviour under test, not a detour to String()
+	viaPercentS := fmt.Sprintf("%s", r.Credentials.Password)
 	for _, rendered := range []string{
 		strings.TrimSpace(r.Credentials.Password.String()),
 		fmt.Sprintf("%v", r.Credentials.Password),
-		fmt.Sprintf("%s", r.Credentials.Password),
+		viaPercentS,
 		fmt.Sprintf("%#v", r.Credentials.Password),
 		fmt.Sprintf("%v", r.Credentials),
 	} {

@@ -79,12 +79,3 @@ func validateAddress(addr string, allowEmpty bool) error {
 	}
 	return nil
 }
-
-// domainOf returns the recipient domain in lower case, for route selection.
-func domainOf(addr string) string {
-	at := strings.LastIndex(addr, "@")
-	if at < 0 {
-		return ""
-	}
-	return strings.ToLower(addr[at+1:])
-}

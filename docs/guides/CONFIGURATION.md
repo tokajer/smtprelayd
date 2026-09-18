@@ -308,6 +308,25 @@ whichever route has `default = true`. Recipients of one message that resolve
 to different routes are split into one queue entry per route — no extra
 configuration needed for that, it follows from the rules above.
 
+**When a smarthost refuses one recipient of a queue entry**, the outcome
+depends on whether the refusal is permanent:
+
+- A **permanent** refusal (5xx — typically a mailbox that no longer exists) is
+  that recipient's problem alone. The message is delivered to everyone else on
+  the entry, and the refused address and its verbatim reply are recorded on
+  the delivery attempt, visible on the message's detail page and through the
+  API. Nothing is retried; the message is done.
+- A **temporary** refusal (4xx) defers the whole queue entry, before any of
+  the body is sent, and it is retried on the normal schedule. It cannot be
+  handled per-recipient: a queue entry is one envelope, so retrying it for the
+  refused recipient would deliver it a second time to the others.
+- If **every** recipient is refused permanently, the message is bounced as a
+  permanent failure, as it would be for any other 5xx.
+
+So one departed colleague on a distribution list does not stop the mail
+reaching the rest of it. Check the message's attempt detail when somebody
+reports a mail that only some recipients received.
+
 ## 6. Queue behaviour
 
 ```toml

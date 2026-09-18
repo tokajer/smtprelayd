@@ -305,11 +305,30 @@ func (m *Manager) attempt(ctx context.Context, meta *spool.Meta) {
 	elapsed := time.Since(start)
 	closeBody()
 
-	// The smarthost took the message and only the goodbye went wrong. Failing
-	// it here would queue a copy the smarthost has already accepted, and the
-	// next attempt would deliver it twice; the log line is the whole remedy.
+	// Two outcomes mean "delivered, do not retry" while still carrying
+	// something worth saying. Both are turned into success here, because
+	// requeueing either one would deliver the message a second time to the
+	// recipients who already have it.
+	//
+	// partialResponse is carried into the history row below, so the refused
+	// addresses survive in the message's attempt detail rather than only in
+	// the log: that page is where an operator looks after somebody reports a
+	// mail that did not arrive.
+	partialCode, partialResponse := 0, ""
+	var partial *smarthost.PartialError
 	var quitErr *smarthost.QuitError
-	if errors.As(err, &quitErr) {
+	switch {
+	case errors.As(err, &partial):
+		log.Warn("delivered, but the smarthost refused some recipients",
+			"refused", len(partial.Rejected), "accepted", len(meta.Envelope.To)-len(partial.Rejected),
+			"detail", partial.Error())
+		partialCode, partialResponse = extractSMTPError(partial.Rejected[0].Err)
+		if partialResponse == "" {
+			partialResponse = partial.Error()
+		}
+		err = nil
+	case errors.As(err, &quitErr):
+		// The smarthost took the message and only the goodbye went wrong.
 		log.Warn("the smarthost accepted the message but the session did not close cleanly",
 			"error", quitErr.Error())
 		err = nil
@@ -340,7 +359,7 @@ func (m *Manager) attempt(ctx context.Context, meta *spool.Meta) {
 		default:
 			m.metrics.Delivered(meta.Envelope.Route)
 		}
-		_ = m.store.RecordAttempt(meta.ID.String(), meta.Attempts, 0, "", "delivered", nil)
+		_ = m.store.RecordAttempt(meta.ID.String(), meta.Attempts, partialCode, partialResponse, "delivered", nil)
 		if err := m.spool.Remove(meta.ID); err != nil {
 			log.Error("cannot remove delivered message", "error", err)
 		}

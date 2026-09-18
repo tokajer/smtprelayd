@@ -19,7 +19,49 @@ fix below): the MSI installs without error, exactly one service registration
 remains (no duplicate), the on-disk binary is replaced, and the service keeps
 running afterwards. Uninstall remains unverified. Log rotation and Windows ACL
 verification at startup are complete.
-**Last session**: 2026-09-18 (fortieth session) — Five findings from a review
+**Last session**: 2026-09-18 (forty-first session) — Two findings implemented
+from a review, and **one retracted after it turned out to be wrong**.
+
+**One refused recipient no longer bounces the message for everybody.**
+`Deliver` returned at the first `c.Rcpt` error, so a 550 for one address
+failed the whole message permanently — measured, with a three-recipient
+message bounced after its middle recipient was refused while the other two
+had already been accepted with 250 in that same session. A printer mailing a
+distribution list lost the mail for all three because one person had left.
+
+New `offerRecipients` collects the refusals instead. A **permanent** refusal
+is that recipient's problem: the message goes to everyone else and comes back
+as `PartialError`, which `attempt` treats as delivered — retrying would
+duplicate it for the recipients who did accept — while logging it and writing
+the refused address and its verbatim reply into the attempt row, so it is
+visible on the message detail page rather than only in the log. A
+**temporary** refusal still defers the whole entry before anything is sent,
+deliberately: a queue entry is one envelope, so retrying it for one recipient
+would deliver it twice to the others. All recipients refused is still a
+`PermError`. Documented in `CONFIGURATION.md` section 5.
+
+**`listener.domainOf` was dead**, an exact copy of `router.domainOf` left
+behind when routing moved packages, with a doc comment still claiming a
+purpose it no longer had. Nothing in the gates reports an uncalled unexported
+function — not gofmt, vet, govulncheck or gosec. `staticcheck` now runs in CI
+beside them. Measured before adding it: three findings in ~23k lines, so this
+is prevention, not cleanup. One of the three was a **false positive worth
+keeping**: `validate_test.go` uses `fmt.Sprintf("%s", secret)` on purpose,
+because the verb is the behaviour under test; it carries a `//lint:ignore`
+naming that reason, the same convention the `#nosec` annotations follow.
+
+**Retracted: "one unroutable recipient refuses the whole message".** The
+review reported that a recipient with no route makes `doData` answer 451 for
+the entire message. The probe that showed it used a configuration
+`config.Validate` **rejects** — `client "local" has no route and no default
+route exists`. Every client either names a route or a default route exists,
+and `Resolve` falls back to one of them, so `Split` cannot fail for a loaded
+configuration and that 451 is unreachable defensive code. Nothing was
+changed. Same mistake as the `FindMessages` retraction earlier in the week:
+the code path was read, the validator constraining its inputs was not. Do not
+re-report it.
+
+**Previous session**: 2026-09-18 (fortieth session) — Five findings from a review
 aimed, per the previous session's note, at the lowest-coverage code with no
 mutation history. One of them disabled a security control.
 
