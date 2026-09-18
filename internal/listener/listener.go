@@ -170,7 +170,7 @@ func (s *Server) listen() error {
 	if err != nil {
 		return fmt.Errorf("listener %s: %w", s.lc.Name, err)
 	}
-	if s.lc.TLS == "implicit" {
+	if s.lc.TLS == config.TLSImplicit {
 		ln = tls.NewListener(ln, s.tlsConf)
 	}
 	s.ln = ln

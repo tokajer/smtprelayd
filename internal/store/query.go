@@ -123,7 +123,7 @@ type MessageFilter struct {
 	Status string
 	Sort   string // received_at (default), client, route; unknown values fall back to the default
 	Order  string // desc (default) or asc; unknown values fall back to the default
-	Limit  int    // default 100, max 1000
+	Limit  int    // default 100, capped at MaxPageLimit
 	Offset int
 }
 
@@ -349,6 +349,13 @@ func (s *Store) FindMessageByID(queueID string) (*Message, error) {
 // had no clamp at all, which is the gap this closes.
 const maxOffset = 1_000_000
 
+// MaxPageLimit is the largest page any list query will return, whatever the
+// caller asks for. It is exported because internal/web bounds one bulk action
+// by it: a caller that asks for more silently gets this many, so a constant
+// over there carrying a different number would be a lie rather than a
+// setting.
+const MaxPageLimit = 1000
+
 // clampPaging applies the shared bounds every list query needs. Returning the
 // values rather than mutating a filter keeps it usable for the three filter
 // types, which share no interface.
@@ -358,8 +365,8 @@ func clampPaging(limit, offset int) (int, int) {
 		// Also catches a negative one, which SQLite reads as "no limit":
 		// FindBounces tested for == 0 and so passed that straight through.
 		limit = 100
-	case limit > 1000:
-		limit = 1000
+	case limit > MaxPageLimit:
+		limit = MaxPageLimit
 	}
 	if offset < 0 || offset > maxOffset {
 		offset = 0

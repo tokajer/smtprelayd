@@ -378,8 +378,21 @@ sender         = "postmaster@example.at"   # empty envelope sender used on the w
 notify         = []                        # global recipients; empty disables bounce mail entirely
 notify_route   = "m365"                    # which route sends the notification itself
 digest_minutes = 15                        # batch failures into one message
-max_per_hour   = 12                        # cap; excess is recorded in history but not mailed
+max_per_hour   = 12                        # cap on digests per hour; see below
 ```
+`max_per_hour` caps how many digest **messages** go out in an hour, not how
+many failures they cover. A digest suppressed by the cap is not discarded:
+its failures are carried into a later one, once the hour rolls over. So a
+large outage produces a catch-up digest rather than silence.
+
+One digest lists at most **200 failures in full** and then says how many more
+there were. That bound exists because the length of a digest otherwise
+follows the size of the outage it reports: at roughly 167 bytes per entry,
+10 000 failures made a 1.59 MB message, which is unreadable and is the kind
+of size a smarthost refuses — so the notification would have failed at the
+one moment it exists for. Nothing is lost: every failure is a row in the
+history either way, and the bounces view filtered by client is the full list.
+
 Covers only failures the relay itself produced (a permanent 5xx, or expiry
 after `max_lifetime_hours`) — a bounce Microsoft 365 generates after it
 already accepted the message lands in the rewritten sender's own mailbox and
@@ -408,6 +421,12 @@ configured `[[client]]` name (section 2): it is the same grouping key the
 bounce digest already uses, so a collision would silently route a canary's
 failures to that client's own `[client.bounce] notify` override instead of
 the global list.
+
+For the same reason, neither a client nor a canary may be called
+`expiry-watch`: that is the name the certificate and secret expiry watcher
+gives itself when it asks who to mail, and a client answering to it would
+capture every expiry warning into its own `[client.bounce] notify`. The
+loader refuses the name rather than leaving it as a trap.
 
 **The schedule is exactly one of `interval_minutes` or `daily_at`**; setting
 both, or neither, is a startup error. `interval_minutes` sends every n

@@ -21,12 +21,14 @@ import (
 // deleteMessage) stay in web.go, where the single-message endpoints use them
 // too.
 
-// bulkMax bounds one bulk action. store.FindMessages caps its own result at
-// 1000 rows, so "everything in the queue" processes at most that many per
-// submission and says that more remain; the same ceiling is applied to an
-// explicit selection so that a hand-built request cannot ask for unbounded
-// work on the request goroutine.
-const bulkMax = 1000
+// bulkMax bounds one bulk action. It is store.MaxPageLimit rather than a
+// number of its own: FindMessages caps its own result there whatever it is
+// asked for, so "everything in the queue" processes at most that many per
+// submission and says that more remain. Written as a literal, raising it here
+// would change nothing and the constant would stop describing what happens.
+// The same ceiling is applied to an explicit selection so that a hand-built
+// request cannot ask for unbounded work on the request goroutine.
+const bulkMax = store.MaxPageLimit
 
 // bulkBudget bounds how long one bulk action spends on the request
 // goroutine. It is half the server's WriteTimeout (internal/web/http.go), so

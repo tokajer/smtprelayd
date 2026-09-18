@@ -221,14 +221,14 @@ func (s *session) doHelo(verb, arg string) {
 		"PIPELINING",
 		"ENHANCEDSTATUSCODES",
 	}
-	if s.srv.lc.TLS == "starttls" && !s.isTLS {
+	if s.srv.lc.TLS == config.TLSStartTLS && !s.isTLS {
 		ext = append(ext, "STARTTLS")
 	}
 	s.multiline(250, ext)
 }
 
 func (s *session) doStartTLS(ctx context.Context) bool {
-	if s.srv.lc.TLS != "starttls" || s.srv.tlsConf == nil {
+	if s.srv.lc.TLS != config.TLSStartTLS || s.srv.tlsConf == nil {
 		s.reply(502, "5.5.1 command not implemented")
 		return true
 	}

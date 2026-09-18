@@ -19,7 +19,63 @@ fix below): the MSI installs without error, exactly one service registration
 remains (no duplicate), the on-disk binary is replaced, and the service keeps
 running afterwards. Uninstall remains unverified. Log rotation and Windows ACL
 verification at startup are complete.
-**Last session**: 2026-09-18 (forty-sixth session) — The first review to look
+**Last session**: 2026-09-18 (forty-seventh session) — The review looked at
+the notification chain, and the main finding is that it degrades in proportion
+to the outage it reports.
+
+**A bounce digest had no bound on its length.** `bounce.max_per_hour` caps how
+many digests go out, never how long one is, and the length follows how much
+mail the clients sent during the outage. Measured: about 167 bytes and one
+history lookup per entry, so 10 000 failures produced a 1.59 MB message in
+561ms. `selfmail.Enqueue` passes `maxBytes 0` with the comment "a few
+kilobytes the relay wrote itself, not client input to bound" -- true for the
+expiry warning and the canary, and the assumption that breaks here. A mail
+that size is unreadable and is what a smarthost refuses, so the notification
+would have failed at the one moment it exists for. `maxDigestEntries` lists
+200 in full and then says how many more there were; nothing is lost, because
+every failure is a history row either way.
+
+**The same name collision, closed for canaries and open for the expiry
+watcher.** `Notifier.recipientsFor` resolves recipients by looking the source
+name up among the clients. A canary sharing a client's name was already
+refused, with the reason documented. The expiry watcher went through the
+identical lookup as `"expiry-watch"` with nothing stopping it, and its own
+comment admitted as much: *"nothing forbids that name, it is simply not one a
+client is plausibly called."* A client called that would have captured every
+certificate and secret expiry warning into its own `bounce.notify`. The name
+now lives in `internal/config` as `SourceExpiryWatch` -- which is where it has
+to be refused, since `internal/bounce` imports config, not the other way --
+and `reservedNames` refuses it for clients and canaries alike.
+
+**Three vocabularies were string literals across six packages.** `"xoauth2"`
+in six, `"starttls"` and `"implicit"` in four each, every one a bare literal
+at the comparison. A typo reads as "this mode is simply never the one
+configured" and costs nothing at compile time. `internal/rewrite` already did
+the opposite for its own vocabulary (`ModeOff`, `HeaderFromKeep`), so this is
+that idiom applied to the other two: `config.TLSNone/TLSStartTLS/TLSImplicit`
+and `config.AuthNone/AuthPlain/AuthLogin/AuthXOAUTH2`. These are the words an
+operator writes in the TOML, so a test pins each constant to the documented
+word and a second one loads a configuration using every mode -- a renamed
+value would otherwise compile everywhere and reject every existing
+configuration at load time instead.
+
+**`bulkMax` is now `store.MaxPageLimit`** rather than a literal 1000 tied to
+the store's cap by a comment. Raising the literal would have changed nothing
+while the constant stopped describing what happens.
+
+**Also caught by the tree's own tests**: inserting `maxDigestEntries` above
+`send` orphaned `send`'s doc comment, and `TestDocCommentsNameTheirSymbol`
+named the file and line. Second time in this campaign.
+
+**Checked and clean, so it is not re-derived**: the store sets no
+`busy_timeout`, `modernc.org/sqlite` v1.31.1 calls `sqlite3_busy_timeout`
+nowhere, SQLite's own default is 0, and `SetMaxOpenConns` is unset -- so
+concurrent writers losing journal rows silently looked likely, especially
+since `RecordMessage`/`RecordAttempt` discard their errors. **Measured: 16
+concurrent writers, 1 280 operations, 0 busy errors.** The hypothesis does not
+hold.
+
+**Previous session**: 2026-09-18 (forty-sixth session) — The first review to look
 at the dispatcher under load rather than at its correctness, and the numbers
 were the finding.
 

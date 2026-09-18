@@ -25,12 +25,12 @@ const (
 	// because nothing here changes on a scale of minutes.
 	checkInterval = time.Hour
 
-	// expirySource names this watcher to bounce.Notifier, which groups by it and
-	// looks it up against client names when resolving recipients. A client
-	// named this would capture these notifications into its own
-	// bounce.notify override; nothing forbids that name, it is simply not
-	// one a client is plausibly called.
-	expirySource = "expiry-watch"
+	// expirySource names this watcher to bounce.Notifier, which groups by it
+	// and looks it up against client names when resolving recipients. The
+	// name is defined in internal/config because that is where a client or
+	// canary answering to it is refused -- without which these notifications
+	// would silently land in that client's own bounce.notify override.
+	expirySource = config.SourceExpiryWatch
 )
 
 // ExpiryWatcher mails the operator before something the relay depends on

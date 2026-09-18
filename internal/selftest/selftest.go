@@ -95,7 +95,7 @@ func probe(cfg *config.Config, match *listener.Matcher, l config.Listener, timeo
 	// client with cidr 0.0.0.0/0, the open relay acceptedVerdict has a branch
 	// for, produced a clean pass behind require_tls and a correct failure
 	// without it.
-	if l.TLS == "starttls" {
+	if l.TLS == config.TLSStartTLS {
 		conn, br, err = startTLS(cfg, conn, br, timeout)
 		if err != nil {
 			return "", err
@@ -131,7 +131,7 @@ func probe(cfg *config.Config, match *listener.Matcher, l config.Listener, timeo
 func dialListener(cfg *config.Config, l config.Listener, timeout time.Duration) (net.Conn, error) {
 	addr := dialAddress(l.Address)
 	d := &net.Dialer{Timeout: timeout}
-	if l.TLS != "implicit" {
+	if l.TLS != config.TLSImplicit {
 		conn, err := d.Dial("tcp", addr)
 		if err != nil {
 			return nil, fmt.Errorf("connect: %w", err)

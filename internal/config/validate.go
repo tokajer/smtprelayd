@@ -21,6 +21,24 @@ import (
 // credentials flow. Microsoft 365 rejects anything else for SMTP submission.
 const DefaultScope = "https://outlook.office365.com/.default"
 
+// SourceExpiryWatch is the name internal/bounce's expiry watcher gives itself
+// when it asks the notifier who to mail. The notifier resolves recipients by
+// looking the name up among the clients, so a client called this would
+// capture every certificate and secret expiry warning into its own
+// [client.bounce] notify override -- the same hazard a canary sharing a
+// client's name has, which is already refused. It lives here rather than in
+// internal/bounce because this is where it has to be refused, and
+// internal/bounce imports this package.
+const SourceExpiryWatch = "expiry-watch"
+
+// reservedNames are the grouping keys the relay uses for mail it composes
+// itself. A client or canary answering to one of them would silently divert
+// those notifications, so the name is refused rather than documented as a
+// trap.
+var reservedNames = map[string]string{
+	SourceExpiryWatch: "the certificate and secret expiry watcher",
+}
+
 // secretExpiresLayout is the date format of oauth2.secret_expires.
 const secretExpiresLayout = "2006-01-02" //#nosec G101 -- a date layout, not a credential
 
@@ -40,13 +58,34 @@ const maxExpiryWarnDays = 3650
 // "no quota". No filesystem this reaches is anywhere near it.
 const maxSpoolGB = 1 << 30
 
+// The TLS modes a listener or a route may be set to. Both sides use the same
+// three words, and four packages outside this one compare against them, so
+// they are named here rather than spelled as a literal at each comparison --
+// where a typo reads as "this mode is simply never the one configured" and
+// costs nothing at compile time.
+const (
+	TLSNone     = "none"
+	TLSStartTLS = "starttls"
+	TLSImplicit = "implicit"
+)
+
+// The authentication mechanisms a route may use, named for the same reason.
+// internal/rewrite already does this for its own vocabulary (ModeOff,
+// HeaderFromKeep); this is that idiom applied to the other two.
+const (
+	AuthNone    = "none"
+	AuthPlain   = "plain"
+	AuthLogin   = "login"
+	AuthXOAUTH2 = "xoauth2"
+)
+
 // Per-element defaults, named so that normalize and the checks that accept
 // these values cannot drift apart.
 const (
-	defaultListenerTLS      = "none"
+	defaultListenerTLS      = TLSNone
 	defaultRewriteMode      = "off"
 	defaultRoutePort        = 587
-	defaultRouteTLS         = "starttls"
+	defaultRouteTLS         = TLSStartTLS
 	defaultRouteConcurrency = 4
 )
 
@@ -233,14 +272,14 @@ func (v *validator) listeners() {
 			v.anyPublic = true
 		}
 		switch l.TLS {
-		case defaultListenerTLS, "starttls", "implicit":
+		case defaultListenerTLS, TLSStartTLS, TLSImplicit:
 		default:
 			v.add("%s: tls must be none, starttls or implicit", where)
 		}
-		if v.c.Listeners[i].TLS != "none" {
+		if v.c.Listeners[i].TLS != TLSNone {
 			v.needsCert = true
 		}
-		if l.RequireTLS && v.c.Listeners[i].TLS == "none" {
+		if l.RequireTLS && v.c.Listeners[i].TLS == TLSNone {
 			v.add("%s: require_tls is set but tls is none", where)
 		}
 		if l.MinTLS != "" {
@@ -284,6 +323,9 @@ func (v *validator) clients() {
 			v.add("%s: name must be 1 to %d printable ASCII characters without a quote or backslash", where, maxNameLen)
 		} else if v.clientNames[cl.Name] {
 			v.add("%s: duplicate client name", where)
+		} else if what, reserved := reservedNames[cl.Name]; reserved {
+			v.add("%s: name %q is reserved for %s, whose notifications would be diverted to this client's bounce.notify",
+				where, cl.Name, what)
 		}
 		v.clientNames[cl.Name] = true
 
@@ -418,8 +460,8 @@ func (v *validator) routeIdentity(r *Route, where string) {
 // protect.
 func (v *validator) routeTLS(r *Route, where string) {
 	switch r.TLS {
-	case defaultRouteTLS, "implicit":
-	case "none":
+	case defaultRouteTLS, TLSImplicit:
+	case TLSNone:
 		// Cleartext delivery exists for smarthosts on a segment the
 		// operator controls end to end. It is never a fallback: a route
 		// asking for TLS that cannot negotiate it defers, it does not
@@ -435,13 +477,13 @@ func (v *validator) routeTLS(r *Route, where string) {
 	default:
 		v.add("%s: tls must be none, starttls or implicit", where)
 	}
-	if r.TLS == "none" {
+	if r.TLS == TLSNone {
 		// Credentials are never put on an unprotected wire. A bearer
 		// token read off it grants mailbox access far beyond this relay,
 		// and PLAIN hands over the password outright; net/smtp refuses
 		// PlainAuth on an unencrypted connection anyway, so accepting it
 		// here would only turn a startup error into a delivery failure.
-		if r.Auth != "" && r.Auth != "none" {
+		if r.Auth != "" && r.Auth != AuthNone {
 			v.add("%s: auth %s requires tls starttls or implicit; "+
 				"tls none supports auth none only", where, r.Auth)
 		}
@@ -458,12 +500,12 @@ func (v *validator) routeTLS(r *Route, where string) {
 // that each one is shaped the way the wire format requires.
 func (v *validator) routeAuth(r *Route, where string) {
 	switch r.Auth {
-	case "none":
-	case "plain", "login":
+	case AuthNone:
+	case AuthPlain, AuthLogin:
 		if r.Credentials.Username == "" || r.Credentials.Password.Empty() {
 			v.add("%s: auth %s requires credentials.username and credentials.password", where, r.Auth)
 		}
-	case "xoauth2":
+	case AuthXOAUTH2:
 		o := r.OAuth2
 		switch {
 		case o.TenantID == "" || o.ClientID == "" || o.ClientSecret.Empty() || o.Mailbox == "":
@@ -765,6 +807,8 @@ func (v *validator) canaries() {
 			v.add("canary[%d]: name must be 1 to %d printable ASCII characters without a quote or backslash", i, maxNameLen)
 		} else if canaryNames[cn.Name] {
 			v.add("canary[%d]: name %q is used by more than one [[canary]]", i, cn.Name)
+		} else if what, reserved := reservedNames[cn.Name]; reserved {
+			v.add("canary[%d]: name %q is reserved for %s", i, cn.Name, what)
 		} else if v.clientNames[cn.Name] {
 			// Client is what the bounce digest groups by, for a canary the
 			// same as for a real client's messages (internal/bounce's

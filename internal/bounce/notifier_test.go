@@ -6,8 +6,12 @@ package bounce
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -340,4 +344,112 @@ func TestDigestStillRendersItsHeaderBlock(t *testing.T) {
 	if !strings.Contains(body, "could not be delivered") {
 		t.Errorf("digest body is missing:\n%s", body)
 	}
+}
+
+// bounce.max_per_hour caps how many digests go out, never how long one is,
+// and the length follows the outage: measured at roughly 167 bytes per entry,
+// 10 000 failures produced a 1.59 MB message and 10 000 history lookups. A
+// mail that size is unreadable and is what a smarthost refuses, so the
+// notification would have failed at the one moment it exists for.
+func TestDigestListsAtMostMaxEntriesAndSaysHowManyItLeftOut(t *testing.T) {
+	dir := t.TempDir()
+	sp, err := spool.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, err := store.Open(t.TempDir(), discardLog(), 90, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+
+	cfg := baseCfg()
+	n := New(cfg, sp, st, discardLog())
+
+	const failures = maxDigestEntries + 37
+	for i := 0; i < failures; i++ {
+		id := fmt.Sprintf("QCAP%022d", i)
+		recordFailed(t, st, id, "printers")
+		n.RecordFail("printers", id)
+	}
+
+	n.dispatch(time.Now())
+
+	body := onlyQueuedBody(t, dir)
+	if got := strings.Count(body, "Queue ID:   QCAP"); got != maxDigestEntries {
+		t.Errorf("digest lists %d entries, want %d", got, maxDigestEntries)
+	}
+	// The count in the opening line stays the true one: the cap changes how
+	// much is listed, never what is reported as having failed.
+	if !strings.Contains(body, fmt.Sprintf("%d message(s)", failures)) {
+		t.Errorf("digest does not report the real failure count of %d", failures)
+	}
+	// And the reader has to be told the list is short, or a truncated digest
+	// reads as a complete one.
+	if !strings.Contains(body, fmt.Sprintf("and %d more", failures-maxDigestEntries)) {
+		t.Errorf("digest does not say how many it left out:\n%s", tail(body))
+	}
+}
+
+// Below the cap nothing changes: no truncation, no closing note that would
+// read as a warning where there is nothing to warn about.
+func TestDigestUnderTheCapListsEverythingAndSaysNothingExtra(t *testing.T) {
+	dir := t.TempDir()
+	sp, err := spool.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, err := store.Open(t.TempDir(), discardLog(), 90, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+
+	n := New(baseCfg(), sp, st, discardLog())
+	const failures = 3
+	for i := 0; i < failures; i++ {
+		id := fmt.Sprintf("QSML%022d", i)
+		recordFailed(t, st, id, "printers")
+		n.RecordFail("printers", id)
+	}
+
+	n.dispatch(time.Now())
+
+	body := onlyQueuedBody(t, dir)
+	if got := strings.Count(body, "Queue ID:   QSML"); got != failures {
+		t.Errorf("digest lists %d entries, want all %d", got, failures)
+	}
+	if strings.Contains(body, "more, not listed here") {
+		t.Error("a digest under the cap claims it left something out")
+	}
+}
+
+// onlyQueuedBody returns the single message the notifier spooled.
+func onlyQueuedBody(t *testing.T, spoolDir string) string {
+	t.Helper()
+	var found []string
+	err := filepath.WalkDir(spoolDir, func(p string, d fs.DirEntry, err error) error {
+		if err == nil && !d.IsDir() && filepath.Ext(p) == ".eml" {
+			found = append(found, p)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(found) != 1 {
+		t.Fatalf("expected exactly one queued message, found %d", len(found))
+	}
+	b, err := os.ReadFile(found[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
+}
+
+func tail(s string) string {
+	if len(s) > 400 {
+		return "..." + s[len(s)-400:]
+	}
+	return s
 }

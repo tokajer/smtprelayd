@@ -76,7 +76,7 @@ func Items(cfg *config.Config) (items []Item, certErr error) {
 	}
 
 	for _, r := range cfg.Routes {
-		if r.Auth != "xoauth2" {
+		if r.Auth != config.AuthXOAUTH2 {
 			continue
 		}
 		exp, ok := r.OAuth2.SecretExpiry()

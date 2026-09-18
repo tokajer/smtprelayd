@@ -146,8 +146,23 @@ func (n *Notifier) dispatch(now time.Time) {
 	}
 }
 
-// send composes and enqueues one digest for client, listing every message in
-// ids. It is enqueued exactly like any other message — through the spool,
+// maxDigestEntries bounds how many failures one digest lists in full.
+//
+// bounce.max_per_hour caps how many digests go out, never how long one is,
+// and the length is set by how much mail the clients sent during the outage:
+// measured at roughly 167 bytes per entry, 10 000 failures produce a 1.59 MB
+// message and 10 000 history lookups. That is unreadable, it is the kind of
+// size a smarthost refuses, and it arrives precisely when the operator most
+// needs to hear something -- so the notification would fail at the one moment
+// it exists for.
+//
+// Nothing is lost by cutting it off: every failure is already a row in the
+// history store, which the closing line points at. 200 is generous for
+// reading and small enough that the worst case stays a normal mail.
+const maxDigestEntries = 200
+
+// send composes and enqueues one digest for client, listing at most maxDigestEntries of
+// them. It is enqueued exactly like any other message — through the spool,
 // for the configured notify route — except for the three loop-prevention
 // properties that matter here: an empty envelope sender (net/smtp renders
 // Mail("") as "MAIL FROM:<>", the standard null reverse path), the
@@ -160,7 +175,12 @@ func (n *Notifier) send(client string, recipients, ids []string, now time.Time) 
 	var body strings.Builder
 	fmt.Fprintf(&body, "%d message(s) from client %q could not be delivered:\r\n", len(ids), client)
 
-	for _, id := range ids {
+	listed := ids
+	if len(listed) > maxDigestEntries {
+		listed = listed[:maxDigestEntries]
+	}
+
+	for _, id := range listed {
 		msg, err := n.store.FindMessageByID(id)
 		if err != nil || msg == nil {
 			fmt.Fprintf(&body, "\r\nQueue ID:   %s\r\n(history record unavailable)\r\n", id)
@@ -180,11 +200,17 @@ func (n *Notifier) send(client string, recipients, ids []string, now time.Time) 
 			id, msg.EnvelopeFrom, strings.Join(msg.Recipients, ", "), subj, code, resp)
 	}
 
+	if omitted := len(ids) - len(listed); omitted > 0 {
+		fmt.Fprintf(&body, "\r\n... and %d more, not listed here. All %d are in the history:\r\n"+
+			"the bounces view, filtered by client %q.\r\n", omitted, len(ids), client)
+	}
+
 	queueID, err := n.enqueue(client, recipients, subject, body.String(), now)
 	if err != nil {
 		return err
 	}
-	n.log.Info("bounce digest queued", "client", client, "queue_id", queueID, "failures", len(ids))
+	n.log.Info("bounce digest queued", "client", client, "queue_id", queueID,
+		"failures", len(ids), "listed", len(listed))
 	return nil
 }
 

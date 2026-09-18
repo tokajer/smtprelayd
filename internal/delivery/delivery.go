@@ -74,7 +74,7 @@ func New(cfg *config.Config, sp *spool.Spool, log *slog.Logger, st *store.Store)
 		routeNames = append(routeNames, r.Name)
 		m.routes[r.Name] = make(chan struct{}, r.MaxConcurrent)
 		m.limits[r.Name] = r.RateLimitPerMin
-		if r.Auth != "xoauth2" {
+		if r.Auth != config.AuthXOAUTH2 {
 			continue
 		}
 		ts, err := authms365.New(authms365.Options{

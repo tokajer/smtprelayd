@@ -167,7 +167,7 @@ func Deliver(ctx context.Context, route config.Route, msg Message, timeout time.
 
 	var conn net.Conn
 	var err error
-	if route.TLS == "implicit" {
+	if route.TLS == config.TLSImplicit {
 		conn, err = (&tls.Dialer{NetDialer: dialer, Config: tlsConf}).DialContext(ctx, "tcp", addr)
 	} else {
 		conn, err = dialer.DialContext(ctx, "tcp", addr)
@@ -201,7 +201,7 @@ func Deliver(ctx context.Context, route config.Route, msg Message, timeout time.
 		return classify(err)
 	}
 
-	if route.TLS == "starttls" {
+	if route.TLS == config.TLSStartTLS {
 		ok, _ := c.Extension("STARTTLS")
 		if !ok {
 			// Never fall back to cleartext. Deferring gives an operator the
@@ -333,16 +333,16 @@ func authFor(ctx context.Context, route config.Route, tokens TokenSource) (smtp.
 	switch route.Auth {
 	case "none", "":
 		return nil, nil
-	case "plain":
+	case config.AuthPlain:
 		return smtp.PlainAuth("", route.Credentials.Username,
 			route.Credentials.Password.Value(), route.Host), nil
-	case "login":
+	case config.AuthLogin:
 		return &loginAuth{
 			username: route.Credentials.Username,
 			password: route.Credentials.Password.Value(),
 			host:     route.Host,
 		}, nil
-	case "xoauth2":
+	case config.AuthXOAUTH2:
 		if tokens == nil {
 			return nil, perm("route %s: auth is xoauth2 but no token source was built", route.Name)
 		}

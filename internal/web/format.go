@@ -182,10 +182,10 @@ func formatRoutes(rs []config.Route) string {
 			r.Name, r.Default, r.Host, r.Port, orNone(r.TLS), orNone(r.Auth),
 			strings.Join(r.Domains, ", "), strings.Join(r.Sources, ", "), r.MaxConcurrent, r.RateLimitPerMin)
 		switch r.Auth {
-		case "xoauth2":
+		case config.AuthXOAUTH2:
 			fmt.Fprintf(&b, "oauth2.tenant_id     = %s\noauth2.client_id     = %s\noauth2.mailbox       = %s\noauth2.client_secret = [redacted]\n",
 				r.OAuth2.TenantID, r.OAuth2.ClientID, r.OAuth2.Mailbox)
-		case "plain", "login":
+		case config.AuthPlain, config.AuthLogin:
 			fmt.Fprintf(&b, "credentials.username = %s\ncredentials.password = [redacted]\n", r.Credentials.Username)
 		}
 		b.WriteString("\n")

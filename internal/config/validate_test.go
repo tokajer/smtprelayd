@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/tokajer/smtprelayd/internal/certgen"
 )
 
 // testDataDir has to be absolute on the platform the test runs on. A rooted
@@ -853,5 +855,118 @@ func TestRelativeDataDirIsRejected(t *testing.T) {
 func TestAbsoluteDataDirIsAccepted(t *testing.T) {
 	if _, err := Load(write(t, baseConfig)); err != nil {
 		t.Fatalf("the base configuration stopped loading: %v", err)
+	}
+}
+
+// The bounce notifier resolves recipients by looking a source name up among
+// the clients, so a client answering to an internal source name captures
+// those notifications into its own bounce.notify override. For canaries that
+// hazard was already refused and documented; the expiry watcher went through
+// the identical lookup with nothing stopping it, and its own comment said so:
+// "nothing forbids that name, it is simply not one a client is plausibly
+// called". A warning that silently reaches the wrong person is worse than no
+// warning, so the name is refused instead of hoped about.
+func TestReservedSourceNameIsRefusedForAClient(t *testing.T) {
+	body := strings.Replace(baseConfig, `name = "printers"`,
+		`name = "`+SourceExpiryWatch+`"`, 1)
+	_, err := Load(write(t, body))
+	if err == nil {
+		t.Fatalf("a client named %q was accepted", SourceExpiryWatch)
+	}
+	if !strings.Contains(err.Error(), "reserved") {
+		t.Errorf("refused for the wrong reason: %v", err)
+	}
+	// The operator has to learn what would have been diverted.
+	if !strings.Contains(err.Error(), "expiry") {
+		t.Errorf("the error does not say what the name is reserved for: %v", err)
+	}
+}
+
+// And the same name on a canary, which reaches recipientsFor by the same
+// route.
+func TestReservedSourceNameIsRefusedForACanary(t *testing.T) {
+	body := baseConfig + `
+[bounce]
+sender = "bounce@example.at"
+notify = ["ops@example.at"]
+notify_route = "m365"
+digest_minutes = 15
+max_per_hour = 12
+
+[[canary]]
+name = "` + SourceExpiryWatch + `"
+recipient = "probe@example.at"
+sender = "canary@example.at"
+route = "m365"
+interval_minutes = 60
+`
+	_, err := Load(write(t, body))
+	if err == nil {
+		t.Fatalf("a canary named %q was accepted", SourceExpiryWatch)
+	}
+	if !strings.Contains(err.Error(), "reserved") {
+		t.Errorf("refused for the wrong reason: %v", err)
+	}
+}
+
+// These constants are not internal labels: they are the words an operator
+// writes in the TOML, and six packages outside this one now compare against
+// them. Renaming a value would compile everywhere and reject every existing
+// configuration at load time instead, so the words are pinned here against
+// what docs/guides/CONFIGURATION.md documents.
+func TestModeConstantsAreTheDocumentedWords(t *testing.T) {
+	for _, tc := range []struct{ got, want string }{
+		{TLSNone, "none"},
+		{TLSStartTLS, "starttls"},
+		{TLSImplicit, "implicit"},
+		{AuthNone, "none"},
+		{AuthPlain, "plain"},
+		{AuthLogin, "login"},
+		{AuthXOAUTH2, "xoauth2"},
+		{SourceExpiryWatch, "expiry-watch"},
+	} {
+		if tc.got != tc.want {
+			t.Errorf("constant is %q, want %q", tc.got, tc.want)
+		}
+	}
+}
+
+// And the validator has to keep accepting each of them, or a constant could
+// be correct while the value it names is refused.
+func TestEveryDocumentedAuthAndTLSModeLoads(t *testing.T) {
+	for _, tls := range []string{TLSNone, TLSStartTLS, TLSImplicit} {
+		t.Run("route tls "+tls, func(t *testing.T) {
+			body := strings.Replace(baseConfig, `host = "smtp.example"`,
+				`host = "smtp.example"`+"\ntls = "+fmt.Sprintf("%q", tls), 1)
+			if _, err := Load(write(t, body)); err != nil {
+				t.Errorf("route tls %q was refused: %v", tls, err)
+			}
+		})
+	}
+	// A listener on starttls or implicit needs a certificate on disk, so the
+	// [tls] block comes with them.
+	dir := t.TempDir()
+	certFile, keyFile := filepath.Join(dir, "relay.crt"), filepath.Join(dir, "relay.key")
+	certPEM, keyPEM, err := certgen.Generate(certgen.Options{Hosts: []string{"127.0.0.1"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(certFile, certPEM, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(keyFile, keyPEM, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	tlsBlock := fmt.Sprintf("\n[tls]\ncert_file = %q\nkey_file = %q\n",
+		filepath.ToSlash(certFile), filepath.ToSlash(keyFile))
+
+	for _, listenerTLS := range []string{TLSNone, TLSStartTLS, TLSImplicit} {
+		t.Run("listener tls "+listenerTLS, func(t *testing.T) {
+			body := strings.Replace(baseConfig, `tls = "none"`,
+				`tls = `+fmt.Sprintf("%q", listenerTLS), 1) + tlsBlock
+			if _, err := Load(write(t, body)); err != nil {
+				t.Errorf("listener tls %q was refused: %v", listenerTLS, err)
+			}
+		})
 	}
 }

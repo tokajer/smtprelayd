@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/tokajer/smtprelayd/internal/config"
 	"github.com/tokajer/smtprelayd/internal/httpx"
 	"github.com/tokajer/smtprelayd/internal/metrics"
 	"github.com/tokajer/smtprelayd/internal/spool"
@@ -45,7 +46,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	routes := make([]healthRoute, 0, len(s.cfg.Routes))
 	for _, rt := range s.cfg.Routes {
 		authenticated := true
-		if rt.Auth == "xoauth2" {
+		if rt.Auth == config.AuthXOAUTH2 {
 			authenticated = statusByRoute[rt.Name].HasToken
 		}
 		routes = append(routes, healthRoute{Name: rt.Name, Auth: rt.Auth, Authenticated: authenticated})
