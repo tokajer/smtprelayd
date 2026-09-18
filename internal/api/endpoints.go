@@ -24,13 +24,6 @@ func limitFromQuery(q url.Values, fallback int) int {
 	return n
 }
 
-func splitHasMore[T any](rows []T, limit int) ([]T, bool) {
-	if len(rows) > limit {
-		return rows[:limit], true
-	}
-	return rows, false
-}
-
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -143,12 +136,11 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	rows, err := s.store.FindMessages(filter)
+	rows, hasMore, err := s.store.FindMessages(filter)
 	if err != nil {
 		s.serverError(w, "messages", err)
 		return
 	}
-	rows, hasMore := splitHasMore(rows, filter.Limit)
 
 	resp := struct {
 		Messages   []*store.Message `json:"messages"`
@@ -180,14 +172,23 @@ func (s *Server) handleMessage(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleQueue(w http.ResponseWriter, r *http.Request) {
+	// Mirrors metrics.RouteStatus field for field, minus the cached-token
+	// state /api/v1/health already answers. A counter that exists in the
+	// exposition and not here is a route whose state the two disagree
+	// about -- and recipients_refused_total is the one that cannot be
+	// inferred from the others: a message with a refused recipient is
+	// delivered, so it appears in no failure counter at all.
 	type routeState struct {
-		Route          string     `json:"route"`
-		Queued         int        `json:"queued"`
-		Deferred       int        `json:"deferred"`
-		OldestQueued   *time.Time `json:"oldest_queued,omitempty"`
-		DeliveredTotal uint64     `json:"delivered_total"`
-		BouncedTotal   uint64     `json:"bounced_total"`
-		LastDelivery   *time.Time `json:"last_delivery,omitempty"`
+		Route             string     `json:"route"`
+		Queued            int        `json:"queued"`
+		Deferred          int        `json:"deferred"`
+		OldestQueued      *time.Time `json:"oldest_queued,omitempty"`
+		DeliveredTotal    uint64     `json:"delivered_total"`
+		BouncedTotal      uint64     `json:"bounced_total"`
+		DeferredTotal     uint64     `json:"deferred_total"`
+		AuthFailuresTotal uint64     `json:"auth_failures_total"`
+		RecipientsRefused uint64     `json:"recipients_refused_total"`
+		LastDelivery      *time.Time `json:"last_delivery,omitempty"`
 	}
 
 	var routes []routeState
@@ -195,7 +196,11 @@ func (s *Server) handleQueue(w http.ResponseWriter, r *http.Request) {
 		for _, st := range s.metrics.Status() {
 			row := routeState{
 				Route: st.Route, Queued: st.Queued, Deferred: st.Deferred,
-				DeliveredTotal: st.Delivered, BouncedTotal: st.Bounced,
+				DeliveredTotal:    st.Delivered,
+				BouncedTotal:      st.Bounced,
+				DeferredTotal:     st.DeferredTotal,
+				AuthFailuresTotal: st.AuthFailures,
+				RecipientsRefused: st.RecipientsRefused,
 			}
 			if !st.OldestQueued.IsZero() {
 				t := st.OldestQueued

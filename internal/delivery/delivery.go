@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/textproto"
+	"strings"
 	"sync"
 	"time"
 
@@ -322,10 +323,17 @@ func (m *Manager) attempt(ctx context.Context, meta *spool.Meta) {
 		log.Warn("delivered, but the smarthost refused some recipients",
 			"refused", len(partial.Rejected), "accepted", len(meta.Envelope.To)-len(partial.Rejected),
 			"detail", partial.Error())
-		partialCode, partialResponse = extractSMTPError(partial.Rejected[0].Err)
-		if partialResponse == "" {
-			partialResponse = partial.Error()
-		}
+		// Counted for a notification's and a canary's own traffic too: unlike
+		// delivered/bounced, this is not a tally of relay volume that mixing
+		// in diagnostic mail would distort. It says an address is dead, and
+		// that is worth hearing about whichever message found it.
+		m.metrics.RecipientsRefused(meta.Envelope.Route, len(partial.Rejected))
+		// Every refused address, not only the first. Recording one while
+		// smtprelayd_recipients_refused_total counted them all left an
+		// operator following that alert with fewer addresses on the detail
+		// page than the alert claimed.
+		partialCode, _ = extractSMTPError(partial.Rejected[0].Err)
+		partialResponse = describeRefusals(partial.Rejected)
 		err = nil
 	case errors.As(err, &quitErr):
 		// The smarthost took the message and only the goodbye went wrong.
@@ -438,15 +446,23 @@ func (m *Manager) backoff(attempt int) time.Duration {
 // full. The attempt counter is deliberately left alone in both cases: the
 // message was never offered to the smarthost, so waiting for a slot must not
 // consume its retry budget or bring its expiry forward.
+// hold puts a message back for a short while without touching the disk. Both
+// callers are scheduling decisions of this process alone -- the route is
+// paced, or no worker slot was free -- and neither offered the message to the
+// smarthost, so nothing about it has changed that a restart needs to find.
+// Persisting them cost one fsync per held message per tick, which is worst
+// exactly when a smarthost is hanging and the queue behind it is deepest.
 func (m *Manager) hold(meta *spool.Meta, d time.Duration) {
-	meta.NextAttempt = time.Now().Add(d)
-	if meta.NextAttempt.After(meta.Expires) {
-		meta.NextAttempt = meta.Expires
+	until := time.Now().Add(d)
+	if until.After(meta.Expires) {
+		// Past its own expiry the message could never be tried again and
+		// would not be expired either, so nothing would ever clear it.
+		until = meta.Expires
 	}
-	if err := m.spool.Release(meta); err != nil {
-		m.log.Error("cannot defer a rate limited message",
-			"queue_id", meta.ID.String(), "error", err)
-	}
+	// The caller's copy is updated too, so it still describes what was
+	// actually scheduled; only the disk is left alone.
+	meta.NextAttempt = until
+	m.spool.Defer(meta, until)
 }
 
 func (m *Manager) fail(meta *spool.Meta, reason string) {
@@ -471,6 +487,33 @@ func isPermanent(err error) bool {
 func isAuthFailure(err error) bool {
 	var ae *smarthost.AuthError
 	return errors.As(err, &ae)
+}
+
+// maxPartialResponse bounds what the attempt row carries. The full list is
+// always in the log; this is the copy the dashboard renders into one table
+// cell, and a message to a large distribution list would otherwise make that
+// cell the page.
+const maxPartialResponse = 500
+
+// describeRefusals renders every refused recipient for the attempt row,
+// bounded. It drops whole entries rather than cutting mid-string: half an
+// address still looks like an address, and an operator acting on one would be
+// chasing a mailbox that does not exist. What was dropped is stated, so the
+// count still agrees with the metric.
+func describeRefusals(rejected []smarthost.Rejection) string {
+	var b strings.Builder
+	for i, r := range rejected {
+		entry := r.String()
+		if i > 0 {
+			entry = "; " + entry
+		}
+		if b.Len()+len(entry) > maxPartialResponse {
+			fmt.Fprintf(&b, " (and %d more, see the log)", len(rejected)-i)
+			break
+		}
+		b.WriteString(entry)
+	}
+	return b.String()
 }
 
 // extractSMTPError tries to extract the SMTP response code and text from an error.

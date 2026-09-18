@@ -29,7 +29,7 @@ var bannedImports = map[string]string{
 // allowedBannedImports lists files that are permitted to import banned packages
 // for platform-specific reasons. Each is a relative path from the repo root.
 var allowedBannedImports = map[string]map[string]bool{
-	"internal/config/trust_windows.go": {"unsafe": true}, // Windows ACL API requires unsafe.Pointer for LocalFree
+	"internal/config/trust_windows.go": {"unsafe": true}, // a DACL's ACEs store their SID inline after the header; reading it needs unsafe.Pointer on ACCESS_ALLOWED_ACE.SidStart
 	"internal/config/dpapi_windows.go": {"unsafe": true}, // DPAPI (CryptProtectData/CryptUnprotectData) has no non-unsafe wrapper in golang.org/x/sys/windows
 }
 

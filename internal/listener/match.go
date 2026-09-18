@@ -64,7 +64,6 @@ type rateLimiter struct {
 
 type bucket struct {
 	tokens   int
-	limit    int
 	refilled time.Time
 }
 
@@ -82,12 +81,14 @@ func (r *rateLimiter) allow(name string, limit int, now time.Time) bool {
 
 	b, ok := r.buckets[name]
 	if !ok {
-		b = &bucket{tokens: limit, limit: limit, refilled: now}
+		b = &bucket{tokens: limit, refilled: now}
 		r.buckets[name] = b
 	}
+	// The limit is not stored on the bucket: it comes from the configuration
+	// on every call and cannot change while the process runs, so a copy would
+	// only be a second place for it to be wrong.
 	if now.Sub(b.refilled) >= time.Minute {
 		b.tokens = limit
-		b.limit = limit
 		b.refilled = now
 	}
 	if b.tokens <= 0 {

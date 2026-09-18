@@ -70,7 +70,6 @@ type session struct {
 	from     string
 	fromSet  bool
 	rcpts    []string
-	declared int64
 }
 
 func (s *Server) handle(ctx context.Context, conn net.Conn) {
@@ -294,7 +293,6 @@ func (s *session) doMail(arg string) {
 				s.reply(552, "5.3.4 message exceeds size limit")
 				return
 			}
-			s.declared = n
 		}
 	}
 	if !s.srv.rate.allow(s.client.Name, s.client.RateLimitPerMin, time.Now()) {
@@ -358,11 +356,6 @@ func (s *session) doData() bool {
 
 	s.reply(354, "end data with <CR><LF>.<CR><LF>")
 	_ = s.conn.SetReadDeadline(s.readDeadline(s.srv.cfg.Limits.DataTimeoutSec))
-
-	if s.declared > 0 && s.declared > s.maxMessageBytes() {
-		s.reply(552, "5.3.4 message exceeds size limit")
-		return false
-	}
 
 	dr := newDotReader(s.br)
 	hr := bufio.NewReader(dr)
@@ -630,7 +623,6 @@ func (s *session) resetTransaction() {
 	s.from = ""
 	s.fromSet = false
 	s.rcpts = nil
-	s.declared = 0
 }
 
 func (s *session) reply(code int, msg string) {

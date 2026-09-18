@@ -109,10 +109,17 @@ func genCert(configPath string, force bool, days int, out io.Writer) error {
 	// will not start, saying nothing about permissions. The configuration
 	// file is the reference because the package already gave it the service's
 	// group.
-	shareErr := shareWithService(configPath, filepath.Dir(keyFile), keyFile)
+	group, shareErr := shareWithService(configPath, filepath.Dir(keyFile), keyFile)
 
 	fmt.Fprintf(out, "wrote a self-signed certificate to %s\n", certFile)
 	fmt.Fprintf(out, "wrote its private key to %s\n", keyFile)
+	// Naming the group is the point: it is whatever the configuration file
+	// carries, and on a hand-made install that can be a group every local
+	// account is in. Saying nothing made a key readable machine-wide look
+	// exactly like a key readable by the service.
+	if group != "" {
+		fmt.Fprintf(out, "the key is readable by group %s, which owns %s\n", group, configPath)
+	}
 	fmt.Fprintf(out, "subject alternative names: %s\n", strings.Join(hosts, ", "))
 	if shareErr != nil {
 		fmt.Fprintf(out, "\nWARNING: could not give the key the configuration's group (%v).\n"+
@@ -176,15 +183,22 @@ func certHosts(cfg *config.Config) []string {
 	return hosts
 }
 
-// shareWithService widens each path to the configuration file's group. The
-// first failure is returned; the remaining paths are still attempted, so a
-// directory that could not be changed does not also leave the key untouched.
-func shareWithService(configPath string, paths ...string) error {
+// shareWithService widens each path to the configuration file's group and
+// reports which group that was, for the caller to print. The first failure is
+// returned; the remaining paths are still attempted, so a directory that
+// could not be changed does not also leave the key untouched.
+func shareWithService(configPath string, paths ...string) (string, error) {
 	var firstErr error
+	var group string
 	for _, p := range paths {
-		if err := fsmode.ShareWithGroupOf(p, configPath); err != nil && firstErr == nil {
-			firstErr = err
+		name, err := fsmode.ShareWithGroupOf(p, configPath)
+		if err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
 		}
+		group = name
 	}
-	return firstErr
+	return group, firstErr
 }

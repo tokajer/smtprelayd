@@ -12,4 +12,4 @@ package fsmode
 // governed by the DACL the installer writes and CheckDataDirACL verifies.
 func restrictFile(string) error { return nil }
 
-func shareWithGroupOf(_, _ string) error { return nil }
+func shareWithGroupOf(_, _ string) (string, error) { return "", nil }

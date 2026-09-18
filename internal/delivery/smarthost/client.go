@@ -63,6 +63,13 @@ type Rejection struct {
 	Err       error
 }
 
+// String is the one rendering of a refusal in this tree. Both the error text
+// and the copy the delivery manager records reuse it, so the two cannot drift
+// into describing the same refusal differently.
+func (r Rejection) String() string {
+	return fmt.Sprintf("%s (%v)", r.Recipient, r.Err)
+}
+
 // PartialError reports that the message was delivered, but not to every
 // recipient: the smarthost permanently refused the ones listed here and no
 // retry will change that.
@@ -87,7 +94,7 @@ func (e *PartialError) Error() string {
 func describeRejections(rejected []Rejection) string {
 	parts := make([]string, 0, len(rejected))
 	for _, r := range rejected {
-		parts = append(parts, fmt.Sprintf("%s (%v)", r.Recipient, r.Err))
+		parts = append(parts, r.String())
 	}
 	return strings.Join(parts, "; ")
 }

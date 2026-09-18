@@ -824,3 +824,85 @@ func TestFailRetriesTheRenameItCannotCompleteAtOnce(t *testing.T) {
 		t.Errorf("the body did not arrive in spool/failed: %v", err)
 	}
 }
+
+// Claim promises the oldest due message, and the dispatcher relies on it:
+// that ordering is the only thing keeping a message from starving behind
+// younger ones on a busy route. Nothing tested it until Claim stopped
+// sorting, which is when a reversed comparison would have become silent.
+func TestClaimReturnsTheOldestDueMessage(t *testing.T) {
+	s, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := time.Now().UTC().Add(-time.Hour)
+	// Enqueued youngest first, so insertion order cannot stand in for the
+	// answer and neither can map iteration order.
+	want := make([]ID, 3)
+	for i, age := range []time.Duration{0, time.Minute, 2 * time.Minute} {
+		env := Envelope{From: "a@example.at", To: []string{"b@example.net"},
+			Client: "c", Route: "r", Received: base.Add(-age)}
+		id, err := s.Enqueue(env, strings.NewReader("body\r\n"), 0, time.Hour)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want[len(want)-1-i] = id
+	}
+
+	for i, expect := range want {
+		m, ok := s.Claim(time.Now())
+		if !ok {
+			t.Fatalf("claim %d: queue reported empty with %d left", i, len(want)-i)
+		}
+		if m.ID != expect {
+			t.Fatalf("claim %d returned %s, want %s (out of order)", i, m.ID, expect)
+		}
+	}
+}
+
+// Defer is the in-memory half of the scheduling: it must reschedule without
+// writing, because the dispatcher calls it for every message queued behind a
+// saturated route on every poll, and Release's fsync there is what made a
+// hanging smarthost expensive for the whole spool.
+func TestDeferReschedulesWithoutWritingMetadata(t *testing.T) {
+	dir := t.TempDir()
+	s, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	env := Envelope{From: "a@example.at", To: []string{"b@example.net"},
+		Client: "c", Route: "r", Received: time.Now().UTC()}
+	id, err := s.Enqueue(env, strings.NewReader("body\r\n"), 0, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	meta, ok := s.Claim(time.Now())
+	if !ok {
+		t.Fatal("nothing to claim")
+	}
+	metaPath := filepath.Join(dir, "spool", "queue", id.String()+".json")
+	before, err := os.ReadFile(metaPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	until := time.Now().Add(time.Minute)
+	s.Defer(meta, until)
+
+	after, err := os.ReadFile(metaPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(before) != string(after) {
+		t.Error("Defer wrote the metadata file; that is Release's job")
+	}
+	if _, ok := s.Claim(time.Now()); ok {
+		t.Error("a deferred message was handed out again straight away")
+	}
+	got, ok := s.Claim(until.Add(time.Second))
+	if !ok {
+		t.Fatal("the message never came back after its deferral ran out")
+	}
+	if got.ID != id {
+		t.Fatalf("claimed %s, want %s", got.ID, id)
+	}
+}

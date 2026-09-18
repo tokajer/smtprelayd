@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/netip"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
@@ -150,8 +151,25 @@ func (c *Config) Validate() error {
 
 // service checks the [service] section.
 func (v *validator) service() {
-	if v.c.Service.DataDir == "" {
+	// Absolute, because every consumer already assumes it is. A relative
+	// value resolves against the process working directory, which for a
+	// service is whatever the init system or the SCM happened to set and is
+	// not something an operator chose -- so such a configuration was already
+	// broken, just silently and in a different place each time. Rejecting it
+	// here names the field instead of surfacing later as a spool that
+	// appeared somewhere unexpected.
+	//
+	// On Windows it also matters before that: "secure-datadir" writes an
+	// inheritable, protected DACL to this path, so a value that resolves
+	// somewhere unintended is destructive rather than merely wrong. That
+	// command carries its own refusal for system directories; this is the
+	// earlier of the two gates and the one that names the configuration.
+	switch {
+	case v.c.Service.DataDir == "":
 		v.add("service.data_dir is required")
+	case !filepath.IsAbs(v.c.Service.DataDir):
+		v.add("service.data_dir %q must be an absolute path (%s)",
+			v.c.Service.DataDir, dataDirExample)
 	}
 	if _, err := ParseLevel(v.c.Service.LogLevel); err != nil {
 		v.add("service.log_level: %v", err)

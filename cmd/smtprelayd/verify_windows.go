@@ -22,6 +22,88 @@ func verifyDataDirSecurity(dataDir string) error {
 	return config.CheckDataDirACL(dataDir)
 }
 
+// resolveDataDir is where both data-directory commands get their target: the
+// configured data_dir when the configuration still loads, the config file's
+// own directory otherwise (at install time no configuration exists yet and
+// the location the MSI creates is used).
+func resolveDataDir(configPath string) string {
+	if cfg, err := config.Load(configPath); err == nil {
+		return cfg.Service.DataDir
+	}
+	return filepath.Dir(configPath)
+}
+
+// systemDirs are the directories whose ACL must never be rewritten, read from
+// the environment rather than by name because those names are localised.
+//
+// It is a list of what breaks the machine, not a proof that anything else is
+// smtprelayd's to touch -- there is no such proof available. A relocated
+// data_dir has to keep working, so refuseSystemDir cannot demand a particular
+// name the way purgeDataDir does; what it can do is refuse the handful of
+// targets where being wrong is unrecoverable.
+func systemDirs() []string {
+	var out []string
+	for _, v := range []string{
+		"SystemRoot", "ProgramData", "ProgramFiles", "ProgramFiles(x86)",
+		"PUBLIC", "USERPROFILE", "SystemDrive",
+	} {
+		if p := os.Getenv(v); p != "" {
+			out = append(out, filepath.Clean(p))
+		}
+	}
+	return out
+}
+
+// refuseSystemDir rejects a resolved directory that is too broad to act on.
+//
+// SecureDataDir writes a protected DACL with SUB_CONTAINERS_AND_OBJECTS_INHERIT
+// and resets the owner, and its own comment states the consequence: Windows
+// recomputes the inherited ACEs of everything below. Pointed at C:\ProgramData
+// -- one missing path element, and a plausible one -- that takes access to
+// every installed application's data away from every non-administrator on the
+// machine. Pointed at a volume root it takes the machine.
+//
+// This is not defence against an attacker: the command needs elevation, and
+// anyone with it could run icacls directly. It is defence against a typo,
+// which is the way it actually happens -- every ACL error this binary prints
+// ends by telling the operator to run "secure-datadir" from an elevated
+// prompt, so the command is reached precisely when something about the
+// configured path has just gone wrong.
+//
+// purgeDataDir keeps its own, stricter rule instead of sharing this one: it
+// deletes recursively, so it can afford to insist on the exact name and
+// refuse a relocated directory outright. Securing one has to keep working
+// wherever the operator put it.
+func refuseSystemDir(dir, action string) error {
+	if !filepath.IsAbs(dir) {
+		return fmt.Errorf("refusing to %s %q: not an absolute path", action, dir)
+	}
+	clean := filepath.Clean(dir)
+	if filepath.Dir(clean) == clean {
+		return fmt.Errorf("refusing to %s %q: that is a volume root", action, clean)
+	}
+	for _, sys := range systemDirs() {
+		if strings.EqualFold(clean, sys) {
+			return fmt.Errorf("refusing to %s %q: that is a system directory, not the smtprelayd data directory"+
+				" -- check service.data_dir in the configuration", action, clean)
+		}
+	}
+	return nil
+}
+
+// dataDirTarget resolves the directory secure-datadir will act on and applies
+// the refusal to it. It exists apart from secureDataDir so that the guard is
+// reachable from a test: secureDataDir itself goes on to write a real DACL to
+// a real directory, so nothing can call it to find out whether the refusal is
+// still wired up.
+func dataDirTarget(configPath string) (string, error) {
+	dir := resolveDataDir(configPath)
+	if err := refuseSystemDir(dir, "re-ACL"); err != nil {
+		return "", err
+	}
+	return dir, nil
+}
+
 // secureDataDir writes that ACL. It runs from the MSI as a deferred custom
 // action and from an elevated prompt when an operator has to recover a
 // directory whose ACL was lost — never from the running service, which would
@@ -32,9 +114,9 @@ func verifyDataDirSecurity(dataDir string) error {
 // relocated data_dir is secured too; at install time no configuration exists
 // yet and the location the MSI creates is used.
 func secureDataDir(configPath string) error {
-	dir := filepath.Dir(configPath)
-	if cfg, err := config.Load(configPath); err == nil {
-		dir = cfg.Service.DataDir
+	dir, err := dataDirTarget(configPath)
+	if err != nil {
+		return err
 	}
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
@@ -71,10 +153,7 @@ func secureDataDir(configPath string) error {
 // confirmation. A missing directory is not an error: purge-datadir may run
 // against a data directory that never existed or was already removed.
 func purgeDataDir(configPath string) error {
-	dir := filepath.Dir(configPath)
-	if cfg, err := config.Load(configPath); err == nil {
-		dir = cfg.Service.DataDir
-	}
+	dir := resolveDataDir(configPath)
 	if !filepath.IsAbs(dir) || !strings.EqualFold(filepath.Base(dir), "SMTPRelayd") {
 		return fmt.Errorf("refusing to remove %q: does not look like the smtprelayd data directory", dir)
 	}

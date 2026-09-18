@@ -455,7 +455,7 @@ func TestDeleteActionRemovesFromSpoolKeepsHistory(t *testing.T) {
 		t.Fatalf("status = %q, want removed", msg.Status)
 	}
 
-	active, err := st.FindMessages(store.MessageFilter{Status: "active", Limit: 100})
+	active, _, err := st.FindMessages(store.MessageFilter{Status: "active", Limit: 100})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -674,7 +674,7 @@ func TestQueueBulkDeleteAllRequiresConfirmation(t *testing.T) {
 	if sp.Len() != 0 {
 		t.Fatalf("spool still holds %d messages after deleting the whole queue", sp.Len())
 	}
-	active, err := st.FindMessages(store.MessageFilter{Status: "active", Limit: 100})
+	active, _, err := st.FindMessages(store.MessageFilter{Status: "active", Limit: 100})
 	if err != nil {
 		t.Fatal(err)
 	}

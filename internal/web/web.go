@@ -11,6 +11,7 @@ import (
 	"html/template"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -141,13 +142,10 @@ func (s *Server) base(page string, r *http.Request) baseData {
 		sum.Delivered += rt.Delivered
 		sum.Bounced += rt.Bounced
 	}
-	recent, err := s.store.FindBounces(store.BounceFilter{Limit: 5})
+	recent, _, err := s.store.FindBounces(store.BounceFilter{Limit: 5})
 	if err != nil {
 		s.log.Warn("sidebar: recent bounces query failed", "error", err)
 		recent = nil
-	}
-	if len(recent) > 5 {
-		recent = recent[:5]
 	}
 	return baseData{
 		Version: s.version, Page: page, Theme: s.theme,
@@ -214,16 +212,12 @@ func (s *Server) handleQueue(w http.ResponseWriter, r *http.Request) {
 	order := q.Get("order")
 	offset := parseOffset(q.Get("offset"))
 
-	msgs, err := s.store.FindMessages(store.MessageFilter{
+	msgs, hasMore, err := s.store.FindMessages(store.MessageFilter{
 		Status: "active", Sort: sortCol, Order: order, Limit: pageSize, Offset: offset,
 	})
 	if err != nil {
 		s.serverError(w, "queue", err)
 		return
-	}
-	hasMore := len(msgs) > pageSize
-	if hasMore {
-		msgs = msgs[:pageSize]
 	}
 	rows := make([]queueRow, 0, len(msgs))
 	for _, m := range msgs {
@@ -264,13 +258,38 @@ func (s *Server) handleQueue(w http.ResponseWriter, r *http.Request) {
 		Flash:            bulkFlash(q),
 		ConfirmDeleteAll: q.Get("confirm") == "delete-all",
 	}
+	data.PrevHref, data.NextHref = pageLinks("/queue", nil, sortCol, order, offset, hasMore)
+	s.render(w, "queue", data)
+}
+
+// listPage is what every filtered list view binds to. templates/pager.html
+// has always been shared between them; this is the Go half of that, so the
+// two handlers below differ only in the filter they build and the query they
+// run, which is the part that is genuinely different.
+//
+// Filter is any because each page's form has its own fields, and the template
+// reaches them by name. Nothing else here varies.
+type listPage struct {
+	baseData
+	Filter      any
+	FilterError string
+	Messages    []*store.Message
+	HasMore     bool
+	NextHref    string
+	PrevHref    string
+}
+
+// pageLinks is the previous/next arithmetic every paged view repeats. Kept in
+// one place because getting it wrong in one view and right in the other is
+// invisible until somebody pages past the end.
+func pageLinks(path string, extra url.Values, sortCol, order string, offset int, hasMore bool) (prev, next string) {
 	if hasMore {
-		data.NextHref = pageHref("/queue", nil, sortCol, order, offset+pageSize)
+		next = pageHref(path, extra, sortCol, order, offset+pageSize)
 	}
 	if offset > 0 {
-		data.PrevHref = pageHref("/queue", nil, sortCol, order, max(0, offset-pageSize))
+		prev = pageHref(path, extra, sortCol, order, max(0, offset-pageSize))
 	}
-	s.render(w, "queue", data)
+	return prev, next
 }
 
 type searchFilterView struct {
@@ -295,29 +314,18 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 	filterErr := httpx.ParseTimeRange(q, &filter.Since, &filter.Until)
 
 	var msgs []*store.Message
+	var hasMore bool
 	if filterErr == "" {
 		var err error
-		msgs, err = s.store.FindMessages(filter)
+		msgs, hasMore, err = s.store.FindMessages(filter)
 		if err != nil {
 			s.serverError(w, "search", err)
 			return
 		}
 	}
-	hasMore := len(msgs) > pageSize
-	if hasMore {
-		msgs = msgs[:pageSize]
-	}
 
 	extra := filterQueryValues(q, "sender", "recipient", "subject", "client", "route", "status", "since", "until")
-	data := struct {
-		baseData
-		Filter      searchFilterView
-		FilterError string
-		Messages    []*store.Message
-		HasMore     bool
-		NextHref    string
-		PrevHref    string
-	}{
+	data := listPage{
 		baseData: s.base("search", r),
 		Filter: searchFilterView{
 			Sender: filter.Sender, Recipient: filter.Recipient, Subject: filter.Subject,
@@ -328,12 +336,7 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		Messages:    msgs,
 		HasMore:     hasMore,
 	}
-	if hasMore {
-		data.NextHref = pageHref("/search", extra, "", "", offset+pageSize)
-	}
-	if offset > 0 {
-		data.PrevHref = pageHref("/search", extra, "", "", max(0, offset-pageSize))
-	}
+	data.PrevHref, data.NextHref = pageLinks("/search", extra, "", "", offset, hasMore)
 	s.render(w, "search", data)
 }
 
@@ -369,29 +372,18 @@ func (s *Server) handleBounces(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var msgs []*store.Message
+	var hasMore bool
 	if filterErr == "" {
 		var err error
-		msgs, err = s.store.FindBounces(filter)
+		msgs, hasMore, err = s.store.FindBounces(filter)
 		if err != nil {
 			s.serverError(w, "bounces", err)
 			return
 		}
 	}
-	hasMore := len(msgs) > pageSize
-	if hasMore {
-		msgs = msgs[:pageSize]
-	}
 
 	extra := filterQueryValues(q, "sender", "recipient", "subject", "client", "route", "class", "since", "until")
-	data := struct {
-		baseData
-		Filter      bounceFilterView
-		FilterError string
-		Messages    []*store.Message
-		HasMore     bool
-		NextHref    string
-		PrevHref    string
-	}{
+	data := listPage{
 		baseData: s.base("bounces", r),
 		Filter: bounceFilterView{
 			Sender: filter.Sender, Recipient: filter.Recipient, Subject: filter.Subject,
@@ -402,12 +394,7 @@ func (s *Server) handleBounces(w http.ResponseWriter, r *http.Request) {
 		Messages:    msgs,
 		HasMore:     hasMore,
 	}
-	if hasMore {
-		data.NextHref = pageHref("/bounces", extra, "", "", offset+pageSize)
-	}
-	if offset > 0 {
-		data.PrevHref = pageHref("/bounces", extra, "", "", max(0, offset-pageSize))
-	}
+	data.PrevHref, data.NextHref = pageLinks("/bounces", extra, "", "", offset, hasMore)
 	s.render(w, "bounces", data)
 }
 

@@ -45,6 +45,7 @@ type Registry struct {
 	bounced             map[string]uint64
 	deferredCnt         map[string]uint64
 	authFailures        map[string]uint64
+	recipientsRefused   map[string]uint64
 	lastDelivery        map[string]time.Time
 	apiAuthFailure      uint64
 	notificationFailure uint64
@@ -73,6 +74,7 @@ func New(cfg *config.Config, sp *spool.Spool, routes, canaryNames []string, toke
 		bounced:            map[string]uint64{},
 		deferredCnt:        map[string]uint64{},
 		authFailures:       map[string]uint64{},
+		recipientsRefused:  map[string]uint64{},
 		lastDelivery:       map[string]time.Time{},
 		canaryFailure:      map[string]uint64{},
 		lastCanaryDelivery: map[string]time.Time{},
@@ -82,6 +84,7 @@ func New(cfg *config.Config, sp *spool.Spool, routes, canaryNames []string, toke
 		r.bounced[name] = 0
 		r.deferredCnt[name] = 0
 		r.authFailures[name] = 0
+		r.recipientsRefused[name] = 0
 	}
 	for _, name := range sortedCanaries {
 		r.canaryFailure[name] = 0
@@ -118,6 +121,21 @@ func (r *Registry) AuthFailure(route string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.authFailures[route]++
+}
+
+// RecipientsRefused records recipients a smarthost refused permanently while
+// accepting the message for the others on the same queue entry.
+//
+// It exists because that outcome is otherwise invisible to monitoring. The
+// message is delivered, so it increments delivered_total and nothing else --
+// but before partial delivery existed the same dead address bounced the whole
+// message, which showed up in bounced_total and in the bounce digest. Fixing
+// the mail loss removed the only signal an operator had, and /metrics is what
+// docs/guides/API.md points monitoring at. This is that signal.
+func (r *Registry) RecipientsRefused(route string, n int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.recipientsRefused[route] += uint64(n)
 }
 
 // APIAuthFailure records a rejected bearer token on the HTTP API. It has no
@@ -188,9 +206,12 @@ type RouteStatus struct {
 	Bounced       uint64
 	DeferredTotal uint64
 	AuthFailures  uint64
-	LastDelivery  time.Time // zero if there has been none
-	TokenAge      time.Duration
-	HasToken      bool // false for a non-xoauth2 route or before its first token fetch
+	// RecipientsRefused counts recipients refused permanently on messages
+	// that were delivered to the rest of their queue entry.
+	RecipientsRefused uint64
+	LastDelivery      time.Time // zero if there has been none
+	TokenAge          time.Duration
+	HasToken          bool // false for a non-xoauth2 route or before its first token fetch
 }
 
 // Status returns a snapshot of every configured route, sorted by name.
@@ -200,6 +221,7 @@ func (r *Registry) Status() []RouteStatus {
 	bounced := cloneCounts(r.bounced)
 	deferredCnt := cloneCounts(r.deferredCnt)
 	authFailures := cloneCounts(r.authFailures)
+	recipientsRefused := cloneCounts(r.recipientsRefused)
 	lastDelivery := make(map[string]time.Time, len(r.lastDelivery))
 	for k, v := range r.lastDelivery {
 		lastDelivery[k] = v
@@ -215,15 +237,16 @@ func (r *Registry) Status() []RouteStatus {
 	for _, route := range r.routes {
 		d := depth[route]
 		st := RouteStatus{
-			Route:         route,
-			Queued:        d.Queued,
-			Deferred:      d.Deferred,
-			OldestQueued:  d.OldestQueued,
-			Delivered:     delivered[route],
-			Bounced:       bounced[route],
-			DeferredTotal: deferredCnt[route],
-			AuthFailures:  authFailures[route],
-			LastDelivery:  lastDelivery[route],
+			Route:             route,
+			Queued:            d.Queued,
+			Deferred:          d.Deferred,
+			OldestQueued:      d.OldestQueued,
+			Delivered:         delivered[route],
+			Bounced:           bounced[route],
+			DeferredTotal:     deferredCnt[route],
+			AuthFailures:      authFailures[route],
+			RecipientsRefused: recipientsRefused[route],
+			LastDelivery:      lastDelivery[route],
 		}
 		if ts, ok := r.tokens[route]; ok {
 			if age, ok := ts.TokenAge(); ok {
@@ -275,6 +298,12 @@ func (r *Registry) text() string {
 	b.WriteString("# TYPE smtprelayd_deferred_total counter\n")
 	for _, st := range status {
 		fmt.Fprintf(&b, "smtprelayd_deferred_total{route=%s} %d\n", label(st.Route), st.DeferredTotal)
+	}
+
+	b.WriteString("# HELP smtprelayd_recipients_refused_total Recipients a smarthost refused permanently on a message delivered to the others, by route.\n")
+	b.WriteString("# TYPE smtprelayd_recipients_refused_total counter\n")
+	for _, st := range status {
+		fmt.Fprintf(&b, "smtprelayd_recipients_refused_total{route=%s} %d\n", label(st.Route), st.RecipientsRefused)
 	}
 
 	// Seconds rather than a date: a scrape consumer alerts on

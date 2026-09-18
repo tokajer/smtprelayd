@@ -16,6 +16,7 @@ text exposition format:
 | `smtprelayd_delivered_total` | counter | `route` | Successful deliveries |
 | `smtprelayd_bounced_total` | counter | `route` | Permanent failures and expiries |
 | `smtprelayd_deferred_total` | counter | `route` | Temporary failures retried |
+| `smtprelayd_recipients_refused_total` | counter | `route` | Recipients a smarthost refused permanently on a message that was delivered to the rest of its queue entry. Not a delivery failure — that message counts in `delivered_total` — so this is the only signal that an address is dead. Alert on any increase; look the message up in the dashboard, where the attempt detail names the address and carries the smarthost's verbatim reply |
 | `smtprelayd_auth_failures_total` | counter | `route` | Delivery attempts rejected for the relay's own credentials |
 | `smtprelayd_oauth_token_age_seconds` | gauge | `route` | Age of the cached OAuth2 token; absent until a token has been issued, absent entirely for non-XOAUTH2 routes |
 | `smtprelayd_last_delivery_time` | gauge | `route` | Unix timestamp of the last successful delivery; absent until the first one |

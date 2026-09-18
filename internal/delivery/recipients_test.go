@@ -6,10 +6,12 @@ package delivery
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/tokajer/smtprelayd/internal/delivery/smarthost"
 	"github.com/tokajer/smtprelayd/internal/spool"
 	"github.com/tokajer/smtprelayd/internal/store"
 )
@@ -147,5 +149,130 @@ func TestAFullDeliveryRecordsNoRefusal(t *testing.T) {
 	if msg.Attempts[0].SMTPCode != 0 || msg.Attempts[0].SMTPResp != "" {
 		t.Errorf("a clean delivery recorded %d %q, want neither",
 			msg.Attempts[0].SMTPCode, msg.Attempts[0].SMTPResp)
+	}
+}
+
+// The wiring between the two, which is the part that was missing: fixing the
+// mail loss moved this outcome out of the bounced counter and into the
+// delivered one, leaving /metrics -- what docs/guides/API.md points
+// monitoring at -- reporting an unbroken success rate while addresses were
+// being refused permanently.
+func TestARefusedRecipientReachesTheMetrics(t *testing.T) {
+	f := startSelectiveSmarthost(t,
+		"250 2.1.5 recipient ok",
+		"550 5.1.1 <gone@example.net>: recipient does not exist",
+	)
+	m, sp, st := managerAgainst(t, f)
+	_, meta := queueList(t, sp, st, "alice@example.net", "gone@example.net")
+
+	m.attempt(context.Background(), meta)
+
+	var found bool
+	for _, s := range m.Metrics().Status() {
+		if s.Route != "smarthost" {
+			continue
+		}
+		found = true
+		if s.RecipientsRefused != 1 {
+			t.Errorf("recipients_refused = %d, want 1", s.RecipientsRefused)
+		}
+		// Still a delivery: alice got it, and nothing bounced.
+		if s.Delivered != 1 {
+			t.Errorf("delivered = %d, want 1", s.Delivered)
+		}
+		if s.Bounced != 0 {
+			t.Errorf("bounced = %d, want 0: the message was delivered", s.Bounced)
+		}
+	}
+	if !found {
+		t.Fatal("the route is absent from the metrics snapshot")
+	}
+}
+
+// A clean delivery must leave the counter alone, or it reports noise on every
+// message instead of naming a dead address.
+func TestACleanDeliveryRefusesNobody(t *testing.T) {
+	f := startFakeSmarthost(t, "250 2.0.0 accepted")
+	m, sp, st := managerAgainst(t, f)
+	_, meta := queueList(t, sp, st, "alice@example.net", "bob@example.net")
+
+	m.attempt(context.Background(), meta)
+
+	for _, s := range m.Metrics().Status() {
+		if s.Route == "smarthost" && s.RecipientsRefused != 0 {
+			t.Errorf("recipients_refused = %d after a clean delivery, want 0", s.RecipientsRefused)
+		}
+	}
+}
+
+// Every refused address has to reach the attempt row, not only the first.
+// Recording one while smtprelayd_recipients_refused_total counted them all
+// left an operator following that alert with fewer addresses on the detail
+// page than the alert claimed -- worse than the metric not existing.
+func TestEveryRefusedRecipientIsRecorded(t *testing.T) {
+	f := startSelectiveSmarthost(t,
+		"250 2.1.5 recipient ok",
+		"550 5.1.1 <gone1@example.net>: recipient does not exist",
+		"550 5.1.1 <gone2@example.net>: recipient does not exist",
+		"550 5.1.1 <gone3@example.net>: recipient does not exist",
+	)
+	m, sp, st := managerAgainst(t, f)
+	id, meta := queueList(t, sp, st,
+		"alice@example.net", "gone1@example.net", "gone2@example.net", "gone3@example.net")
+
+	m.attempt(context.Background(), meta)
+
+	msg, err := st.FindMessageByID(id.String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(msg.Attempts) != 1 {
+		t.Fatalf("want one recorded attempt, got %d", len(msg.Attempts))
+	}
+	resp := msg.Attempts[0].SMTPResp
+	for _, want := range []string{"gone1@example.net", "gone2@example.net", "gone3@example.net"} {
+		if !strings.Contains(resp, want) {
+			t.Errorf("recorded response does not name %s: %q", want, resp)
+		}
+	}
+	// The metric and the page must agree on how many there were.
+	for _, s := range m.Metrics().Status() {
+		if s.Route == "smarthost" && s.RecipientsRefused != 3 {
+			t.Errorf("metric says %d refused, the row names three", s.RecipientsRefused)
+		}
+	}
+	_ = sp
+}
+
+// A very long refusal list is bounded, but on whole entries: half an address
+// still looks like an address, and an operator acting on one would be chasing
+// a mailbox that never existed. What was dropped is stated.
+func TestALongRefusalListIsBoundedOnWholeEntries(t *testing.T) {
+	rejected := make([]smarthost.Rejection, 0, 40)
+	for i := 0; i < 40; i++ {
+		rejected = append(rejected, smarthost.Rejection{
+			Recipient: fmt.Sprintf("gone%02d@example.net", i),
+			Err:       fmt.Errorf("550 5.1.1 recipient does not exist"),
+		})
+	}
+
+	got := describeRefusals(rejected)
+
+	if len(got) > maxPartialResponse+64 {
+		t.Errorf("rendered %d bytes, well past the %d budget: %q", len(got), maxPartialResponse, got)
+	}
+	if !strings.Contains(got, "more, see the log") {
+		t.Errorf("a truncated list must say so, got %q", got)
+	}
+	if !strings.Contains(got, "gone00@example.net") {
+		t.Errorf("the first entry was dropped: %q", got)
+	}
+	// No half-written address: everything before the truncation note ends on
+	// a complete entry.
+	head := got[:strings.Index(got, " (and ")]
+	for _, entry := range strings.Split(head, "; ") {
+		if !strings.HasSuffix(entry, ")") {
+			t.Errorf("entry %q is cut mid-string", entry)
+		}
 	}
 }

@@ -31,6 +31,15 @@ func RestrictFile(path string) error { return restrictFile(path) }
 // package assigned (root:smtprelayd on Linux), so no account name has to be
 // hardcoded here.
 //
-// On Windows it is a no-op, for the reason RestrictFile is: access there is
-// governed by the inherited DACL, not by mode bits or a POSIX group.
-func ShareWithGroupOf(path, reference string) error { return shareWithGroupOf(path, reference) }
+// It returns the group it applied, so the caller can say which one. That
+// matters: the reference is whatever group the operator's configuration file
+// happens to carry, and on a hand-made install that can be a shared group
+// every local account belongs to. Widening a private key to it is not
+// something to do silently.
+//
+// On Windows it is a no-op and returns an empty name, for the reason
+// RestrictFile is: access there is governed by the inherited DACL, not by
+// mode bits or a POSIX group.
+func ShareWithGroupOf(path, reference string) (string, error) {
+	return shareWithGroupOf(path, reference)
+}

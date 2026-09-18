@@ -119,8 +119,21 @@ request; the full per-attempt history stays on
 
 ### `GET /api/v1/queue`
 
-Current queue state per route: counts by state, oldest message age, last
-successful delivery, current backoff.
+Current queue state per route. Per entry: `queued` and `deferred` (messages
+in the spool right now), `oldest_queued` and `last_delivery` (both omitted
+when there is none), and the counters `delivered_total`, `bounced_total`,
+`deferred_total`, `auth_failures_total` and `recipients_refused_total`. The
+counters are since process start — the relay keeps no history of them — and
+match the `smtprelayd_*_total` series on `/metrics` exactly.
+
+`recipients_refused_total` counts recipients a smarthost refused permanently
+on a message it accepted for the rest. Such a message is **delivered**, so it
+appears in no failure counter: this is the only one that reports it. See
+`docs/guides/CONFIGURATION.md` section 5.
+
+There is no per-route backoff: the retry schedule applies to an individual
+message, and `next_attempt_at` on `GET /api/v1/messages/{queue_id}` is where
+it is reported.
 
 ### `GET /api/v1/messages/{queue_id}`
 

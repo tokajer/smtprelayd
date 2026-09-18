@@ -4,7 +4,7 @@
 <table>
 <thead><tr>
 	<th>Route</th><th>Queued</th><th>Deferred</th><th>Delivered</th><th>Bounced</th>
-	<th>Auth failures</th><th>Last delivery</th><th>OAuth2 token age</th>
+	<th>Auth failures</th><th>Refused rcpts</th><th>Last delivery</th><th>OAuth2 token age</th>
 </tr></thead>
 <tbody>
 {{range .Routes}}
@@ -15,11 +15,12 @@
 	<td class="num">{{.Delivered}}</td>
 	<td class="num">{{.Bounced}}</td>
 	<td class="num">{{.AuthFailures}}</td>
+	<td class="num">{{.RecipientsRefused}}</td>
 	<td class="nowrap">{{if not .LastDelivery.IsZero}}{{localtime .LastDelivery "2006-01-02 15:04:05"}}{{else}}<span class="empty">never</span>{{end}}</td>
 	<td>{{if .HasToken}}{{.TokenAge}}{{else}}<span class="empty">n/a</span>{{end}}</td>
 </tr>
 {{else}}
-<tr><td colspan="8" class="empty">no routes configured</td></tr>
+<tr><td colspan="9" class="empty">no routes configured</td></tr>
 {{end}}
 </tbody>
 </table>

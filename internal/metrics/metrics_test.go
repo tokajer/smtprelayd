@@ -373,3 +373,47 @@ func TestUnreadableCertificateIsExposedAsAnError(t *testing.T) {
 		t.Errorf("exposition does not report the unreadable certificate:\n%s", body)
 	}
 }
+
+// Recipients refused on an otherwise delivered message are the one delivery
+// outcome with no counter of its own until now: the message increments
+// delivered_total, so an operator watching /metrics saw an unbroken success
+// rate while addresses were being refused permanently.
+func TestRecipientsRefusedIsCountedPerRoute(t *testing.T) {
+	r := New(&config.Config{}, nil, []string{"m365", "legacy"}, nil, nil)
+
+	// Seeded at zero like every other route counter, so a route that has
+	// never hit one is present in the exposition rather than absent.
+	if text := r.text(); !strings.Contains(text, `smtprelayd_recipients_refused_total{route="legacy"} 0`) {
+		t.Errorf("counter not zero-seeded in:\n%s", text)
+	}
+
+	r.RecipientsRefused("m365", 2)
+	r.RecipientsRefused("m365", 1)
+
+	text := r.text()
+	if !strings.Contains(text, `smtprelayd_recipients_refused_total{route="m365"} 3`) {
+		t.Errorf("want 3 refused recipients on m365 in:\n%s", text)
+	}
+	if !strings.Contains(text, `smtprelayd_recipients_refused_total{route="legacy"} 0`) {
+		t.Error("a refusal on one route leaked into another")
+	}
+	// It must not be mistaken for a delivery failure: the message was
+	// delivered to everyone else.
+	if !strings.Contains(text, `smtprelayd_bounced_total{route="m365"} 0`) {
+		t.Error("a refused recipient was also counted as a bounce")
+	}
+}
+
+// Status backs the dashboard's route page, so it has to carry the same
+// number the exposition does or the two disagree about a route's state.
+func TestStatusCarriesRecipientsRefused(t *testing.T) {
+	r := New(&config.Config{}, nil, []string{"m365"}, nil, nil)
+	r.RecipientsRefused("m365", 4)
+	st := r.Status()
+	if len(st) != 1 {
+		t.Fatalf("want one route, got %d", len(st))
+	}
+	if st[0].RecipientsRefused != 4 {
+		t.Errorf("Status reports %d refused, want 4", st[0].RecipientsRefused)
+	}
+}

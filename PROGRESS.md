@@ -19,7 +19,303 @@ fix below): the MSI installs without error, exactly one service registration
 remains (no duplicate), the on-disk binary is replaced, and the service keeps
 running afterwards. Uninstall remains unverified. Log rotation and Windows ACL
 verification at startup are complete.
-**Last session**: 2026-09-18 (forty-first session) — Two findings implemented
+**Last session**: 2026-09-18 (forty-sixth session) — The first review to look
+at the dispatcher under load rather than at its correctness, and the numbers
+were the finding.
+
+**`Spool.Claim` sorted the whole due queue to return one message.** The
+dispatcher calls it once per message until the queue drains, so a tick cost
+O(n^2 log n) in queue depth. Measured: one call over 10 000 due messages took
+1.50ms, which makes a full tick about 15 seconds of CPU against a 5 second
+poll interval -- the dispatcher would never catch up. A one-pass minimum is
+the same selection: 157us, and a test now pins the ordering, which nothing did
+before.
+
+**The dispatcher fsynced a decision that only mattered for five seconds.**
+The non-blocking path (no worker slot free) and the rate-limit path both went
+through `Release`, which writes metadata and calls `f.Sync()`. Every message
+queued behind a saturated smarthost therefore cost one fsync per poll. New
+`Spool.Defer` reschedules in the index alone; a restart makes the message due
+again, which is correct, because the reason it was held did not survive either.
+`Release` stays for deferrals that record something real, such as a failed
+attempt and its backoff.
+
+**Three sibling queries, three pagination contracts.** `FindMessages` and
+`FindBounces` returned `Limit+1` rows and left the caller to cut the extra one
+off, undocumented; `FindBounceSummaries` cut it itself and returned `hasMore`.
+All four callers happened to be right. The contract is now one: `splitPage`,
+and the extra row never leaves the store.
+
+**`FindBouncesSince` had no caller anywhere in the tree**, not even a test,
+while its comment claimed it fed the bounce digest -- which uses `RecordFail`
+instead. It also asked for `Limit: 10000` against a clamp of 1000, so wiring
+it up would have silently produced a partial digest. Removed, and the
+superseded line in `docs/dev/PHASE4-PLAN.md` says so.
+
+**`gen-cert` never said which group it widened the private key to.** The group
+comes from whatever owns the configuration file; on a packaged install that is
+the service's own, on a hand-made one it can be a group every local account is
+in. The success message read the same either way. `ShareWithGroupOf` now
+returns the group and the command prints it.
+
+**A dead size check and the field feeding it** are gone from the listener:
+`s.declared` was only ever set after the identical comparison had already
+refused the message, so the second one at the DATA stage could not fire. The
+live check at MAIL FROM is covered and was mutation-verified before the
+duplicate went.
+
+**Two listener tests were racing the server, not testing it.** Both sent lines
+after the point where the server replies and stops reading, so under full-suite
+load the write hit a closed socket: the suite failed in 2 of 3 consecutive
+runs. The hop-limit test now stops at the blank line, which is where
+`scanHeaders` returns and the refusal is decided; the smuggling test reads the
+carrier's 250 before writing into a closing socket, because a close with unread
+client data sends an RST that can discard the reply. 12 consecutive full-suite
+runs clean afterwards, and both still fail when their guard is removed.
+
+**Also deduplicated**: `handleSearch` and `handleBounces` shared 36 of about 60
+lines. `templates/pager.html` was already shared between them; `listPage` and
+`pageLinks` are the Go half of that. The pager arithmetic had no test at all --
+`pageLinks` survived its first mutation -- so `TestPagerOffersTheNextPageAndThenBack`
+now covers it for both views.
+
+**Previous session**: 2026-09-18 (forty-fifth session) — The Windows-only code was
+opened for the first time in twenty reviews. It held the most dangerous
+finding of the campaign, and it is not a vulnerability — it is a typo.
+
+**`secure-datadir` re-ACLed whatever `data_dir` resolved to.** `SecureDataDir`
+writes a protected DACL with `SUB_CONTAINERS_AND_OBJECTS_INHERIT` and resets
+the owner, and its own comment states the consequence: Windows recomputes the
+inherited ACEs of everything below. `secureDataDir` passed it the configured
+path with no check at all, while `service.data_dir` was validated only for
+being non-empty. `data_dir = "C:\ProgramData"` — one missing path element —
+would have taken every non-administrator's access to every installed
+application's data; a volume root would have taken the machine.
+
+Reachable by ordinary use, not by attack: every ACL error this binary prints
+ends by telling the operator to run `secure-datadir` from an elevated prompt,
+so the command is reached exactly when something about the configured path
+has just gone wrong. `purgeDataDir` forty lines below has guarded its own
+resolution since it was written, with the reasoning spelled out — the
+neighbour with comparable blast radius had nothing.
+
+New `refuseSystemDir` rejects a volume root and the system directories read
+from the environment (`%SystemRoot%`, `%ProgramData%`, `%ProgramFiles%`, …,
+never by localised name). Deliberately **not** `purgeDataDir`'s rule: that one
+insists on the exact basename, which is right for a recursive delete and
+would break a legitimately relocated directory for an ACL write. Both now
+share `resolveDataDir` so the resolution cannot drift, and keep separate
+safety predicates because the two risks differ.
+
+**`service.data_dir` must now be absolute.** This can reject a configuration
+that previously loaded, which is the one behaviour change here. A relative
+value resolved against the process working directory — whatever the init
+system or the SCM set — so it was already broken, just later and somewhere
+different each time. The error names the field and carries a platform-correct
+example (single-quoted on Windows, since a backslash in a TOML basic string
+is an escape). The shipped example configuration still validates.
+
+**Linux got the other half of the same root cause, in documentation.** The
+unit hard-codes `ReadWritePaths=/var/lib/smtprelayd` under
+`ProtectSystem=strict`, so a relocated `data_dir` fails with `read-only file
+system` — naming the path but not the reason. `CONFIGURATION.md` now gives
+the drop-in beside the path table, with the Windows counterpart next to it.
+
+**First Windows tests in the tree.** Five for the ACL trustee check and five
+for the new guard; before this session, 632 lines of Windows code had none.
+`aclGrantsOnly` takes its expected SIDs as a parameter so a test need not look
+up `NT SERVICE\smtprelayd`, which does not exist until the MSI has run — that
+is what makes it runnable in CI at all.
+
+**`dataDirTarget` was split out of `secureDataDir` for one reason: the call
+site was untestable.** Every test could pass with the guard deleted from
+`secureDataDir`, because `secureDataDir` goes on to write a real DACL to a
+real directory and so cannot be called to find out whether the refusal is
+still wired up. Resolution plus refusal now live in a function that returns a
+path, and two tests cover it — including the install-time path, where no
+configuration exists yet and `resolveDataDir` falls back to the config file's
+own directory, so a config path directly under `%ProgramData%` resolves to
+`%ProgramData%` itself. That is the shape of the accident, not a contrived
+input.
+
+**Mutation evidence.** The `service.data_dir` absolute check was verified in
+both directions on Linux: deleting it, four relative values are accepted;
+inverting it, the base configuration stops loading. So neither the guard nor
+its counter-test is vacuous.
+
+**Verified on Windows Server 2022, and it found a defect I had introduced.**
+The suite ran in the VM against this tree: stage 1 green, stage 3 green, and
+all five guards mutation-tested there — `refuseSystemDir`'s three checks,
+`dataDirTarget`'s call site and `aclGrantsOnly`'s trustee comparison — each
+reported *killed*. So the Windows tests do not merely pass; they fail when the
+code they cover is broken.
+
+The first run of that sweep failed 23 tests in `internal/config`. The fixture
+had written `data_dir = "/tmp/smtprelayd-test"` since it was created, and that
+path is **not absolute on Windows**: without a volume it resolves against
+whatever the current drive happens to be, which is precisely the ambiguity the
+new check refuses. The check was right and the fixture was wrong. `testDataDir`
+now derives from `os.TempDir()` with forward slashes (a backslash in a TOML
+basic string is an escape), and the literal exists once, as `dataDirLine`,
+which the three tests that rewrite the line share. Same idiom
+`internal/web/web_test.go` and `cmd/smtprelayd/gencert_test.go` already used.
+
+**This is the class of defect Linux cannot show.** `go vet` for
+`GOOS=windows`, `staticcheck`, and `go test -c` for Windows were all clean --
+it is not a compile error but a runtime assertion that resolves differently on
+the other platform. Without the VM run it would have shipped green and taken
+out half the config suite on the first Windows CI.
+
+**Running the VM, for the next session.** The OEM stage fires only during
+Windows setup, so an interrupted install never runs it and the guest sits at
+an idle desktop looking exactly like "still installing" -- a screendump
+through the QEMU monitor settles that in a minute:
+`printf 'screendump /tmp/s.ppm\n' | nc -U /dev/shm/monitor.sock`. There is no
+guest agent, so the run is started by typing `\\host.lan\data\g.bat` into the
+Run dialog with HMP `sendkey`. Two rules learned the hard way: send the whole
+key sequence in **one** monitor session (one connection per key arrives out of
+order) and never leave a second typing job running (its trailing `ret` submits
+whatever is in the field). Confirm the field with a screendump before Enter,
+then `alt-r` for the "Open File - Security Warning" prompt.
+
+`g.bat` and `run.ps1` write to **different** files on the share: `g.bat` holds
+its own output file open for the whole PowerShell call, so both logging to one
+path costs the entire transcript to `because it is being used by another
+process`.
+
+**Previous session**: 2026-09-18 (forty-fourth session) — Two findings, both on
+`/api/v1/queue`, found by counting the display surfaces exhaustively instead
+of from memory.
+
+**`API.md` documented a "current backoff" field the endpoint never returned.**
+Verified against a running instance: the response carries `route`, `queued`,
+`deferred`, `delivered_total`, `bounced_total` and nothing else. There is no
+per-route backoff to report — the retry schedule belongs to a message, and
+`next_attempt_at` on `GET /api/v1/messages/{id}` is where it already is
+(checked: the field exists on `store.Attempt`). The section now lists the
+real fields and points at that one.
+
+**`/api/v1/queue` reported a narrower route view than `/metrics`.**
+`auth_failures` had been missing from the start and `recipients_refused_total`
+was added to the exposition without being added here. The second matters
+most: a message with a refused recipient is *delivered*, so it appears in no
+failure counter, and a caller polling the API instead of `/metrics` — which
+`API.md` presents as equally valid — could not see a dead address anywhere.
+`routeState` now mirrors `metrics.RouteStatus`, minus the cached-token state
+`/api/v1/health` already answers.
+
+**The surface checklist, counted in full** for the partial-delivery outcome,
+so the next behaviour change can start from it rather than rediscover it:
+`/metrics`, dashboard routes page, dashboard message detail, dashboard search
+list (the "Last response" column shows the refusals beside a "delivered"
+pill, which is the view an operator reaches first), history and
+`GET /messages/{id}`, `/api/v1/queue`, the docs. The bounce digest stays
+deliberately out: "could not be delivered" does not describe a delivered
+message.
+
+**Two packages opened for the first time, both clean.** `internal/canary`:
+`nextDaily` needs an ascending schedule and `DailyAt.Minutes()` sorts and
+de-duplicates with that stated as the reason; UTC over `service.timezone` is
+argued from daylight saving; `runDaily` re-derives its wait in steps because
+a Go timer rides the monotonic clock, which stops on suspend. `internal/
+certgen` and `gencert.go`: random 128-bit serial, backdated `NotBefore`,
+`IsCA: false`, and `RestrictFile` after `os.WriteFile` because WriteFile
+applies its mode only when it creates the file — the `-force` trap, already
+seen.
+
+**Assessment**: this is the first round in five where the previous session's
+change did not produce the main finding, and the two it did produce are
+small and on one surface. Further reviews of this shape look exhausted until
+the code changes substantially; the next worthwhile trigger is a real feature
+change, not the next turn.
+
+**Previous session**: 2026-09-18 (forty-third session) — Three findings. **Two of
+them were in the previous two sessions' own changes**, which is the result
+worth carrying forward: a new outcome was introduced without pulling along
+every place that displays outcomes.
+
+**Only the first refused recipient was recorded.** `attempt` wrote
+`extractSMTPError(partial.Rejected[0].Err)` into the attempt row while
+`smtprelayd_recipients_refused_total` counted them all. Measured with four
+recipients, three dead: the metric said 3, the detail page named one. An
+operator following that alert found less than the alert claimed, which is
+worse than having no metric. Now `describeRefusals` renders every refusal,
+bounded at 500 bytes and truncated on **whole entries** — half an address
+still looks like an address — stating how many were dropped so the count
+still agrees with the metric. `Rejection.String()` is now the single
+definition of the format, used by both the error text and the recorded copy.
+
+**The dashboard route page did not show the new counter**, while
+`metrics.RouteStatus`'s doc comment says it backs both that page and the text
+exposition "so the two never disagree about what a route's state is". Column
+added, `colspan` corrected, and the test asserts header and cell counts match
+so a later column cannot shift everything under the wrong heading.
+
+**The dashboard's paging offset was unbounded above.** `internal/api`
+clamped its cursor for this reason; `web.parseOffset` bounded below only, and
+`FindMessages` clamped `Limit` but not `Offset`. Measured on 20,000 messages:
+7.5ms at offset 0 against 31ms past the end — bounded by table size, not by
+the offset value, so roughly 4x per crafted request rather than unbounded.
+Reachable despite the loopback bind: `requireLoopbackHost` checks the Host
+header, and a page the operator visits can issue
+`http://127.0.0.1:8025/queue?offset=...` with a legitimate one. Fixed at the
+store, the choke point all three list queries pass through, rather than at
+the one caller that lacked it. New `clampPaging` also closes a latent one:
+`FindBounces` tested `Limit == 0`, so a negative limit passed through, and
+SQLite reads `LIMIT -1` as no limit at all.
+
+**Verified clean**: a partial delivery does not appear in the bounce view —
+the join is on `class IN ('permanent','expired')`, not on the SMTP code, so
+the 550 now recorded against a `delivered` attempt does not leak in; measured
+as 0 rows. `message.html` renders `SMTPResp` for every attempt regardless of
+class, so the doc claim that a refusal is visible on the detail page holds.
+`api/cursor.go` bounds offset and limit at both ends.
+
+**The in-tree doc-comment test earned its place again.** Inserting two new
+declarations above existing functions orphaned `extractSMTPError`'s and
+`FindMessages`' doc comments onto them; `TestDocCommentsNameTheirSymbol`
+named both, with file and line, before the suite finished.
+
+**Previous session**: 2026-09-18 (forty-second session) — Two findings, the first
+of them a regression the previous session introduced.
+
+**Partial delivery was invisible to monitoring.** Making a refused recipient
+stop bouncing the whole message also moved that outcome out of
+`smtprelayd_bounced_total` and the bounce digest, and into
+`smtprelayd_delivered_total` — where it is indistinguishable from a full
+success. `docs/guides/API.md` points monitoring at `/metrics`, and `/metrics`
+had nothing: no counter in `internal/metrics` knows about recipients at all.
+So the fix that stopped losing mail removed the only signal that an address
+had gone dead. New `smtprelayd_recipients_refused_total{route}`, seeded at
+zero like the other route counters, incremented by `len(partial.Rejected)`.
+Verified on a live endpoint, not only in `text()`. Documented in
+`CHECKMK.md` and cross-referenced from `CONFIGURATION.md` section 5.
+
+Deliberately counted for notification and canary traffic too: unlike
+delivered/bounced it is not a tally of relay volume that diagnostic mail
+would distort — it says an address is dead, which is worth hearing about
+whichever message found it.
+
+**`bucket.limit` was written twice and never read** (`internal/listener/
+match.go`). Removed, with a comment saying why no copy is kept: the limit
+comes from the configuration on every call and cannot change while the
+process runs. Note for anyone relying on the new staticcheck gate: `U1000`
+reports unused *functions*, but treats a field assigned in a composite
+literal as used, so it does not cover this class.
+
+**Two process notes worth keeping.** A mutation test caught a test of mine
+that asserted nothing: `RecipientsRefused` had an `if n <= 0 { return }`
+guard, and deleting it broke no test, because `+= 0` and an early return
+leave the counter identical. The guard defended nothing reachable either —
+the only caller is inside the branch where the slice is non-empty — so both
+the guard and the vacuous test were removed rather than the test being
+patched up. Second: `make build-all` produces the platform-suffixed binaries
+and does **not** refresh `bin/smtprelayd`, so a live check or
+`scripts/selftest-ci.sh` run after it can silently exercise a stale binary.
+The first live metrics check did exactly that and reported the metric
+missing; `go build -o ./bin/smtprelayd ./cmd/smtprelayd` first.
+
+**Previous session**: 2026-09-18 (forty-first session) — Two findings implemented
 from a review, and **one retracted after it turned out to be wrong**.
 
 **One refused recipient no longer bounces the message for everybody.**

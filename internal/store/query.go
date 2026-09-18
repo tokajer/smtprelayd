@@ -335,17 +335,57 @@ func (s *Store) FindMessageByID(queueID string) (*Message, error) {
 	return &m, nil
 }
 
+// maxOffset bounds how deep any list query may page. An offset past the end
+// of the result set costs SQLite a walk of the whole set before it can return
+// nothing, so leaving it unbounded turns one crafted request into a full scan.
+// Measured on 20,000 messages: 7.5ms at offset 0 against 31ms past the end.
+//
+// A million rows is far beyond what history.retention_days accumulates at this
+// relay's load, so no legitimate paging reaches it. Out of range resets to the
+// start, which is how an invalid cursor already behaves.
+//
+// It lives here rather than at the two callers because this is the choke point
+// both pass through. internal/api clamps its own cursor as well; the dashboard
+// had no clamp at all, which is the gap this closes.
+const maxOffset = 1_000_000
+
+// clampPaging applies the shared bounds every list query needs. Returning the
+// values rather than mutating a filter keeps it usable for the three filter
+// types, which share no interface.
+func clampPaging(limit, offset int) (int, int) {
+	switch {
+	case limit <= 0:
+		// Also catches a negative one, which SQLite reads as "no limit":
+		// FindBounces tested for == 0 and so passed that straight through.
+		limit = 100
+	case limit > 1000:
+		limit = 1000
+	}
+	if offset < 0 || offset > maxOffset {
+		offset = 0
+	}
+	return limit, offset
+}
+
+// splitPage separates the extra row a paged query fetches from the page
+// itself. Every query here asks for limit+1 so that "is there another page"
+// is answered by the same round trip -- but that row is bookkeeping, and
+// returning it left each caller to remember to cut it off. One of them
+// getting that wrong shows up as a page with one row too many, which is the
+// kind of thing nobody reports.
+func splitPage[T any](rows []T, limit int) ([]T, bool) {
+	if len(rows) > limit {
+		return rows[:limit], true
+	}
+	return rows, false
+}
+
 // FindMessages queries messages with filtering, sorting and pagination.
 // Status is derived from the most recent attempt, the same definition
 // CountQueue and deriveStatus use: no attempts is "queued", the latest
 // attempt's class otherwise.
-func (s *Store) FindMessages(filter MessageFilter) ([]*Message, error) {
-	if filter.Limit <= 0 {
-		filter.Limit = 100
-	}
-	if filter.Limit > 1000 {
-		filter.Limit = 1000
-	}
+func (s *Store) FindMessages(filter MessageFilter) ([]*Message, bool, error) {
+	filter.Limit, filter.Offset = clampPaging(filter.Limit, filter.Offset)
 
 	//#nosec G202 -- every fragment appended below is a string literal and every value is bound; journalCols and messageSortColumns are fixed, code-side lists
 	query := `
@@ -380,7 +420,7 @@ func (s *Store) FindMessages(filter MessageFilter) ([]*Message, error) {
 	default:
 		classes, ok := statusClasses[filter.Status]
 		if !ok {
-			return nil, fmt.Errorf("store: unknown status %q", filter.Status)
+			return nil, false, fmt.Errorf("store: unknown status %q", filter.Status)
 		}
 		placeholders := make([]string, len(classes))
 		for i, c := range classes {
@@ -403,7 +443,7 @@ func (s *Store) FindMessages(filter MessageFilter) ([]*Message, error) {
 
 	rows, err := s.db.Query(query, args...)
 	if err != nil {
-		return nil, fmt.Errorf("store: find messages: %w", err)
+		return nil, false, fmt.Errorf("store: find messages: %w", err)
 	}
 	defer rows.Close()
 
@@ -423,7 +463,7 @@ func (s *Store) FindMessages(filter MessageFilter) ([]*Message, error) {
 		}, j.dest()...)
 		dest = append(dest, &latestClass, &latestCode, &latestResp, &attemptCount)
 		if err := rows.Scan(dest...); err != nil {
-			return nil, fmt.Errorf("store: scan message: %w", err)
+			return nil, false, fmt.Errorf("store: scan message: %w", err)
 		}
 
 		j.apply(&m)
@@ -443,10 +483,11 @@ func (s *Store) FindMessages(filter MessageFilter) ([]*Message, error) {
 		messages = append(messages, &m)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("store: messages query error: %w", err)
+		return nil, false, fmt.Errorf("store: messages query error: %w", err)
 	}
 
-	return messages, nil
+	messages, hasMore := splitPage(messages, filter.Limit)
+	return messages, hasMore, nil
 }
 
 // classToStatus applies the same class-to-status mapping deriveStatus uses,
@@ -469,13 +510,8 @@ func classToStatus(class string, hasAttempt bool) string {
 }
 
 // FindBounces queries messages that failed (permanent or expired).
-func (s *Store) FindBounces(filter BounceFilter) ([]*Message, error) {
-	if filter.Limit == 0 {
-		filter.Limit = 100
-	}
-	if filter.Limit > 1000 {
-		filter.Limit = 1000
-	}
+func (s *Store) FindBounces(filter BounceFilter) ([]*Message, bool, error) {
+	filter.Limit, filter.Offset = clampPaging(filter.Limit, filter.Offset)
 
 	// Find queue IDs that have a final attempt with class='permanent' or 'expired'.
 	//#nosec G202 -- as in FindMessages: literal fragments, bound values, code-side column list
@@ -516,7 +552,7 @@ func (s *Store) FindBounces(filter BounceFilter) ([]*Message, error) {
 
 	rows, err := s.db.Query(query, args...)
 	if err != nil {
-		return nil, fmt.Errorf("store: find bounces: %w", err)
+		return nil, false, fmt.Errorf("store: find bounces: %w", err)
 	}
 	defer rows.Close()
 
@@ -536,7 +572,7 @@ func (s *Store) FindBounces(filter BounceFilter) ([]*Message, error) {
 		}, j.dest()...)
 		dest = append(dest, &lastCode, &lastResp, &attemptCount)
 		if err := rows.Scan(dest...); err != nil {
-			return nil, fmt.Errorf("store: scan bounce: %w", err)
+			return nil, false, fmt.Errorf("store: scan bounce: %w", err)
 		}
 
 		j.apply(&m)
@@ -556,10 +592,11 @@ func (s *Store) FindBounces(filter BounceFilter) ([]*Message, error) {
 		messages = append(messages, &m)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("store: bounces query error: %w", err)
+		return nil, false, fmt.Errorf("store: bounces query error: %w", err)
 	}
 
-	return messages, nil
+	messages, hasMore := splitPage(messages, filter.Limit)
+	return messages, hasMore, nil
 }
 
 // BounceSummary is the flattened view of a bounce the HTTP API returns
@@ -584,12 +621,7 @@ type BounceSummary struct {
 // FindBounceSummaries returns the API's flattened bounce view with
 // pagination. hasMore reports whether rows exist beyond filter.Limit.
 func (s *Store) FindBounceSummaries(filter BounceFilter) ([]BounceSummary, bool, error) {
-	if filter.Limit <= 0 {
-		filter.Limit = 100
-	}
-	if filter.Limit > 1000 {
-		filter.Limit = 1000
-	}
+	filter.Limit, filter.Offset = clampPaging(filter.Limit, filter.Offset)
 
 	query := `
 		SELECT m.queue_id, m.client, m.route, m.envelope_from, m.original_from, m.recipients, m.subject,
@@ -655,19 +687,8 @@ func (s *Store) FindBounceSummaries(filter BounceFilter) ([]BounceSummary, bool,
 		return nil, false, fmt.Errorf("store: bounce summaries query error: %w", err)
 	}
 
-	hasMore := len(out) > filter.Limit
-	if hasMore {
-		out = out[:filter.Limit]
-	}
+	out, hasMore := splitPage(out, filter.Limit)
 	return out, hasMore, nil
-}
-
-// FindBouncesSince returns bounces after the given time (for notification digest).
-func (s *Store) FindBouncesSince(since time.Time) ([]*Message, error) {
-	return s.FindBounces(BounceFilter{
-		Since: &since,
-		Limit: 10000,
-	})
 }
 
 // deriveStatus infers the message status from its attempts.

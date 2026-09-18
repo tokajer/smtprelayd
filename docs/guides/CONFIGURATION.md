@@ -19,6 +19,29 @@ recipe per OS.
 | Service account | `smtprelayd` system user | `NT SERVICE\smtprelayd` |
 | Restart | `sudo systemctl restart smtprelayd` | `Restart-Service smtprelayd` (elevated) |
 
+`service.data_dir` must be an **absolute** path, and moving it takes one extra
+step on each platform — the packaging hard-codes the location above in a place
+the configuration cannot reach:
+
+- **Linux**: the unit sets `ProtectSystem=strict` with
+  `ReadWritePaths=/var/lib/smtprelayd`, so everything else is read-only to the
+  service no matter what the filesystem permits. A relocated `data_dir` fails
+  at startup with `read-only file system`, which names the path but not the
+  reason. Add a drop-in for the new location:
+
+  ```sh
+  sudo systemctl edit smtprelayd
+  # [Service]
+  # ReadWritePaths=/srv/mail-spool
+  ```
+
+- **Windows**: the directory needs the service ACL, which the MSI applies only
+  to the location it created. Run `smtprelayd secure-datadir` from an elevated
+  prompt after moving it, and **check the path in the configuration first** —
+  that command writes an inheritable ACL to whatever `data_dir` names. It
+  refuses volume roots and system directories, but it cannot tell a typo
+  inside your own directory tree from a deliberate move.
+
 ## Validate and apply — do this after every recipe below
 
 There is no live reload: the configuration is read once at startup.
@@ -326,6 +349,11 @@ depends on whether the refusal is permanent:
 So one departed colleague on a distribution list does not stop the mail
 reaching the rest of it. Check the message's attempt detail when somebody
 reports a mail that only some recipients received.
+
+Because a partially delivered message counts as a delivery, it is
+`smtprelayd_recipients_refused_total{route}` on `/metrics` — not
+`bounced_total` — that tells you an address has gone dead. Alert on any
+increase in it; see `docs/guides/CHECKMK.md`.
 
 ## 6. Queue behaviour
 

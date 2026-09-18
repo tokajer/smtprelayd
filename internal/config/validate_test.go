@@ -13,9 +13,20 @@ import (
 	"testing"
 )
 
-const baseConfig = `
+// testDataDir has to be absolute on the platform the test runs on. A rooted
+// path like /tmp/x is not absolute on Windows: it resolves against whatever
+// the current drive happens to be, which is the ambiguity service.data_dir
+// now refuses. Forward slashes, because a backslash in a TOML basic string
+// starts an escape.
+var testDataDir = filepath.ToSlash(filepath.Join(os.TempDir(), "smtprelayd-test"))
+
+// dataDirLine is the line every test that rewrites the data directory has to
+// match, so the literal exists once.
+var dataDirLine = fmt.Sprintf("data_dir = %q", testDataDir)
+
+var baseConfig = `
 [service]
-data_dir = "/tmp/smtprelayd-test"
+` + dataDirLine + `
 
 [[listener]]
 name = "smtp"
@@ -535,9 +546,8 @@ func TestHostnameRejectsHeaderSplittingBytes(t *testing.T) {
 		"relay.example\nX-Injected: yes",
 		"relay.example\x00",
 	} {
-		body := strings.Replace(baseConfig,
-			`data_dir = "/tmp/smtprelayd-test"`,
-			`data_dir = "/tmp/smtprelayd-test"`+"\nhostname = "+fmt.Sprintf("%q", bad), 1)
+		body := strings.Replace(baseConfig, dataDirLine,
+			dataDirLine+"\nhostname = "+fmt.Sprintf("%q", bad), 1)
 		if _, err := Load(write(t, body)); err == nil {
 			t.Errorf("hostname %q was accepted", bad)
 		} else if !strings.Contains(err.Error(), "service.hostname") {
@@ -810,5 +820,38 @@ func TestShippedNamesRemainValid(t *testing.T) {
 		if !ValidName(n) {
 			t.Errorf("the shipped name %q is rejected by ValidName", n)
 		}
+	}
+}
+
+// A relative data_dir resolves against the process working directory, which
+// for a service is whatever the init system or the SCM happened to set. Such
+// a configuration was already broken; it just failed later and somewhere
+// else each time. On Windows it is worse than broken: "secure-datadir"
+// writes an inheritable, protected DACL to this path, so a value that
+// resolves somewhere unintended is destructive.
+func TestRelativeDataDirIsRejected(t *testing.T) {
+	for _, bad := range []string{"spool", "./spool", "../spool", "data/spool"} {
+		body := strings.Replace(baseConfig, dataDirLine,
+			`data_dir = `+fmt.Sprintf("%q", bad), 1)
+		_, err := Load(write(t, body))
+		if err == nil {
+			t.Errorf("relative data_dir %q was accepted", bad)
+			continue
+		}
+		if !strings.Contains(err.Error(), "service.data_dir") {
+			t.Errorf("data_dir %q rejected for the wrong reason: %v", bad, err)
+		}
+		// The message has to carry the answer, not only the complaint.
+		if !strings.Contains(err.Error(), "absolute path") {
+			t.Errorf("data_dir %q: error does not say what is wanted: %v", bad, err)
+		}
+	}
+}
+
+// And the packaged absolute path still loads, or the check is a service that
+// never starts.
+func TestAbsoluteDataDirIsAccepted(t *testing.T) {
+	if _, err := Load(write(t, baseConfig)); err != nil {
+		t.Fatalf("the base configuration stopped loading: %v", err)
 	}
 }

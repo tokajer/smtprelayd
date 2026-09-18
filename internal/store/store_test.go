@@ -222,7 +222,7 @@ func TestFindBounces(t *testing.T) {
 		_ = s.RecordAttempt(tc.id, 1, 550, "Error", tc.class, nil)
 	}
 
-	bounces, err := s.FindBounces(BounceFilter{Limit: 100})
+	bounces, _, err := s.FindBounces(BounceFilter{Limit: 100})
 	if err != nil {
 		t.Fatalf("FindBounces failed: %v", err)
 	}
@@ -463,7 +463,7 @@ func TestFindMessagesFiltersByDerivedStatus(t *testing.T) {
 		{"bounced", "Q-BOUNCED"},
 		{"removed", "Q-REMOVED"},
 	} {
-		got, err := s.FindMessages(MessageFilter{Status: tc.status, Limit: 100})
+		got, _, err := s.FindMessages(MessageFilter{Status: tc.status, Limit: 100})
 		if err != nil {
 			t.Fatalf("status %q: %v", tc.status, err)
 		}
@@ -472,7 +472,7 @@ func TestFindMessagesFiltersByDerivedStatus(t *testing.T) {
 		}
 	}
 
-	if _, err := s.FindMessages(MessageFilter{Status: "not-a-real-status", Limit: 100}); err == nil {
+	if _, _, err := s.FindMessages(MessageFilter{Status: "not-a-real-status", Limit: 100}); err == nil {
 		t.Fatal("an unknown status value was silently accepted")
 	}
 }
@@ -489,7 +489,7 @@ func TestFindMessagesSenderAndSubjectFilters(t *testing.T) {
 	r.EnvelopeFrom, r.Subject, r.TLSUsed = "erp@floor2.local", "Invoice", true
 	_ = s.RecordMessage(r)
 
-	got, err := s.FindMessages(MessageFilter{Sender: "printer@", Limit: 100})
+	got, _, err := s.FindMessages(MessageFilter{Sender: "printer@", Limit: 100})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -497,7 +497,7 @@ func TestFindMessagesSenderAndSubjectFilters(t *testing.T) {
 		t.Fatalf("sender filter: got %v", got)
 	}
 
-	got, err = s.FindMessages(MessageFilter{Subject: "Scan", Limit: 100})
+	got, _, err = s.FindMessages(MessageFilter{Subject: "Scan", Limit: 100})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -519,7 +519,7 @@ func TestFindMessagesActiveStatusIsQueuedOrDeferred(t *testing.T) {
 	_ = s.RecordMessage(testRecord("ACTIVE-REMOVED", now, expires))
 	_ = s.RecordRemoval("ACTIVE-REMOVED")
 
-	got, err := s.FindMessages(MessageFilter{Status: "active", Limit: 100})
+	got, _, err := s.FindMessages(MessageFilter{Status: "active", Limit: 100})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -544,7 +544,7 @@ func TestFindMessagesStatusStableAcrossRapidAttempts(t *testing.T) {
 	_ = s.RecordAttempt("RAPID-ATTEMPTS", 1, 421, "try later", "temporary", nil)
 	_ = s.RecordAttempt("RAPID-ATTEMPTS", 2, 250, "ok", "delivered", nil)
 
-	got, err := s.FindMessages(MessageFilter{Limit: 100})
+	got, _, err := s.FindMessages(MessageFilter{Limit: 100})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -580,7 +580,7 @@ func TestFindMessagesSortIsAllowlisted(t *testing.T) {
 	r.Client = "client-a"
 	_ = s.RecordMessage(r)
 
-	got, err := s.FindMessages(MessageFilter{Sort: "client", Order: "asc", Limit: 100})
+	got, _, err := s.FindMessages(MessageFilter{Sort: "client", Order: "asc", Limit: 100})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -590,7 +590,7 @@ func TestFindMessagesSortIsAllowlisted(t *testing.T) {
 
 	// An unrecognised sort column must not reach the query text; it silently
 	// falls back to the default (received_at) rather than being rejected.
-	got, err = s.FindMessages(MessageFilter{Sort: "queue_id; DROP TABLE messages;--", Limit: 100})
+	got, _, err = s.FindMessages(MessageFilter{Sort: "queue_id; DROP TABLE messages;--", Limit: 100})
 	if err != nil {
 		t.Fatalf("unknown sort column errored instead of falling back: %v", err)
 	}
@@ -610,7 +610,7 @@ func TestFindMessagesSortByStatus(t *testing.T) {
 	_ = s.RecordMessage(testRecord("SORT-DEFERRED", now, expires))
 	_ = s.RecordAttempt("SORT-DEFERRED", 1, 421, "later", "temporary", nil)
 
-	got, err := s.FindMessages(MessageFilter{Sort: "status", Order: "asc", Limit: 100})
+	got, _, err := s.FindMessages(MessageFilter{Sort: "status", Order: "asc", Limit: 100})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -706,7 +706,7 @@ func TestFindMessagesRecipientFilterIsParameterized(t *testing.T) {
 	now := time.Now()
 	_ = s.RecordMessage(testRecord("SQLI-TEST", now, now.Add(96*time.Hour)))
 
-	results, err := s.FindMessages(MessageFilter{Recipient: "' OR 1=1 --", Limit: 100})
+	results, _, err := s.FindMessages(MessageFilter{Recipient: "' OR 1=1 --", Limit: 100})
 	if err != nil {
 		t.Fatalf("FindMessages with SQL-shaped filter errored instead of treating it as a literal: %v", err)
 	}
@@ -839,7 +839,7 @@ func TestFindBouncesFiltersByClass(t *testing.T) {
 		"expired":   1,
 		"":          3, // no filter: every permanent and expired message
 	} {
-		got, err := s.FindBounces(BounceFilter{Class: class, Limit: 100})
+		got, _, err := s.FindBounces(BounceFilter{Class: class, Limit: 100})
 		if err != nil {
 			t.Fatalf("class=%q returned an error instead of rows: %v", class, err)
 		}
@@ -850,7 +850,7 @@ func TestFindBouncesFiltersByClass(t *testing.T) {
 
 	// A message whose final attempt is not a failure must not appear under any
 	// class, including its own.
-	got, err := s.FindBounces(BounceFilter{Class: "delivered", Limit: 100})
+	got, _, err := s.FindBounces(BounceFilter{Class: "delivered", Limit: 100})
 	if err != nil {
 		t.Fatalf("class=delivered: %v", err)
 	}
@@ -868,14 +868,14 @@ func TestFindBouncesClassIsTheFinalAttempt(t *testing.T) {
 	_ = s.RecordAttempt("RETRIED", 1, 451, "try later", "temporary", nil)
 	_ = s.RecordAttempt("RETRIED", 2, 550, "no such user", "permanent", nil)
 
-	got, err := s.FindBounces(BounceFilter{Class: "permanent", Limit: 100})
+	got, _, err := s.FindBounces(BounceFilter{Class: "permanent", Limit: 100})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(got) != 1 {
 		t.Fatalf("class=permanent returned %d rows, want 1", len(got))
 	}
-	if got, err := s.FindBounces(BounceFilter{Class: "temporary", Limit: 100}); err != nil {
+	if got, _, err := s.FindBounces(BounceFilter{Class: "temporary", Limit: 100}); err != nil {
 		t.Fatal(err)
 	} else if len(got) != 0 {
 		t.Errorf("an earlier temporary attempt matched the class filter: %d rows", len(got))
@@ -958,7 +958,7 @@ func TestEveryFilterFieldBinds(t *testing.T) {
 			"since":     {Since: &afterEarly},
 			"until":     {Until: &beforeLate},
 		} {
-			got, err := s.FindMessages(f)
+			got, _, err := s.FindMessages(f)
 			if err != nil {
 				t.Fatalf("%s: %v", name, err)
 			}
@@ -978,7 +978,7 @@ func TestEveryFilterFieldBinds(t *testing.T) {
 			"since":     {Since: &afterEarly},
 			"until":     {Until: &beforeLate},
 		} {
-			got, err := s.FindBounces(f)
+			got, _, err := s.FindBounces(f)
 			if err != nil {
 				t.Fatalf("%s: %v", name, err)
 			}

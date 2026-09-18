@@ -174,7 +174,14 @@ attacker-influenced values and writes them into a message.
   directory carries an explicit ACL granting only that account and
   administrators.
 - Spool files 0600, directories 0700. Permissions are verified at startup and
-  a mismatch is a startup failure.
+  a mismatch is a startup failure. On Windows that check reads the data
+  directory's DACL itself, not only its shape: it is explicit, protected
+  against inheritance from `%ProgramData%`, and **every allow entry in it must
+  name SYSTEM, `BUILTIN\Administrators` or the service account** — one naming
+  anything else refuses the start and names the account. That is what catches
+  drift from a group policy, a restore that flattens ACLs, or an `icacls`
+  run, which is the realistic way this ends up wrong; an attacker able to
+  rewrite the ACL is already an administrator.
 - **`limits.spool_max_gb` bounds the whole spool, `spool/failed` included.**
   Counting only the live queue meant that a permanently failing message freed
   its quota the moment it was moved aside, while still occupying the disk —

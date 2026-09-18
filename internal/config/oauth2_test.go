@@ -8,9 +8,9 @@ import (
 	"testing"
 )
 
-const oauthConfig = `
+var oauthConfig = `
 [service]
-data_dir = "/tmp/smtprelayd-test"
+` + dataDirLine + `
 
 [[listener]]
 name = "smtp"

@@ -322,6 +322,15 @@ func TestHoldDoesNotConsumeTheRetryBudget(t *testing.T) {
 	if want := time.Now().Add(5 * time.Minute); meta.NextAttempt.Sub(want) > time.Minute || want.Sub(meta.NextAttempt) > time.Minute {
 		t.Errorf("next attempt at %v, want about %v", meta.NextAttempt, want)
 	}
+	// The deferral has to reach the spool, not only the caller's copy: hold
+	// no longer writes metadata, so the queue is the only place the new
+	// attempt time exists.
+	if _, ok := sp.Claim(time.Now()); ok {
+		t.Error("a held message was handed straight back out")
+	}
+	if _, ok := sp.Claim(time.Now().Add(6 * time.Minute)); !ok {
+		t.Error("a held message never became due again")
+	}
 }
 
 // The deferral is capped at the message's own expiry: pushing it past that

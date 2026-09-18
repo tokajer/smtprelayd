@@ -22,6 +22,32 @@ const dataDirServiceAccount = `NT SERVICE\smtprelayd`
 // the effective mask would differ between the directory and its contents.
 const fileAllAccess windows.ACCESS_MASK = 0x1F01FF
 
+// dataDirTrustees returns the only three accounts the data directory grants
+// to. SecureDataDir writes ACEs for exactly these and CheckDataDirACL refuses
+// any allow ACE naming anything else, so both directions read one list: a
+// trustee added to one side and not the other would either be written and
+// then rejected at the next start, or accepted without ever being written.
+//
+// Well-known SIDs are constructed, not looked up by name, because the names
+// are localised: "Administrators" does not resolve on a German or French
+// install. The service account has no well-known SID and must be looked up,
+// which is also why it is the one that fails before the service exists.
+func dataDirTrustees() (system, admins, service *windows.SID, err error) {
+	admins, err = windows.CreateWellKnownSid(windows.WinBuiltinAdministratorsSid)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("BUILTIN\\Administrators: %w", err)
+	}
+	system, err = windows.CreateWellKnownSid(windows.WinLocalSystemSid)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("NT AUTHORITY\\SYSTEM: %w", err)
+	}
+	service, _, _, err = windows.LookupSID("", dataDirServiceAccount)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("%s: %w", dataDirServiceAccount, err)
+	}
+	return system, admins, service, nil
+}
+
 // SecureDataDir writes the data directory DACL that CheckDataDirACL verifies:
 // full control for SYSTEM, BUILTIN\Administrators and the service account,
 // inheritable to files and subdirectories, and protected against inheritance
@@ -35,20 +61,9 @@ func SecureDataDir(path string) error {
 		return err
 	}
 
-	admins, err := windows.CreateWellKnownSid(windows.WinBuiltinAdministratorsSid)
+	system, admins, service, err := dataDirTrustees()
 	if err != nil {
-		return fmt.Errorf("BUILTIN\\Administrators: %w", err)
-	}
-	system, err := windows.CreateWellKnownSid(windows.WinLocalSystemSid)
-	if err != nil {
-		return fmt.Errorf("NT AUTHORITY\\SYSTEM: %w", err)
-	}
-	// Well-known SIDs are constructed, not looked up by name, because the
-	// names are localised: "Administrators" does not resolve on a German or
-	// French install.
-	service, _, _, err := windows.LookupSID("", dataDirServiceAccount)
-	if err != nil {
-		return fmt.Errorf("%s: %w", dataDirServiceAccount, err)
+		return err
 	}
 
 	entries := make([]windows.EXPLICIT_ACCESS, 0, 3)

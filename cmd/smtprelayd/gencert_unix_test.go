@@ -8,7 +8,10 @@ package main
 import (
 	"io"
 	"os"
+	"os/user"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"syscall"
 	"testing"
 )
@@ -53,5 +56,34 @@ func TestGenCertGivesTheKeyTheConfigurationsGroup(t *testing.T) {
 		if mode := fi.Mode().Perm(); mode != tc.wantMode {
 			t.Errorf("%s has mode %04o, want %04o", tc.path, mode, tc.wantMode)
 		}
+	}
+}
+
+// The key's group comes from whatever owns the configuration file. On a
+// packaged install that is the service's own group and all is well; on a
+// hand-made one it can be a group every local account belongs to, and the
+// command used to report that outcome in words indistinguishable from the
+// correct one. Naming the group is the only thing that tells the two apart.
+func TestGenCertNamesTheGroupItWidenedTheKeyTo(t *testing.T) {
+	certDir := filepath.Join(t.TempDir(), "tls")
+	path := writeConfig(t, tlsConfigBody(t, certDir))
+
+	var out strings.Builder
+	if err := genCert(path, false, 0, &out); err != nil {
+		t.Fatal(err)
+	}
+
+	st, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gid := st.Sys().(*syscall.Stat_t).Gid
+	want := strconv.FormatUint(uint64(gid), 10)
+	if g, err := user.LookupGroupId(want); err == nil && g.Name != "" {
+		want = g.Name
+	}
+
+	if !strings.Contains(out.String(), "readable by group "+want) {
+		t.Errorf("the output does not name the group the key was widened to (%s):\n%s", want, out.String())
 	}
 }

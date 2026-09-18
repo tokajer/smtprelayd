@@ -57,6 +57,16 @@ func (s *smtpConn) send(format string, a ...any) {
 	}
 }
 
+// sendMayFail writes a line the server may already have closed on. Its two
+// callers are testing exactly that: the server refuses and stops reading
+// without waiting for the rest of the transfer, so the write losing a race
+// with the close is the behaviour under test, not a failure. The assertion is
+// what comes back, not whether the bytes went out.
+func (s *smtpConn) sendMayFail(format string, a ...any) {
+	s.t.Helper()
+	_, _ = fmt.Fprintf(s.c, format+"\r\n", a...)
+}
+
 // expect asserts the enhanced status code the next reply carries.
 func (s *smtpConn) expect(what, code string) string {
 	s.t.Helper()
@@ -285,9 +295,11 @@ func TestHopLimitIsEnforced(t *testing.T) {
 	s.send("Received: from a by b; Mon, 1 Jan 2026 00:00:00 +0000")
 	s.send("Received: from c by d; Mon, 1 Jan 2026 00:00:01 +0000")
 	s.send("Subject: looping")
+	// The blank line ends the header block, which is where scanHeaders
+	// returns and the hop count is judged: the refusal comes before the body
+	// is ever asked for. Sending one anyway raced the server's close and made
+	// this test fail under load roughly once in fifty runs.
 	s.send("")
-	s.send("body")
-	s.send(".")
 	if got := s.expect("a message at the hop limit", "554"); !strings.Contains(got, "5.4.6") {
 		t.Errorf("refusal was %q, want the 5.4.6 hop status", got)
 	}
@@ -307,10 +319,18 @@ func TestSmuggledEndOfDataClosesTheSession(t *testing.T) {
 	if _, err := fmt.Fprint(s.c, "body\r\n.\n"); err != nil {
 		t.Fatal(err)
 	}
-	s.send("MAIL FROM:<smuggled@example.test>")
-	s.send("RCPT TO:<victim@example.test>")
 
+	// The carrier's reply is read first. The session closes right after it,
+	// and a close with unread client data in the socket sends an RST that can
+	// discard the reply still sitting in this side's buffer -- which made the
+	// assertion below fail for a reason that has nothing to do with
+	// smuggling. Reading first costs nothing: the property under test is that
+	// the session does not go back to reading commands, and the two lines
+	// below still prove it.
 	s.expect("the carrier message", "250")
+
+	s.sendMayFail("MAIL FROM:<smuggled@example.test>")
+	s.sendMayFail("RCPT TO:<victim@example.test>")
 
 	_ = s.c.SetReadDeadline(time.Now().Add(3 * time.Second))
 	line, err := s.br.ReadString('\n')

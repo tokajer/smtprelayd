@@ -333,6 +333,9 @@ with loop prevention, volume capping, and no state-changing re-delivery.
 **Files modified**:
 - `internal/bounce/notifier.go` — Notifier struct, digest batching, volume cap
 - `internal/store/query.go` — add `FindBouncesSince` for digest source
+  (superseded: the notifier was built around `RecordFail` and its own
+  pending set instead, so `FindBouncesSince` never had a caller and was
+  removed on 2026-09-18. Nothing here needs it back.)
 - `internal/delivery/delivery.go` — call `notifier.RecordFail()` when
   `spool.Fail()` is called
 - `cmd/smtprelayd/main.go` (`serve()`) — create notifier, start digest

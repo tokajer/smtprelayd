@@ -168,13 +168,13 @@ func (s *Server) handleQueueBulk(w http.ResponseWriter, r *http.Request, action 
 // activeQueueIDs lists the queue IDs the queue view currently shows, capped
 // at bulkMax with a flag saying the cap was hit.
 func (s *Server) activeQueueIDs() ([]spool.ID, bool, error) {
-	msgs, err := s.store.FindMessages(store.MessageFilter{Status: "active", Limit: bulkMax})
+	// hasMore is the cap signal: the store fetches one row past the limit to
+	// answer it, which is exactly "there were more than bulkMax active
+	// messages" -- and the caller has to say so, because a bulk action that
+	// silently covered part of the queue is the wrong kind of surprise.
+	msgs, truncated, err := s.store.FindMessages(store.MessageFilter{Status: "active", Limit: bulkMax})
 	if err != nil {
 		return nil, false, err
-	}
-	truncated := len(msgs) > bulkMax
-	if truncated {
-		msgs = msgs[:bulkMax]
 	}
 	ids := make([]spool.ID, 0, len(msgs))
 	for _, m := range msgs {
