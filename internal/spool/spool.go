@@ -483,26 +483,62 @@ func (s *Spool) Remove(id ID) error {
 	delete(s.leased, id)
 	s.mu.Unlock()
 
-	if err := os.Remove(s.metaPath(id)); err != nil && !os.IsNotExist(err) {
-		return err
-	}
-	if err := removeRetry(s.dataPath(id)); err != nil && !os.IsNotExist(err) {
+	// Body first, metadata second, and both through removeRetry. The order is
+	// what makes a partial failure safe rather than catastrophic: recover()
+	// drops metadata whose body is gone, so a leftover .json is inert, while a
+	// leftover .json *and* .eml is re-indexed at the next start and the
+	// message goes out a second time. The metadata is unlinked even when the
+	// body could not be, for that same reason -- a stranded body costs disk
+	// until the next start, a stranded pair costs a duplicate delivery.
+	dataErr := removeRetry(s.dataPath(id))
+	metaErr := removeRetry(s.metaPath(id))
+	if err := firstRealError(dataErr, metaErr); err != nil {
 		return err
 	}
 	return syncDir(s.queue)
+}
+
+// firstRealError returns the first error that is not simply a missing file.
+// Remove and Discard are both reached for messages whose files may already be
+// half gone, which is not a failure of the removal.
+func firstRealError(errs ...error) error {
+	for _, err := range errs {
+		if err != nil && !os.IsNotExist(err) {
+			return err
+		}
+	}
+	return nil
 }
 
 // removeRetry unlinks a path, retrying briefly. On Windows an on-access
 // scanner or a backup agent can hold a handle for a few milliseconds after
 // the file was last written, which surfaces as a sharing violation rather
 // than as a missing file. Retrying costs nothing on Unix, where the first
-// attempt succeeds. A body left behind after the metadata was removed is not
-// redelivered -- Open() discards bodies without metadata at startup -- so
-// this only avoids the disk staying occupied until the next restart.
+// attempt succeeds.
+//
+// It matters most on the metadata file. A body left behind is inert, because
+// recover() discards bodies without metadata at startup, so losing that race
+// only occupies disk until the next restart -- but metadata left behind
+// beside its body is re-indexed at the next start and delivered again. The
+// callers unlink the body first for that reason.
 func removeRetry(path string) error {
 	var err error
 	for i := 0; i < 5; i++ {
 		if err = os.Remove(path); err == nil || os.IsNotExist(err) {
+			return err
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	return err
+}
+
+// renameRetry moves a path, retrying briefly, for the reason given on
+// removeRetry: on Windows a handle held by a scanner or a backup agent makes
+// this fail with a sharing violation rather than with a missing file.
+func renameRetry(src, dst string) error {
+	var err error
+	for i := 0; i < 5; i++ {
+		if err = os.Rename(src, dst); err == nil || os.IsNotExist(err) {
 			return err
 		}
 		time.Sleep(20 * time.Millisecond)
@@ -523,13 +559,17 @@ func (s *Spool) Fail(m *Meta, reason string) error {
 	s.mu.Unlock()
 
 	var onDisk int64
+	// Through renameRetry for the reason removeRetry exists: a rename that
+	// loses the race against a scanner's handle leaves the pair sitting in
+	// the queue directory, where the next start re-indexes it and a message
+	// that failed permanently is attempted all over again.
 	for _, ext := range []string{".json", ".eml"} {
 		src := filepath.Join(s.queue, m.ID.String()+ext)
 		dst := filepath.Join(s.failed, m.ID.String()+ext)
 		if fi, err := os.Stat(src); err == nil {
 			onDisk += fi.Size()
 		}
-		if err := os.Rename(src, dst); err != nil && !os.IsNotExist(err) {
+		if err := renameRetry(src, dst); err != nil && !os.IsNotExist(err) {
 			return err
 		}
 	}
@@ -745,14 +785,25 @@ func (s *Spool) Discard(id ID) error {
 	s.mu.Unlock()
 
 	removed := false
+	// Body before metadata, through removeRetry, for the reason Remove gives:
+	// a stranded pair in the queue directory is re-indexed at the next start,
+	// so a message the operator deleted would be delivered after a restart.
+	// Both files are attempted before any error is reported, so one that
+	// cannot be unlinked does not leave the other in place.
+	var failure error
 	for _, dir := range []string{s.queue, s.failed} {
-		for _, ext := range []string{".json", ".eml"} {
-			if err := os.Remove(filepath.Join(dir, id.String()+ext)); err == nil {
+		for _, ext := range []string{".eml", ".json"} {
+			err := removeRetry(filepath.Join(dir, id.String()+ext))
+			switch {
+			case err == nil:
 				removed = true
-			} else if !os.IsNotExist(err) {
-				return err
+			case !os.IsNotExist(err) && failure == nil:
+				failure = err
 			}
 		}
+	}
+	if failure != nil {
+		return failure
 	}
 	if !removed {
 		return ErrNotFound

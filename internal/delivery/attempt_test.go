@@ -31,15 +31,30 @@ import (
 type fakeSmarthost struct {
 	ln        net.Listener
 	dataReply string
+	// dropAfterData hangs up once the body has been answered, without
+	// waiting for QUIT. Exchange does this, and so does any connection that
+	// dies in the gap between the 250 and the goodbye.
+	dropAfterData bool
 }
 
 func startFakeSmarthost(t *testing.T, dataReply string) *fakeSmarthost {
+	t.Helper()
+	return startSmarthost(t, &fakeSmarthost{dataReply: dataReply})
+}
+
+// startDroppingSmarthost accepts the message and then vanishes.
+func startDroppingSmarthost(t *testing.T) *fakeSmarthost {
+	t.Helper()
+	return startSmarthost(t, &fakeSmarthost{dataReply: "250 2.0.0 accepted", dropAfterData: true})
+}
+
+func startSmarthost(t *testing.T, f *fakeSmarthost) *fakeSmarthost {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
-	f := &fakeSmarthost{ln: ln, dataReply: dataReply}
+	f.ln = ln
 	t.Cleanup(func() { _ = ln.Close() })
 	go func() {
 		for {
@@ -85,6 +100,9 @@ func (f *fakeSmarthost) handle(conn net.Conn) {
 				}
 			}
 			say(f.dataReply)
+			if f.dropAfterData {
+				return
+			}
 		case strings.HasPrefix(cmd, "QUIT"):
 			say("221 2.0.0 bye")
 			return

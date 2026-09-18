@@ -31,6 +31,18 @@ func TestLogPathEmptyFileMeansNoFileLogging(t *testing.T) {
 	}
 }
 
+// absoluteOutsideDataDir spells an absolute path the way the running platform
+// defines one. A leading separator is absolute on Unix but not on Windows,
+// where filepath.IsAbs wants a volume, so the Unix spelling would exercise a
+// different branch there -- and did, silently, until the suite was first run
+// on Windows.
+func absoluteOutsideDataDir() string {
+	if runtime.GOOS == "windows" {
+		return `C:\etc\cron.d\smtprelayd`
+	}
+	return filepath.Join(string(filepath.Separator), "etc", "cron.d", "smtprelayd")
+}
+
 // The traversal cases are the point of the function: a privileged daemon must
 // not be steerable into writing outside its data directory by a configuration
 // value.
@@ -44,7 +56,7 @@ func TestLogPathRejectsEscapes(t *testing.T) {
 		{"parent traversal", "../../../etc/cron.d/smtprelayd"},
 		{"traversal after a legitimate prefix", "logs/../../../etc/passwd"},
 		{"bare parent", ".."},
-		{"absolute path", filepath.Join(string(filepath.Separator), "etc", "cron.d", "smtprelayd")},
+		{"absolute path", absoluteOutsideDataDir()},
 		{"NUL byte", "smtprelayd.log\x00.txt"},
 		// A configuration authored on Windows and deployed on Linux: the
 		// backslash is an ordinary character there, so Clean would keep this

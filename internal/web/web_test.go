@@ -33,7 +33,7 @@ func testConfig(t *testing.T, extra string) *config.Config {
 	t.Helper()
 	body := `
 [service]
-data_dir = "` + t.TempDir() + `"
+data_dir = "` + filepath.ToSlash(t.TempDir()) + `"
 
 [[listener]]
 name = "smtp"

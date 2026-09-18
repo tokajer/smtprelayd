@@ -543,6 +543,15 @@ envelope, client, route, listener, remote address, HELO, Message-ID,
 Content-Type, size, header count, and one row per delivery attempt with its
 verbatim SMTP response. The message body itself is never retained.
 
+`retention_days` governs message history only. Each expired message takes its
+delivery attempts with it, and **the audit log is deliberately exempt**: the
+record of who ran a requeue or a delete, and from where, is meant to outlive
+the message it was about, so it is never pruned. That table therefore grows
+for the life of the service. It is small — one row per `admin` action, not
+per message — but it is unbounded, so an installation that automates admin
+actions against the API should expect it to be the part of `history.db` that
+keeps growing after everything else has reached a steady size.
+
 `service.timezone` controls how timestamps are *displayed* — the JSON log
 lines' `time` field and every timestamp on the dashboard (queue, message
 detail, search, bounces, route list). The history database still stores in

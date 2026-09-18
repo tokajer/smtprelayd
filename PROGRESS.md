@@ -19,7 +19,146 @@ fix below): the MSI installs without error, exactly one service registration
 remains (no duplicate), the on-disk binary is replaced, and the service keeps
 running afterwards. Uninstall remains unverified. Log rotation and Windows ACL
 verification at startup are complete.
-**Last session**: 2026-09-17 (thirty-eighth session) — Four findings from a
+**Last session**: 2026-09-18 (fortieth session) — Five findings from a review
+aimed, per the previous session's note, at the lowest-coverage code with no
+mutation history. One of them disabled a security control.
+
+**The open-relay self-test passed silently without having tested anything.**
+`probe` never negotiated STARTTLS, and treated every `code >= 400` at MAIL
+FROM as "rejected already, which is the desired outcome". But `doMail`
+answers **530** when `require_tls` is set and the session is not encrypted —
+before any relay policy is consulted. Measured with an identical
+configuration carrying a client with `cidr = 0.0.0.0/0`, the open relay
+`acceptedVerdict` has a dedicated branch for:
+
+| listener | result |
+| --- | --- |
+| without `require_tls` | correctly reported as an open relay |
+| **with** `require_tls` | `err=<nil> notes=[]` — a clean pass |
+
+So hardening a listener turned its open-relay check into a no-op. A rate
+limit (451) did the same. `probe` now negotiates STARTTLS on a `starttls`
+listener (refusing to hand a pre-handshake buffer to the TLS session, which
+is the classic STARTTLS injection bug), and new `refusalVerdict` separates a
+relay denial from a refusal that answered a different question — 530 and any
+4xx become a **note**, not a silent pass. `main` no longer prints an
+unqualified "passed" when notes exist, which `selftest.Run`'s own contract
+had always demanded and the caller had never honoured.
+
+**`scripts/selftest-ci.sh` could never have caught that**, because its client
+CIDR deliberately excludes loopback, so the probe takes the 550
+unmatched-source path — which `doMail` answers *before* the TLS gate. It now
+runs two scenarios: the existing gate, plus a `require_tls` listener with
+loopback **allowlisted**, where the note is the assertion. Verified against
+the real binary both ways: on the fixed code both scenarios pass; on the
+unfixed code scenario 1 still passes and scenario 2 fails with the
+silent-pass message.
+
+**`SECURITY.md` described a cookie hardening that does not exist.** It
+claimed cookies are `HttpOnly`, `SameSite=Strict` and `Secure` over TLS.
+There is **no cookie anywhere in the tree** — no `http.Cookie`, no
+`SetCookie`, nothing in the templates or the JavaScript; the dashboard has no
+session by design, and the CSRF HMAC's per-process key plays that role. The
+"over TLS" half was doubly unreachable: `web.Serve` only ever calls
+`ListenAndServe`, and `validate` refuses a non-loopback `web.address`
+outright. Both are correct; only the document was wrong. It now describes the
+CSRF HMAC, the absence of a session, and loopback as the trust boundary.
+
+**`retentionCleanup` claimed a cascade `audit` does not have.** `attempts`
+carries `ON DELETE CASCADE`; the `audit` table has no foreign key at all.
+Measured: `messages=0 attempts=0 audit=1`. Keeping audit rows is right — an
+audit log that prunes itself with the evidence is not one — so the code is
+unchanged and the comment and `CONFIGURATION.md` section 9 now say so,
+including that the table is therefore unbounded.
+
+**`authms365.Token` dated two values from before its own HTTP request.**
+`now` was captured before a `fetch` that can take `requestTimeout` (15s), and
+then used for `retryAfter` and `issuedAt` — so a 30s fail cooldown became 15s
+after a timeout, in exactly the outage it exists to throttle.
+
+**Mutation-verified clean this session**, so nobody re-derives it: `rewrite`
+CRLF/control-character refusal, `rewrite` duplicate-`From` refusal, `router`
+default-deny, `metrics` label escaping, API scope enforcement, failed-auth
+backoff (2 tests). `bounce.Notifier` resets its hourly window correctly and
+carries capped entries forward. `checkSecretFile` exists on **both**
+platforms — checked as a suspected Unix blind spot; it is not one.
+
+**Previous session**: 2026-09-18 (thirty-ninth session) — Five findings from an
+architecture review that went into the delivery path, plus a real Windows test
+run. Unlike the last several reviews, three of these lose or duplicate mail.
+Every fix carries a test that was checked against the unfixed code first.
+
+**A failing QUIT duplicated the message.** `Deliver` ended on
+`return c.Quit()`. A successful `w.Close()` means the smarthost answered the
+body with 250 and owns the message; reporting a later QUIT failure left the
+copy queued and the next attempt sent it again. Proved against a server that
+hangs up after `250 Ok: queued as ...`: `Deliver` returned `EOF`, which
+`attempt` classifies as deferred. Reachable three ways — Exchange not waiting
+for QUIT, the delivery deadline expiring in that gap, and the shutdown hook
+expiring the connection deadline, which happens on *every* service stop. New
+`smarthost.QuitError`; `attempt` logs it and treats the message as delivered.
+Note this is the outbound mirror of the rule `commitCopies` already applied
+inbound, where partial copies are withdrawn so a client retry cannot duplicate
+them.
+
+**One saturated route stalled every other route.** `Claim` returns the
+globally oldest due message whatever route it belongs to, and the dispatcher
+is a single goroutine that blocked sending to the route's concurrency budget.
+Measured with two routes: a healthy route's message went out in **100 ms**
+beside a working neighbour and was still queued after **8 s** beside a hanging
+one — bounded only by `limits.delivery_timeout_sec`, 600 s shipped. So an M365
+outage stopped the internal relay path too. Now a non-blocking send falling
+through to `hold`, which is exactly what the rate limiter beside it already
+did; `hold`'s comment was generalised for its second caller.
+
+**The removal retry sat on the wrong file.** `removeRetry` exists for the
+Windows case where a scanner holds a handle, and its own comment says a
+stranded body is inert because `recover()` drops metadata-less bodies. That
+makes the *metadata* the dangerous file — and it was the one without the
+retry, in all three paths. `Remove` (after delivery) and `Discard` (operator
+delete) now unlink the body first and the metadata unconditionally, both
+through `removeRetry`; `Fail` uses a new `renameRetry`. Before this, a lost
+race meant a delivered message was re-indexed at the next start and **sent
+twice**, and a message the operator deleted **went out anyway**.
+
+**The connect timeout was the whole delivery budget.** `net.Dialer{Timeout:
+timeout}` with `timeout` = `delivery_timeout_sec`, so a host that drops
+packets — the usual result of a changed egress rule — spent all 600 s in the
+dial, per attempt, having sent nothing. Now `min(connectTimeout, timeout)`
+with `connectTimeout = 30s`; `conn.SetDeadline` still holds the full budget
+over the rest of the session.
+
+**`authFor` had no test at all**, and deleting `Deliver`'s refusal to
+authenticate over a cleartext connection left the suite green. Not a hole —
+`routeTLS` rejects the combination at load time and all three mechanisms
+refuse `!s.TLS` from inside — but that guard exists precisely for a Route that
+did not come through the loader, and nothing held it. Now a table test over
+every mechanism plus a `Deliver` test asserting no AUTH command reaches the
+wire.
+
+**`store.Open`'s ping timeout raised from 5 s to 30 s.** It is a wall-clock
+deadline on the shipped startup path, on the first use of the database — file
+creation, `-wal` replay, first lock. Five seconds was not enough on a loaded
+Windows VM, and the consequence in the field is a service that does not start,
+reporting "context deadline exceeded" rather than anything about a slow disk.
+
+**Mutation-verified clean, so nobody re-derives it**: CSRF HMAC (2 tests
+killed it), `ErrBusy` on a leased message (1), log redaction (2). `xoauth2.go`,
+`pinVerifier`, `commitCopies` and `csrfSigner` were read closely and are
+correct — note `csrfSigner` feeds the attacker-supplied `exp` into the MAC, so
+a forged expiry does not carry.
+
+**Windows**: the four fixes from the previous session are confirmed on a real
+Windows Server 2022 VM (`dockurr/windows`) — `cmd/smtprelayd`, `buildpolicy`,
+`config` and `web` all pass. That run showed one further failure,
+`canary.TestRunReturnsImmediatelyWhenIntervalIsZero`, in its `store.Open`
+setup rather than in canary logic; the same test had passed in 2.5 s on the
+same image in the previous run, and this run was ~6× slower throughout. It
+could **not** be reproduced locally under CPU starvation (64 hogs / 16 CPUs)
+or disk contention, so the cause is unproven — the ping-timeout change above
+addresses the symptom either way.
+
+**Previous session**: 2026-09-17 (thirty-eighth session) — Four findings from a
 sixth architecture review. The review found no defect that loses mail or kills
 a service; its subject was comment drift, and most of it was mine from the two
 sessions before.
@@ -72,13 +211,14 @@ Verified: `gofmt -l .` clean, `go vet ./...` clean, `make test` green,
 `go build` for all three targets, `scripts/check-banned-imports.sh` clean for
 each.
 
-**Note for the next session**: five reviews in, the structural findings have
-converged — the two that found real defects were the fourth (`SweepFailed`
-accounting) and the fifth (shutdown blocked for a measured 30s). A seventh
-review is not worth running without larger changes first. The one finding
-standing across five of them is `Config.Validate()` at ~660 lines with its
-defaults split from `Defaults()`, which needs sign-off under working
-agreement 4 before anyone touches it.
+**Note for the next review**: this note used to say a further review was not
+worth running without larger changes first. That was wrong, and the session
+after it is the evidence: three mail-integrity defects, all in the delivery
+path. What had converged was the *structural* findings, not the behavioural
+ones. The lesson for the next review is where to point it — the areas with
+the lowest coverage and no mutation history, not the module layout, which is
+now settled. `Config.Validate()` has since been split into a `validator` with
+per-section methods, so the finding that stood across five reviews is closed.
 
 **Previous session**: 2026-09-17 (thirty-seventh session) — Four findings from a
 fifth architecture review, which went into the protocol readers, the session
@@ -559,6 +699,122 @@ route to a date about ten days out and restart — the watcher checks
 immediately at startup, so no waiting — then revert. That exercises the whole
 collect/batch/compose/send path; only the source of the date differs from the
 certificate case, which is already verified end to end above.
+
+## The thirteenth review (2026-09-17)
+
+The twelfth review's closing advice -- "do not run another review until a
+feature changes" -- was wrong, and the way it was wrong is worth keeping. It
+was true only for Linux. **Windows had never been tested at all.**
+
+**The test package `cmd/smtprelayd` did not compile for Windows.**
+`TestGenCertGivesTheKeyTheConfigurationsGroup` guarded itself with
+`if runtime.GOOS == "windows" { t.Skip(...) }` -- which reads correctly and is
+useless, because it also used `syscall.Stat_t`, a type that does not exist on
+Windows. The skip never got to run: the package failed to compile first, which
+took **all 23 tests in it** with it, including the service startup, token and
+bind tests. Introduced in `ca5b036` during this session's gen-cert work.
+
+The lesson generalises: **a platform-specific *type* cannot be gated at
+runtime.** It needs a build tag. The function moved verbatim into
+`cmd/smtprelayd/gencert_unix_test.go` behind `//go:build !windows`, and the
+runtime skip went with it as dead weight.
+
+Nothing could have noticed: both CI jobs run on `ubuntu-latest`, and
+`make build-all` cross-compiles the *binary*, never the tests. The only
+`windows-latest` job in the tree builds the MSI.
+
+Two CI gates now close that:
+
+- `GOOS=windows go vet ./...` on the existing Ubuntu runner. vet type-checks
+  test files, so it catches exactly this class in seconds without needing a
+  Windows runner. Verified by reintroducing the fault: Linux vet still passes
+  (which is why it was invisible), Windows vet fails with the undefined type.
+- A `windows-latest` job running `go test ./...` (no `-race`: it needs cgo,
+  and the Linux job already runs it; what this adds is the platform).
+
+**The Windows job was run for real before landing**, in a Windows Server 2022
+VM (`dockurr/windows` under podman with KVM, unattended: the VM installs Go,
+copies the tree from a shared folder and writes the output back). **18 of 21
+packages pass. Four failures, in four distinct classes -- and only one is a
+product defect.** Recorded here because the job as written will be red until
+they are addressed, and a knowingly red required check blocks every PR.
+
+1. **`buildpolicy.TestBannedImports` -- a path-separator bug in the test, not
+   a policy violation.** It reports `internal\config\dpapi_windows.go imports
+   "unsafe"`. The exception is already recorded and justified at
+   `policy_test.go:32-33`, but its keys use forward slashes while `rel()`
+   returns `filepath.Rel`, which yields backslashes on Windows, so the lookup
+   misses. Fix: `filepath.ToSlash` in `rel`. One call. **The finding reads
+   exactly like a banned import in shipped code and is not one** -- worth
+   remembering before anyone reacts to that failure text.
+
+2. **`config.TestLogPathRejectsEscapes/absolute_path` -- a Unix-only
+   expectation.** `\etc\cron.d\smtprelayd` is not absolute on Windows
+   (`filepath.IsAbs` wants a drive letter), so it is joined rather than
+   refused, resolving to `\var\lib\smtprelayd\etc\cron.d\smtprelayd` --
+   still inside the data directory, so the containment property LogPath exists
+   to guarantee does hold. What differs is the mechanism, not the guarantee.
+   Windows-specific escape shapes (`C:foo`, UNC `\\server\share`) have not
+   been probed and should be before this is called settled.
+
+3. **`web` and `theme` tests -- a test bug that mirrors a real documentation
+   defect.** The tests write `data_dir = "<t.TempDir()>"` into a TOML *basic*
+   string; on Windows the temp path contains backslashes, and TOML reads `\U`
+   as an escape. The tests should use a literal string or `ToSlash`.
+   **The documentation has the same problem and it reaches operators**:
+   `configs/smtprelayd.example.toml:5` says `# Windows: C:\ProgramData\SMTPRelayd`,
+   and a Windows operator who writes that in double quotes gets
+   `invalid escape in string '\P'` and a config that will not load. Verified
+   against the real binary. Single quotes parse. This is the project's primary
+   production platform.
+
+4. **`TestLogStartupFailureWritesToDataDir` -- a real behaviour worth a
+   decision.** `logStartupFailure` runs `checkEnvironment` first, which on
+   Windows includes `CheckDataDirACL`. A test temp directory inherits its
+   DACL, so the gate refuses and nothing is written. In production the data
+   directory has the protected DACL and it works -- **except on a fresh
+   install before `secure-datadir` has run**, which the 2026-08-11 field
+   incident shows is a state that occurs. In exactly that case a service
+   startup failure produces no console (it is a service) and no error log,
+   which is the scenario the function was built for. A narrower gate for this
+   one file is defensible -- it carries the config path and the validation
+   error, not message data -- but that is a design decision, not a fix to make
+   silently.
+
+The VM is at `~/.cache/smtprelayd-win-vm` (11 GB, container `smtprelayd-win`,
+stopped). `podman start smtprelayd-win` reuses it; deleting the directory
+reclaims the space.
+
+Roughly 630 lines of the tree are Windows-only and had no automated coverage
+of any kind: the data directory ACL (`SecureDataDir`, `CheckDataDirACL`), the
+reparse-point refusal in `trust_windows.go`, DPAPI secret decryption, the
+service wrapper. They were verified in the field, which is real evidence but
+not regression protection.
+
+Checked while sizing the Windows job: every permission assertion in the suite
+(`Mode().Perm()`, `os.Chmod`) already sits behind a `runtime.GOOS == "windows"`
+skip, and all test binaries cross-compile for Windows. Those skips are correct
+where the *values* are Unix-only; the failure above was specific to a Unix-only
+*type*.
+
+### Verified clean, with evidence
+
+**No other test copies product logic verbatim.** The twelfth review found a
+test that rebuilt the logic it was meant to check. A mechanical search for
+non-trivial logic lines (carrying a comparison or boolean operator) appearing
+identically in a test file and in the product of the same package finds only
+two hits today, both false positives -- they are *calls* to the function under
+test. The detector was calibrated against the known case first: run over the
+pre-fix `expiry_test.go` it reports the copied line exactly. Limit: it finds
+only verbatim copies, not ones with renamed variables.
+
+**The Windows `noFollow = 0` justification holds.** `nofollow_windows.go`
+drops `O_NOFOLLOW` and points at the data directory ACL instead. That ACL
+defect was fixed and field-verified, and `CheckDataDirACL` refuses to start
+when the DACL is not protected, so the compensating control is enforced
+fail-closed. Under that ACL only SYSTEM, Administrators and the service
+account can create a reparse point there, and all three already have full
+access.
 
 ## The twelfth review (2026-09-17)
 

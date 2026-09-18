@@ -39,6 +39,15 @@ jobs:
       - name: Vet
         run: go vet ./...
 
+      # vet type-checks test files too, so this catches a test that cannot
+      # compile for Windows -- which is not hypothetical: a Unix-only
+      # syscall.Stat_t in cmd/smtprelayd/gencert_test.go made every test in
+      # that package unbuildable there, behind a runtime.GOOS skip that never
+      # got to run, and nothing noticed because every job here is Linux.
+      # Seconds on this runner, and it does not need a Windows one.
+      - name: Vet for windows/amd64
+        run: GOOS=windows GOARCH=amd64 go vet ./...
+
       - name: Test
         run: go test -race ./...
 
@@ -65,6 +74,29 @@ jobs:
       # loader together.
       - name: Open relay probe against a running instance
         run: make build && ./scripts/selftest-ci.sh
+
+  windows:
+    name: Test on Windows
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      # Windows is a shipped platform and a production one (M365 with DPAPI),
+      # and roughly 630 lines of the tree are Windows-only: the data directory
+      # ACL, the reparse-point refusal, DPAPI secret decryption, the service
+      # wrapper. Until this job existed none of it ran anywhere, and neither
+      # did the platform-neutral tests on the platform whose file semantics
+      # differ -- Windows refuses to delete a file the process still holds
+      # open, which the delivery path has explicit code for.
+      #
+      # No -race here: it needs cgo, and the Linux job already runs it. What
+      # this adds is the platform, not the detector.
+      - name: Test
+        run: go test ./...
 
   build:
     name: Cross-compile

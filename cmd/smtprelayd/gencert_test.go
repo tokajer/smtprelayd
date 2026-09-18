@@ -12,7 +12,6 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
 
@@ -301,46 +300,6 @@ func TestCertHostsIgnoresDisabledMetrics(t *testing.T) {
 	for _, h := range certHosts(cfg) {
 		if h == "10.0.0.5" {
 			t.Fatalf("a disabled metrics address reached the SAN list: %v", certHosts(cfg))
-		}
-	}
-}
-
-// The service must be able to read the key it will be started with. On Unix
-// that means the configuration file's group, since the package gives
-// /etc/smtprelayd to root:smtprelayd and the command runs as root.
-func TestGenCertGivesTheKeyTheConfigurationsGroup(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("access is governed by the inherited DACL on Windows, not by a POSIX group")
-	}
-	certDir := filepath.Join(t.TempDir(), "tls")
-	path := writeConfig(t, tlsConfigBody(t, certDir))
-	if err := genCert(path, false, 0, io.Discard); err != nil {
-		t.Fatal(err)
-	}
-
-	cfgInfo, err := os.Stat(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	wantGid := cfgInfo.Sys().(*syscall.Stat_t).Gid
-
-	keyFile := filepath.Join(certDir, "relay.key")
-	for _, tc := range []struct {
-		path     string
-		wantMode os.FileMode
-	}{
-		{certDir, 0o750},
-		{keyFile, 0o640},
-	} {
-		fi, err := os.Stat(tc.path)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if gid := fi.Sys().(*syscall.Stat_t).Gid; gid != wantGid {
-			t.Errorf("%s has gid %d, want the configuration's %d", tc.path, gid, wantGid)
-		}
-		if mode := fi.Mode().Perm(); mode != tc.wantMode {
-			t.Errorf("%s has mode %04o, want %04o", tc.path, mode, tc.wantMode)
 		}
 	}
 }

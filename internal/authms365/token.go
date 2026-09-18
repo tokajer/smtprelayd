@@ -137,15 +137,21 @@ func (s *TokenSource) Token(ctx context.Context) (string, error) {
 	}
 
 	token, expires, err := s.fetch(ctx)
+	// fetch can take up to requestTimeout, so now is stale by the time it
+	// returns. Both values below are about the moment the request finished:
+	// dating the cooldown from before it would halve a 30s cooldown after a
+	// 15s timeout, which is the one case it exists for, and dating issuedAt
+	// from before it would report the token older than it is.
+	done := time.Now()
 	if err != nil {
-		s.lastErr, s.retryAfter = err, now.Add(failCooldown)
-		if s.token != "" && now.Before(s.expires) {
+		s.lastErr, s.retryAfter = err, done.Add(failCooldown)
+		if s.token != "" && done.Before(s.expires) {
 			return s.token, nil
 		}
 		return "", err
 	}
 	s.token, s.expires, s.lastErr = token, expires, nil
-	s.issuedAt.Store(&now)
+	s.issuedAt.Store(&done)
 	return token, nil
 }
 

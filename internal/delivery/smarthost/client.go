@@ -44,6 +44,17 @@ type AuthError struct{ Err error }
 func (e *AuthError) Error() string { return e.Err.Error() }
 func (e *AuthError) Unwrap() error { return e.Err }
 
+// QuitError reports that the smarthost accepted the message -- it answered
+// the body with 250, so the message is its responsibility from that moment --
+// but the session could not be closed cleanly afterwards. The delivery
+// succeeded. A caller must treat this as success and must not retry, because
+// retrying delivers the message a second time; it is a distinct type only so
+// that the caller can say so in the log.
+type QuitError struct{ Err error }
+
+func (e *QuitError) Error() string { return e.Err.Error() }
+func (e *QuitError) Unwrap() error { return e.Err }
+
 func temp(format string, a ...any) error { return &TempError{Err: fmt.Errorf(format, a...)} }
 func perm(format string, a ...any) error { return &PermError{Err: fmt.Errorf(format, a...)} }
 
@@ -60,6 +71,11 @@ func classify(err error) error {
 	}
 	return &TempError{Err: err}
 }
+
+// connectTimeout bounds establishing the connection -- the TCP handshake, and
+// the TLS handshake too on an implicit-TLS route. A smarthost that is reachable
+// at all answers far inside this; one that does not is not going to.
+const connectTimeout = 30 * time.Second
 
 // Message is one delivery attempt.
 type Message struct {
@@ -96,7 +112,14 @@ func Deliver(ctx context.Context, route config.Route, msg Message, timeout time.
 	}
 
 	addr := net.JoinHostPort(route.Host, strconv.Itoa(route.Port))
-	dialer := &net.Dialer{Timeout: timeout}
+	// The dial gets a bound of its own rather than the whole attempt budget.
+	// timeout is limits.delivery_timeout_sec, 600s by default, because it has
+	// to carry limits.max_message_mb at a pessimistic rate -- but a host that
+	// drops packets, which is what an egress rule usually produces, would
+	// otherwise spend all ten minutes of it here, on every attempt, having
+	// sent nothing. conn.SetDeadline below still holds the full budget over
+	// the rest of the session.
+	dialer := &net.Dialer{Timeout: min(connectTimeout, timeout)}
 
 	var conn net.Conn
 	var err error
@@ -188,7 +211,22 @@ func Deliver(ctx context.Context, route config.Route, msg Message, timeout time.
 	if err := w.Close(); err != nil {
 		return classify(err)
 	}
-	return c.Quit()
+	// A successful Close means the smarthost answered the body with 250 and
+	// now owns the message. Nothing that happens to the session afterwards
+	// changes that, so a failing QUIT must not be reported as a delivery
+	// failure: the caller would leave the copy queued and the next attempt
+	// would deliver it a second time. Three ordinary things reach this point
+	// -- Exchange closing the connection after its 250 without waiting for
+	// QUIT, the delivery deadline expiring in this gap on a large message,
+	// and a service stop firing the cancellation armed above.
+	//
+	// This is the mirror of the rule the listener already applies on the way
+	// in, where commitCopies withdraws partial copies rather than let a
+	// client's retry duplicate them.
+	if err := c.Quit(); err != nil {
+		return &QuitError{Err: err}
+	}
+	return nil
 }
 
 func authFor(ctx context.Context, route config.Route, tokens TokenSource) (smtp.Auth, error) {

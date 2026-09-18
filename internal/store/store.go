@@ -41,6 +41,17 @@ func Open(dataDir string, log *slog.Logger, retentionDays int, retainSubjects bo
 	}
 
 	dbPath := filepath.Join(spoolDir, "history.db")
+	// openPingTimeout is a wall-clock deadline on the very first use of the
+	// database, which is where the driver creates the file, replays a `-wal`
+	// sidecar left by an unclean stop, and takes its first lock. Five seconds
+	// was not enough: a Windows test run whose packages were each roughly six
+	// times slower than usual failed here rather than anywhere in the code
+	// under test. The relay ships onto exactly that profile -- a Windows VM on
+	// shared storage with an on-access scanner -- and the consequence there is
+	// a service that will not start, reporting "context deadline exceeded"
+	// rather than anything about a slow disk. A generous ceiling costs nothing
+	// on a healthy system, where this completes in milliseconds.
+	const openPingTimeout = 30 * time.Second
 	// WAL, decided 2026-08-12. Until then the DSN carried
 	// `_journal_mode=WAL`, which modernc's driver ignores — it reads only
 	// `_pragma=` — so the database had always run in the default
@@ -63,7 +74,7 @@ func Open(dataDir string, log *slog.Logger, retentionDays int, retainSubjects bo
 	}
 
 	// Ensure connection is alive.
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), openPingTimeout)
 	defer cancel()
 	if err := db.PingContext(ctx); err != nil {
 		_ = db.Close()
@@ -431,9 +442,19 @@ type AuditEntry struct {
 	Details    string
 }
 
-// retentionCleanup deletes messages and cascaded attempts/audit older than
-// retention TTL. The journal is best-effort: a failed cleanup must not take
-// down delivery, so it logs and returns rather than propagating the error.
+// retentionCleanup deletes messages older than the retention TTL, and with
+// them their attempts, which cascade on the foreign key.
+//
+// Audit rows do not cascade and are never deleted here: the audit table
+// carries no foreign key at all, deliberately. What it records is who ran a
+// requeue or a delete and from where, and that outlives the message it was
+// about -- an audit log that prunes itself along with the evidence is not
+// one. The consequence is that the table grows for the life of the service;
+// see docs/guides/CONFIGURATION.md section 9, which says so rather than
+// leaving an operator to discover it.
+//
+// The journal is best-effort: a failed cleanup must not take down delivery,
+// so it logs and returns rather than propagating the error.
 func (s *Store) retentionCleanup(now time.Time) {
 	cutoff := now.Add(-s.retentionTTL).UTC().Format(time.RFC3339)
 	result, err := s.db.Exec(`DELETE FROM messages WHERE created_at < ?`, cutoff)

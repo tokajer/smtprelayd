@@ -690,3 +690,137 @@ func TestRecoverSweepsInterruptedStages(t *testing.T) {
 		t.Error("an interrupted stage survived a restart; they accumulate and count toward no quota")
 	}
 }
+
+// obstruct replaces path with a non-empty directory of the same name, so that
+// os.Remove and os.Rename fail with ENOTEMPTY rather than ErrNotExist whatever
+// the test runs as. It stands in for the Windows case removeRetry exists for,
+// where a scanner or a backup agent holds a handle on the file.
+func obstruct(t *testing.T, path string) {
+	t.Helper()
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(path, "held"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A delivered message whose body cannot be unlinked must still lose its
+// metadata. recover() drops a body with no metadata, so a stranded .eml is
+// inert -- but a stranded .json beside its .eml is re-indexed at the next
+// start and the message is delivered a second time. That is the whole reason
+// the body is unlinked first and the metadata is unlinked even when the body
+// could not be.
+func TestRemoveRidesOutAHeldMetadataFile(t *testing.T) {
+	dir := t.TempDir()
+	s, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, err := s.Enqueue(Envelope{Route: "r"}, strings.NewReader("body"), 0, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The metadata is the file that matters: a stranded .json beside its .eml
+	// is re-indexed at the next start. Obstruct it, then clear the
+	// obstruction inside the retry window -- a single os.Remove gives up
+	// here, and gives up before the body has been touched at all.
+	meta := filepath.Join(dir, "spool", "queue", id.String()+".json")
+	obstruct(t, meta)
+	go func() {
+		time.Sleep(30 * time.Millisecond)
+		_ = os.RemoveAll(meta)
+	}()
+
+	if err := s.Remove(id); err != nil {
+		t.Fatalf("Remove gave up on a transient obstruction: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "spool", "queue", id.String()+".eml")); !os.IsNotExist(err) {
+		t.Error("the body survived a successful Remove")
+	}
+
+	reopened, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reopened.Has(id) {
+		t.Error("a delivered message came back after a restart")
+	}
+	if n := reopened.Len(); n != 0 {
+		t.Errorf("the reopened spool holds %d messages, want 0", n)
+	}
+}
+
+// The operator's delete carries the same hazard from the other direction: a
+// message they removed must not be delivered because the unlink lost a race.
+func TestDiscardRidesOutAHeldMetadataFile(t *testing.T) {
+	dir := t.TempDir()
+	s, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, err := s.Enqueue(Envelope{Route: "r"}, strings.NewReader("body"), 0, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	meta := filepath.Join(dir, "spool", "queue", id.String()+".json")
+	obstruct(t, meta)
+	go func() {
+		time.Sleep(30 * time.Millisecond)
+		_ = os.RemoveAll(meta)
+	}()
+
+	if err := s.Discard(id); err != nil {
+		t.Fatalf("Discard gave up on a transient obstruction: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "spool", "queue", id.String()+".eml")); !os.IsNotExist(err) {
+		t.Error("the body survived a successful Discard")
+	}
+
+	reopened, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reopened.Has(id) {
+		t.Fatal("a message the operator deleted came back after a restart")
+	}
+}
+
+// Fail moves a permanently undeliverable message aside. A rename that loses
+// the same race leaves the pair in the queue directory, where the next start
+// re-indexes it and the message is attempted all over again, so the rename
+// retries for the reason the unlink does.
+func TestFailRetriesTheRenameItCannotCompleteAtOnce(t *testing.T) {
+	dir := t.TempDir()
+	s, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, err := s.Enqueue(Envelope{Route: "r"}, strings.NewReader("body"), 0, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	meta, ok := s.Claim(time.Now().Add(time.Minute))
+	if !ok {
+		t.Fatal("nothing to claim")
+	}
+	// Obstruct the destination, then clear it inside the retry window. A
+	// single os.Rename fails outright here; renameRetry rides it out, which
+	// is the difference the Windows case turns on.
+	blocked := filepath.Join(dir, "spool", "failed", id.String()+".eml")
+	obstruct(t, blocked)
+	go func() {
+		time.Sleep(30 * time.Millisecond)
+		_ = os.RemoveAll(blocked)
+	}()
+
+	if err := s.Fail(meta, "permanent"); err != nil {
+		t.Fatalf("Fail gave up on a transient obstruction: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "spool", "queue", id.String()+".eml")); !os.IsNotExist(err) {
+		t.Error("the body is still in the queue directory, where the next start would re-index and retry it")
+	}
+	if _, err := os.Stat(blocked); err != nil {
+		t.Errorf("the body did not arrive in spool/failed: %v", err)
+	}
+}

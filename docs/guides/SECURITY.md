@@ -254,9 +254,21 @@ attacker-influenced values and writes them into a message.
 - Failed authentication is rate limited per source address with exponential
   backoff, logged, and exposed as a metric.
 - Every `admin` action writes an immutable audit record: token name, source
-  address, action, queue ID, timestamp.
-- Dashboard state-changing actions require a CSRF token. Cookies are
-  `HttpOnly`, `SameSite=Strict` and `Secure` when served over TLS.
+  address, action, queue ID, timestamp. Audit rows are never pruned by
+  `history.retention_days`; see `docs/guides/CONFIGURATION.md` section 9.
+- Dashboard state-changing actions require a CSRF token: an HMAC over the
+  action and the queue ID, bound to a per-process random key and valid for an
+  hour. **The dashboard sets no cookies and has no session at all** — there is
+  nothing for a token to be bound to, and the per-process key plays that role
+  instead, which is enough for what CSRF protection is for here: a page that
+  merely has network access to the dashboard cannot reproduce the key and so
+  cannot forge a token it never saw.
+- The dashboard has no login. Its trust boundary is the loopback bind, which
+  `config.Validate` enforces by refusing a `web.address` beyond loopback
+  outright rather than serving the page to the network without a credential.
+  Bearer tokens cannot close this gap: the process holds only their SHA-256
+  digests, so it cannot present one on the dashboard's behalf. Reach it
+  through an SSH tunnel or a reverse proxy that authenticates.
 - Strict `Content-Security-Policy` with no inline scripts, plus
   `X-Content-Type-Options`, `X-Frame-Options` and `Referrer-Policy`.
 - Message bodies are never exposed through the API or the dashboard. Metadata

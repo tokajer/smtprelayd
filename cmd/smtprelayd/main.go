@@ -191,6 +191,15 @@ func run(cmd, configPath string, console bool, outPath string, force bool, days 
 		if err != nil {
 			return err
 		}
+		// A note means the probe never reached the relay decision on that
+		// listener, so an unqualified pass would overstate what just
+		// happened -- which is precisely what selftest.Run's contract says
+		// the caller must not do.
+		if len(notes) > 0 {
+			fmt.Printf("open relay self-test found no open relay, but %d listener(s) were not exercised; see the note(s) above\n",
+				len(notes))
+			return nil
+		}
 		fmt.Println("open relay self-test passed")
 		return nil
 
@@ -403,7 +412,23 @@ func logStartupFailure(configPath string, cfg *config.Config, cause error) {
 	if cfg == nil || cfg.Service.DataDir == "" {
 		return
 	}
-	if err := checkEnvironment(cfg); err != nil {
+	if err := os.MkdirAll(cfg.Service.DataDir, 0o700); err != nil {
+		return
+	}
+	// Deliberately a narrower gate than checkEnvironment's. CheckDir is the
+	// half that stops this write being redirected: a symlink or reparse
+	// point, or a path that is not a directory. The data directory ACL check
+	// is the other half, and what that one protects is the confidentiality of
+	// message data -- queue IDs, senders, recipients -- which the operational
+	// log carries and this file does not. This file holds the configuration
+	// path and the validation error that stopped startup.
+	//
+	// Running the full gate here defeated the purpose on Windows: before the
+	// installer's secure-datadir has run, the directory still inherits its
+	// DACL, so a service that failed to start produced no console (it is a
+	// service) and no error log either -- exactly the case this exists for,
+	// and exactly the state the 2026-08-11 field incident was in.
+	if err := config.CheckDir(cfg.Service.DataDir); err != nil {
 		return
 	}
 	path := filepath.Join(cfg.Service.DataDir, "smtprelayd-error.log")

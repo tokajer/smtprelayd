@@ -30,10 +30,13 @@ const probeRecipient = "open-relay-probe@example.net"
 // external domain. Any listener that accepts the attempt is reported as a
 // failure; the caller must treat a non-nil error as fatal.
 //
-// The notes it returns alongside are listeners that accepted the relay from a
-// source the configuration legitimately allowlists -- see probe. They are not
-// failures, but they mean the default-deny path was not exercised, so the
-// caller must show them rather than print an unqualified pass.
+// The notes it returns alongside are listeners whose relay policy this run
+// did not actually establish anything about: one that accepted the relay from
+// a source the configuration legitimately allowlists (see probe), and one
+// that refused the probe for a reason other than relay policy (see
+// refusalVerdict). They are not failures, but they mean the default-deny path
+// was not exercised, so the caller must show them and must not print an
+// unqualified pass.
 func Run(cfg *config.Config, timeout time.Duration) ([]string, error) {
 	// The relay's own matcher, not a second copy of it: this has to agree
 	// with what the running listener would decide, and a reimplementation
@@ -69,36 +72,36 @@ func Run(cfg *config.Config, timeout time.Duration) ([]string, error) {
 // reported as an open relay by the very check that is meant to prove it is
 // not one.
 func probe(cfg *config.Config, match *listener.Matcher, l config.Listener, timeout time.Duration) (string, error) {
-	addr := dialAddress(l.Address)
-	d := &net.Dialer{Timeout: timeout}
-
-	var conn net.Conn
-	var err error
-	if l.TLS == "implicit" {
-		tc, terr := tlsConfig(cfg)
-		if terr != nil {
-			return "", terr
-		}
-		conn, err = tls.DialWithDialer(d, "tcp", addr, tc)
-	} else {
-		conn, err = d.Dial("tcp", addr)
-	}
+	conn, err := dialListener(cfg, l, timeout)
 	if err != nil {
-		return "", fmt.Errorf("connect: %w", err)
+		return "", err
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	_ = conn.SetDeadline(time.Now().Add(timeout))
 
 	br := bufio.NewReader(conn)
 	if _, err := expect(br, 220); err != nil {
 		return "", err
 	}
-	if err := send(conn, "EHLO selftest.invalid"); err != nil {
+	if err := greet(conn, br); err != nil {
 		return "", err
 	}
-	if _, err := expect(br, 250); err != nil {
-		return "", err
+
+	// A starttls listener is probed over TLS rather than in the clear.
+	// Without this, a listener with require_tls refuses at MAIL FROM with 530
+	// before any relay policy is consulted, and the refusal below would read
+	// that as a denial -- so hardening a listener silently turned the
+	// open-relay check into a no-op on it. Measured before this existed: a
+	// client with cidr 0.0.0.0/0, the open relay acceptedVerdict has a branch
+	// for, produced a clean pass behind require_tls and a correct failure
+	// without it.
+	if l.TLS == "starttls" {
+		conn, br, err = startTLS(cfg, conn, br, timeout)
+		if err != nil {
+			return "", err
+		}
 	}
+
 	if err := send(conn, "MAIL FROM:<probe@selftest.invalid>"); err != nil {
 		return "", err
 	}
@@ -107,7 +110,7 @@ func probe(cfg *config.Config, match *listener.Matcher, l config.Listener, timeo
 		return "", err
 	}
 	if code >= 400 {
-		return "", nil // rejected already, which is the desired outcome
+		return refusalVerdict(l, "MAIL FROM", code, line)
 	}
 	if err := send(conn, "RCPT TO:<"+probeRecipient+">"); err != nil {
 		return "", err
@@ -117,10 +120,102 @@ func probe(cfg *config.Config, match *listener.Matcher, l config.Listener, timeo
 		return "", err
 	}
 	if code >= 400 {
-		return "", nil
+		return refusalVerdict(l, "RCPT TO", code, line)
 	}
 	_ = send(conn, "RSET")
 	return acceptedVerdict(match, conn, l, code, line)
+}
+
+// dialListener opens the connection the listener expects: already encrypted
+// for implicit TLS, cleartext otherwise, with STARTTLS negotiated afterwards.
+func dialListener(cfg *config.Config, l config.Listener, timeout time.Duration) (net.Conn, error) {
+	addr := dialAddress(l.Address)
+	d := &net.Dialer{Timeout: timeout}
+	if l.TLS != "implicit" {
+		conn, err := d.Dial("tcp", addr)
+		if err != nil {
+			return nil, fmt.Errorf("connect: %w", err)
+		}
+		return conn, nil
+	}
+	tc, err := tlsConfig(cfg)
+	if err != nil {
+		return nil, err
+	}
+	conn, err := tls.DialWithDialer(d, "tcp", addr, tc)
+	if err != nil {
+		return nil, fmt.Errorf("connect: %w", err)
+	}
+	return conn, nil
+}
+
+func greet(conn net.Conn, br *bufio.Reader) error {
+	if err := send(conn, "EHLO selftest.invalid"); err != nil {
+		return err
+	}
+	_, err := expect(br, 250)
+	return err
+}
+
+// startTLS upgrades a cleartext session and greets again, which RFC 3207
+// requires: everything learned before the handshake is discarded, because
+// none of it was protected.
+func startTLS(cfg *config.Config, conn net.Conn, br *bufio.Reader, timeout time.Duration) (net.Conn, *bufio.Reader, error) {
+	tc, err := tlsConfig(cfg)
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := send(conn, "STARTTLS"); err != nil {
+		return nil, nil, err
+	}
+	if _, err := expect(br, 220); err != nil {
+		return nil, nil, fmt.Errorf("STARTTLS refused: %w", err)
+	}
+	// Anything already buffered was read before the handshake and is
+	// therefore unauthenticated. Handing it to the TLS session is the classic
+	// STARTTLS command-injection bug, so refuse rather than discard it: a
+	// listener that pipelines past its own 220 is not one to keep probing.
+	if n := br.Buffered(); n > 0 {
+		return nil, nil, fmt.Errorf("listener sent %d bytes after its STARTTLS reply, before the handshake", n)
+	}
+	tlsConn := tls.Client(conn, tc)
+	if err := tlsConn.Handshake(); err != nil {
+		return nil, nil, fmt.Errorf("STARTTLS handshake: %w", err)
+	}
+	_ = tlsConn.SetDeadline(time.Now().Add(timeout))
+	fresh := bufio.NewReader(tlsConn)
+	if err := greet(tlsConn, fresh); err != nil {
+		return nil, nil, err
+	}
+	return tlsConn, fresh, nil
+}
+
+// refusalVerdict decides what a refusal means. Only a permanent refusal that
+// the relay policy itself produced is the outcome this check exists to
+// confirm. Two kinds are not, and both return a note rather than a silent
+// pass, because the probe learned nothing and saying so is the difference
+// between a proven configuration and a question that was never asked:
+//
+//   - 530, the listener demanding TLS the probe did not provide. A valid
+//     configuration can no longer reach this -- validate refuses require_tls
+//     on a tls = "none" listener, and probe now negotiates STARTTLS -- but
+//     reading it as a denial is exactly what let a require_tls listener
+//     report a clean pass while a catch-all client could relay through it, so
+//     it stays named rather than folded back into the general case.
+//   - any 4xx, which is temporary by definition: a rate limit or a busy
+//     listener refuses an attempt it would accept a minute later.
+func refusalVerdict(l config.Listener, stage string, code int, line string) (string, error) {
+	switch {
+	case code == 530:
+		return fmt.Sprintf("listener %s refused the probe at %s with %d %s: it requires TLS the probe did not "+
+			"negotiate, so its relay policy was never consulted and this run proves nothing about it.",
+			l.Name, stage, code, line), nil
+	case code < 500:
+		return fmt.Sprintf("listener %s refused the probe at %s with %d %s: a temporary refusal is not a relay "+
+			"decision, so this run proves nothing about it -- repeat the self-test once the listener is idle.",
+			l.Name, stage, code, line), nil
+	}
+	return "", nil
 }
 
 // acceptedVerdict decides what an accepted relay means, given the source the

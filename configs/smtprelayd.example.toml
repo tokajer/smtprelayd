@@ -2,7 +2,11 @@
 # Copy to /etc/smtprelayd/smtprelayd.toml or %ProgramData%\SMTPRelayd\smtprelayd.toml
 
 [service]
-data_dir  = "/var/lib/smtprelayd"   # Windows: C:\ProgramData\SMTPRelayd
+# On Windows use TOML's single-quoted form, which takes the value verbatim:
+#   data_dir = 'C:\ProgramData\SMTPRelayd'
+# In double quotes a backslash starts an escape, so "C:\ProgramData\..." is
+# rejected at load time with: invalid escape in string '\P'.
+data_dir  = "/var/lib/smtprelayd"
 log_level = "info"                 # debug | info | warn | error
 # timezone = "Europe/Vienna"        # IANA name, or "UTC"/"Local"; unset keeps
                                     # today's behaviour (log lines in process-

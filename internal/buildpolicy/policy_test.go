@@ -158,11 +158,16 @@ func TestNoCgo(t *testing.T) {
 	}
 }
 
+// rel returns the repo-relative path in forward-slash form. ToSlash is not
+// cosmetic: allowedBannedImports is keyed by forward-slash paths, and on
+// Windows filepath.Rel returns backslashes, so without it every exception
+// misses and the test reports a banned import in a file that is explicitly
+// permitted one -- which reads exactly like a real violation.
 func rel(root, path string) string {
 	if r, err := filepath.Rel(root, path); err == nil {
-		return r
+		return filepath.ToSlash(r)
 	}
-	return path
+	return filepath.ToSlash(path)
 }
 
 // TestDocCommentsNameTheirSymbol enforces the Go convention that a doc

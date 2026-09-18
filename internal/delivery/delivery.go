@@ -183,6 +183,21 @@ func (m *Manager) Run(ctx context.Context) {
 				_ = m.spool.Release(meta)
 				m.wg.Wait()
 				return
+			default:
+				// Never block for a slot. Claim returns the globally oldest
+				// due message whatever route it belongs to, and this is the
+				// only dispatcher, so waiting here holds up every other
+				// route behind one saturated smarthost -- for as long as an
+				// attempt can last, which is limits.delivery_timeout_sec.
+				// Measured before this existed: a healthy route's message
+				// went out in 100ms next to a working neighbour and was
+				// still queued after 8s next to a hanging one.
+				//
+				// Deferring by pollInterval puts the message back where the
+				// next tick finds it, and hold leaves its attempt counter
+				// and expiry alone -- it was never offered to the smarthost.
+				m.hold(meta, pollInterval)
+				continue
 			}
 			m.wg.Add(1)
 			go func(meta *spool.Meta) {
@@ -290,6 +305,16 @@ func (m *Manager) attempt(ctx context.Context, meta *spool.Meta) {
 	elapsed := time.Since(start)
 	closeBody()
 
+	// The smarthost took the message and only the goodbye went wrong. Failing
+	// it here would queue a copy the smarthost has already accepted, and the
+	// next attempt would deliver it twice; the log line is the whole remedy.
+	var quitErr *smarthost.QuitError
+	if errors.As(err, &quitErr) {
+		log.Warn("the smarthost accepted the message but the session did not close cleanly",
+			"error", quitErr.Error())
+		err = nil
+	}
+
 	// A notification message is postmaster mail the bounce notifier composed
 	// itself, not client traffic: its outcome is kept out of the relay's own
 	// delivered/bounced/deferred counters (which would otherwise mix the
@@ -389,9 +414,11 @@ func (m *Manager) backoff(attempt int) time.Duration {
 	return time.Duration(sched[i]) * time.Minute
 }
 
-// hold defers a message that hit the route rate limit. The attempt counter is
-// deliberately left alone: the message was never offered to the smarthost, so
-// pacing must not consume its retry budget or bring its expiry forward.
+// hold puts a message back with a short delay because its route could not take
+// it yet -- the rate limiter paced it, or the route's concurrency budget was
+// full. The attempt counter is deliberately left alone in both cases: the
+// message was never offered to the smarthost, so waiting for a slot must not
+// consume its retry budget or bring its expiry forward.
 func (m *Manager) hold(meta *spool.Meta, d time.Duration) {
 	meta.NextAttempt = time.Now().Add(d)
 	if meta.NextAttempt.After(meta.Expires) {
