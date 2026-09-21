@@ -4,8 +4,11 @@
 package httpx
 
 import (
+	"context"
+	"errors"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -147,4 +150,60 @@ func TestRequireLoopbackHost(t *testing.T) {
 			t.Errorf("Host %q: the refusal does not name its remedy: %s", host, rec.Body.String())
 		}
 	}
+}
+
+// Serve holds the shutdown path both HTTP listeners depend on, and neither of
+// their own tests reaches its error branch: a listener that fails to accept
+// for a reason other than being shut down has to be reported, and one that was
+// shut down must not be. Both are one line apart in the same select.
+func TestServeDrainsOnCancellationAndReportsRealFailures(t *testing.T) {
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	t.Run("cancellation drains and reports nothing", func(t *testing.T) {
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		srv := &http.Server{Handler: http.NotFoundHandler(), ReadHeaderTimeout: time.Second}
+		ctx, cancel := context.WithCancel(context.Background())
+
+		done := make(chan error, 1)
+		go func() { done <- Serve(ctx, srv, func() error { return srv.Serve(ln) }, "test", log) }()
+
+		// Reachable first, so this is a shutdown and not a failed bind.
+		resp, err := http.Get("http://" + ln.Addr().String() + "/") //#nosec G107 -- this test's own loopback listener
+		if err != nil {
+			t.Fatalf("the listener never came up: %v", err)
+		}
+		_ = resp.Body.Close()
+
+		cancel()
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Errorf("a clean shutdown reported %v", err)
+			}
+		case <-time.After(10 * time.Second):
+			t.Fatal("Serve did not return after cancellation")
+		}
+	})
+
+	t.Run("an accept failure is returned", func(t *testing.T) {
+		srv := &http.Server{Handler: http.NotFoundHandler(), ReadHeaderTimeout: time.Second}
+		want := errors.New("address already in use")
+		err := Serve(context.Background(), srv, func() error { return want }, "test", log)
+		if !errors.Is(err, want) {
+			t.Errorf("Serve returned %v, want %v", err, want)
+		}
+	})
+
+	t.Run("a closed server is not a failure", func(t *testing.T) {
+		// What srv.Serve returns once Shutdown has run. It reaches the same
+		// branch as a real failure and must not be reported as one, or every
+		// clean stop logs an error.
+		srv := &http.Server{Handler: http.NotFoundHandler(), ReadHeaderTimeout: time.Second}
+		if err := Serve(context.Background(), srv, func() error { return http.ErrServerClosed }, "test", log); err != nil {
+			t.Errorf("ErrServerClosed was reported as %v", err)
+		}
+	})
 }

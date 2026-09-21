@@ -18,6 +18,7 @@ import (
 	"github.com/tokajer/smtprelayd/internal/config"
 	"github.com/tokajer/smtprelayd/internal/delivery/smarthost"
 	"github.com/tokajer/smtprelayd/internal/metrics"
+	"github.com/tokajer/smtprelayd/internal/ratelimit"
 	"github.com/tokajer/smtprelayd/internal/spool"
 	"github.com/tokajer/smtprelayd/internal/store"
 )
@@ -53,10 +54,16 @@ type Manager struct {
 
 	// routes holds the per-route concurrency budget, limits the per-route
 	// messages per minute, tokens the OAuth2 source for xoauth2 routes.
+	//
+	// rate paces what one smarthost is handed: Microsoft 365 answers a burst
+	// with 4.7.500 rather than queueing it, and a rejected attempt costs a
+	// full connection and an authentication round trip, so pacing here is
+	// cheaper than retrying there. It is internal/ratelimit, the same bucket
+	// the listener caps a client with.
 	routes map[string]chan struct{}
 	limits map[string]int
 	tokens map[string]smarthost.TokenSource
-	rate   *routeLimiter
+	rate   *ratelimit.Limiter
 	wg     sync.WaitGroup
 
 	// lastFailedSweep and quotaWarned are read and written only from Run's
@@ -80,7 +87,7 @@ func New(cfg *config.Config, sp *spool.Spool, log *slog.Logger, st *store.Store,
 		routes: map[string]chan struct{}{},
 		limits: map[string]int{},
 		tokens: map[string]smarthost.TokenSource{},
-		rate:   newRouteLimiter(),
+		rate:   ratelimit.New(),
 	}
 	for _, r := range cfg.Routes {
 		m.routes[r.Name] = make(chan struct{}, r.MaxConcurrent)
@@ -236,7 +243,7 @@ func (m *Manager) dispatchOne(ctx context.Context, meta *spool.Meta, saturated m
 	}
 	// Pace before taking a worker slot, so that a throttled route does not
 	// hold its whole concurrency budget waiting.
-	if wait, ok := m.rate.allow(route, m.limits[route], time.Now()); !ok {
+	if wait, ok := m.rate.Allow(route, m.limits[route], time.Now()); !ok {
 		saturated[route] = true
 		m.hold(meta, wait)
 		return true
@@ -506,7 +513,7 @@ const (
 // canary's failure still feeds the bounce digest, a notification's never
 // does, because that is how a notification loop would start.
 func (m *Manager) recordOutcome(meta *spool.Meta, o outcome, err error) {
-	route, client := meta.Envelope.Route, meta.Envelope.Client
+	route, origin := meta.Envelope.Route, meta.Envelope.Origin
 	switch meta.Envelope.Kind {
 	case spool.KindNotification:
 		if o != outcomeDelivered {
@@ -514,9 +521,9 @@ func (m *Manager) recordOutcome(meta *spool.Meta, o outcome, err error) {
 		}
 	case spool.KindCanary:
 		if o == outcomeDelivered {
-			m.metrics.CanaryDelivered(client)
+			m.metrics.CanaryDelivered(origin)
 		} else {
-			m.metrics.CanaryFailure(client)
+			m.metrics.CanaryFailure(origin)
 		}
 	default:
 		switch o {
@@ -591,7 +598,7 @@ func (m *Manager) fail(meta *spool.Meta, reason string) {
 	// notify about: that is exactly how a notification loop would start. A
 	// canary's failure is, deliberately -- being reported is its purpose.
 	if meta.Envelope.Kind != spool.KindNotification && m.fails != nil {
-		m.fails.RecordFail(meta.Envelope.Client, meta.ID.String())
+		m.fails.RecordFail(meta.Envelope.Origin, meta.ID.String())
 	}
 }
 

@@ -6,6 +6,7 @@ package spool
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -21,7 +22,7 @@ func TestEnqueueClaimRemove(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	env := Envelope{From: "a@example.at", To: []string{"b@example.net"}, Client: "c", Route: "r",
+	env := Envelope{From: "a@example.at", To: []string{"b@example.net"}, Origin: "c", Route: "r",
 		Received: time.Now().UTC()}
 	id, err := s.Enqueue(env, strings.NewReader("Subject: x\r\n\r\nbody\r\n"), 0, time.Hour)
 	if err != nil {
@@ -373,7 +374,7 @@ func TestQueueDepthOldestQueuedTracksEarliestClaimable(t *testing.T) {
 // which is where the quota used to lose sight of it.
 func enqueueAndFail(t *testing.T, s *Spool, body string) ID {
 	t.Helper()
-	env := Envelope{From: "a@example.at", To: []string{"b@example.net"}, Client: "c", Route: "r",
+	env := Envelope{From: "a@example.at", To: []string{"b@example.net"}, Origin: "c", Route: "r",
 		Received: time.Now().UTC()}
 	id, err := s.Enqueue(env, strings.NewReader(body), 0, time.Hour)
 	if err != nil {
@@ -428,14 +429,14 @@ func TestQuotaIsReleasedWhenFailedFilesGo(t *testing.T) {
 				t.Fatal(err)
 			}
 			id := enqueueAndFail(t, s, "Subject: x\r\n\r\nbody\r\n")
-			if len(s.failedIndex) != 1 {
-				t.Fatalf("failed index holds %d entries", len(s.failedIndex))
+			if len(s.failed.index) != 1 {
+				t.Fatalf("failed index holds %d entries", len(s.failed.index))
 			}
 			if err := tc.out(s, id); err != nil {
 				t.Fatal(err)
 			}
-			if len(s.failedIndex) != 0 {
-				t.Fatalf("%s left %d entries in the failed index", tc.name, len(s.failedIndex))
+			if len(s.failed.index) != 0 {
+				t.Fatalf("%s left %d entries in the failed index", tc.name, len(s.failed.index))
 			}
 		})
 	}
@@ -503,12 +504,12 @@ func TestSetQuotaNeverWrapsIntoNoQuota(t *testing.T) {
 		t.Fatal(err)
 	}
 	s.SetQuota(1<<40, 80)
-	if s.maxQuotaBytes <= 0 {
-		t.Fatalf("an enormous quota became %d, i.e. no quota", s.maxQuotaBytes)
+	if s.quota.maxBytes <= 0 {
+		t.Fatalf("an enormous quota became %d, i.e. no quota", s.quota.maxBytes)
 	}
 	s.SetQuota(-1, 80)
-	if s.maxQuotaBytes != 0 {
-		t.Fatalf("a negative quota became %d, want 0 (no quota)", s.maxQuotaBytes)
+	if s.quota.maxBytes != 0 {
+		t.Fatalf("a negative quota became %d, want 0 (no quota)", s.quota.maxBytes)
 	}
 }
 
@@ -546,8 +547,8 @@ func TestQuotaWarningReportsThresholdCrossing(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	s2.maxQuotaBytes = 1000
-	s2.warnQuotaPercent = 80
+	s2.quota.maxBytes = 1000
+	s2.quota.warnPercent = 80
 
 	if _, err := s2.Enqueue(Envelope{}, strings.NewReader(strings.Repeat("x", 500)), 0, time.Hour); err != nil {
 		t.Fatal(err)
@@ -566,7 +567,7 @@ func TestQuotaWarningReportsThresholdCrossing(t *testing.T) {
 
 // A file the sweep could not delete must stay indexed, or its bytes stop
 // counting against limits.spool_max_gb while still occupying the disk --
-// which is the accounting failedIndex exists to prevent. removeRetry exists
+// which is the accounting failedStore exists to prevent. removeRetry exists
 // because this is expected on Windows, where a scanner or backup agent holds
 // a handle; the directory trick below reproduces it portably.
 func TestSweepFailedKeepsWhatItCouldNotDelete(t *testing.T) {
@@ -586,10 +587,10 @@ func TestSweepFailedKeepsWhatItCouldNotDelete(t *testing.T) {
 	if err := s.Fail(meta, "permanent"); err != nil {
 		t.Fatal(err)
 	}
-	if len(s.failedIndex) != 1 {
-		t.Fatalf("failedIndex holds %d entries, want 1", len(s.failedIndex))
+	if len(s.failed.index) != 1 {
+		t.Fatalf("the failed store holds %d entries, want 1", len(s.failed.index))
 	}
-	sizeBefore := s.failedIndex[id].size
+	sizeBefore := s.failed.index[id].size
 
 	// Replace the body with a non-empty directory of the same name: os.Remove
 	// then fails with ENOTEMPTY rather than ErrNotExist, whatever the test
@@ -608,11 +609,11 @@ func TestSweepFailedKeepsWhatItCouldNotDelete(t *testing.T) {
 	if removed != 0 || freed != 0 {
 		t.Errorf("SweepFailed reported removed=%d freed=%d for a message it could not delete", removed, freed)
 	}
-	if _, still := s.failedIndex[id]; !still {
-		t.Fatal("the entry was dropped from failedIndex, so its bytes no longer count against the quota")
+	if _, still := s.failed.index[id]; !still {
+		t.Fatal("the entry was dropped from the failed store, so its bytes no longer count against the quota")
 	}
-	if s.failedIndex[id].size != sizeBefore {
-		t.Errorf("indexed size changed to %d, want %d", s.failedIndex[id].size, sizeBefore)
+	if s.failed.index[id].size != sizeBefore {
+		t.Errorf("indexed size changed to %d, want %d", s.failed.index[id].size, sizeBefore)
 	}
 
 	// Once the obstruction is gone the next sweep must complete it, which is
@@ -627,7 +628,7 @@ func TestSweepFailedKeepsWhatItCouldNotDelete(t *testing.T) {
 	if freed != sizeBefore {
 		t.Errorf("the retried sweep freed %d bytes, want %d", freed, sizeBefore)
 	}
-	if _, still := s.failedIndex[id]; still {
+	if _, still := s.failed.index[id]; still {
 		t.Error("the entry survived a successful sweep")
 	}
 }
@@ -645,7 +646,7 @@ func TestRecoverDropsMetadataWhoseBodyIsGone(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	env := Envelope{From: "a@example.at", To: []string{"b@example.net"}, Client: "c", Route: "r",
+	env := Envelope{From: "a@example.at", To: []string{"b@example.net"}, Origin: "c", Route: "r",
 		Received: time.Now().UTC()}
 	id, err := s.Enqueue(env, strings.NewReader("Subject: x\r\n\r\nbody\r\n"), 0, time.Hour)
 	if err != nil {
@@ -980,7 +981,7 @@ func TestClaimReturnsTheOldestDueMessage(t *testing.T) {
 	want := make([]ID, 3)
 	for i, age := range []time.Duration{0, time.Minute, 2 * time.Minute} {
 		env := Envelope{From: "a@example.at", To: []string{"b@example.net"},
-			Client: "c", Route: "r", Received: base.Add(-age)}
+			Origin: "c", Route: "r", Received: base.Add(-age)}
 		id, err := s.Enqueue(env, strings.NewReader("body\r\n"), 0, time.Hour)
 		if err != nil {
 			t.Fatal(err)
@@ -1010,7 +1011,7 @@ func TestDeferReschedulesWithoutWritingMetadata(t *testing.T) {
 		t.Fatal(err)
 	}
 	env := Envelope{From: "a@example.at", To: []string{"b@example.net"},
-		Client: "c", Route: "r", Received: time.Now().UTC()}
+		Origin: "c", Route: "r", Received: time.Now().UTC()}
 	id, err := s.Enqueue(env, strings.NewReader("body\r\n"), 0, time.Hour)
 	if err != nil {
 		t.Fatal(err)
@@ -1090,10 +1091,10 @@ func TestConcurrentRequeueResolvesToOne(t *testing.T) {
 		t.Fatalf("%d ok + %d busy != %d callers", ok, busy, callers)
 	}
 
-	if _, err := os.Stat(filepath.Join(s.failed, id.String()+".eml")); !os.IsNotExist(err) {
+	if _, err := os.Stat(s.failed.path(id, ".eml")); !os.IsNotExist(err) {
 		t.Errorf("the body is still in spool/failed: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(s.failed, id.String()+".json")); !os.IsNotExist(err) {
+	if _, err := os.Stat(s.failed.path(id, ".json")); !os.IsNotExist(err) {
 		t.Errorf("the metadata is still in spool/failed: %v", err)
 	}
 	m, claimed := s.Claim(time.Now())
@@ -1120,7 +1121,7 @@ func TestClaimBatchReturnsTheGloballyOldest(t *testing.T) {
 	base := time.Now().UTC().Add(-time.Hour)
 	want := make([]ID, 0, 5)
 	for i := 0; i < 50; i++ {
-		env := Envelope{From: "a@example.at", To: []string{"b@example.net"}, Client: "c", Route: "r",
+		env := Envelope{From: "a@example.at", To: []string{"b@example.net"}, Origin: "c", Route: "r",
 			Received: base.Add(time.Duration(i) * time.Minute)}
 		id, err := s.Enqueue(env, strings.NewReader("body"), 0, time.Hour)
 		if err != nil {
@@ -1156,7 +1157,7 @@ func TestClaimBatchHonoursSkip(t *testing.T) {
 	}
 	now := time.Now().UTC()
 	for _, route := range []string{"busy", "free"} {
-		env := Envelope{From: "a@example.at", To: []string{"b@example.net"}, Client: "c",
+		env := Envelope{From: "a@example.at", To: []string{"b@example.net"}, Origin: "c",
 			Route: route, Received: now}
 		if _, err := s.Enqueue(env, strings.NewReader("body"), 0, time.Hour); err != nil {
 			t.Fatal(err)
@@ -1199,10 +1200,10 @@ func TestConcurrentCommitsCannotOvershootTheQuota(t *testing.T) {
 	const body = 4096
 	// Room for four bodies, against eight concurrent commits.
 	s.mu.Lock()
-	s.maxQuotaBytes = 4 * body
+	s.quota.maxBytes = 4 * body
 	s.mu.Unlock()
 
-	env := Envelope{From: "a@example.at", To: []string{"b@example.net"}, Client: "c", Route: "r",
+	env := Envelope{From: "a@example.at", To: []string{"b@example.net"}, Origin: "c", Route: "r",
 		Received: time.Now().UTC()}
 	var wg sync.WaitGroup
 	for i := 0; i < 8; i++ {
@@ -1229,7 +1230,7 @@ func (s *Spool) leasedFor(id ID) bool {
 
 func enqueueOneForTest(t *testing.T, s *Spool) ID {
 	t.Helper()
-	env := Envelope{From: "a@example.at", To: []string{"b@example.net"}, Client: "c", Route: "r",
+	env := Envelope{From: "a@example.at", To: []string{"b@example.net"}, Origin: "c", Route: "r",
 		Received: time.Now().UTC()}
 	id, err := s.Enqueue(env, strings.NewReader("body"), 0, time.Hour)
 	if err != nil {
@@ -1249,7 +1250,7 @@ func TestQueueDepthServesRepeatedReadsFromCache(t *testing.T) {
 		t.Fatal(err)
 	}
 	env := Envelope{From: "a@example.at", To: []string{"b@example.net"},
-		Client: "c", Route: "r", Received: time.Now().UTC()}
+		Origin: "c", Route: "r", Received: time.Now().UTC()}
 	if _, err := s.Enqueue(env, strings.NewReader("x"), 0, time.Hour); err != nil {
 		t.Fatal(err)
 	}
@@ -1292,7 +1293,7 @@ func TestQueueDepthDoesNotServeADifferentMomentFromCache(t *testing.T) {
 		t.Fatal(err)
 	}
 	env := Envelope{From: "a@example.at", To: []string{"b@example.net"},
-		Client: "c", Route: "r", Received: time.Now().UTC()}
+		Origin: "c", Route: "r", Received: time.Now().UTC()}
 	id, err := s.Enqueue(env, strings.NewReader("x"), 0, 48*time.Hour)
 	if err != nil {
 		t.Fatal(err)
@@ -1326,7 +1327,7 @@ func TestQueueDepthReturnsACopy(t *testing.T) {
 		t.Fatal(err)
 	}
 	env := Envelope{From: "a@example.at", To: []string{"b@example.net"},
-		Client: "c", Route: "r", Received: time.Now().UTC()}
+		Origin: "c", Route: "r", Received: time.Now().UTC()}
 	if _, err := s.Enqueue(env, strings.NewReader("x"), 0, time.Hour); err != nil {
 		t.Fatal(err)
 	}
@@ -1359,7 +1360,7 @@ func TestRecoverHandlesEveryHalfPairFromOneListing(t *testing.T) {
 		t.Fatal(err)
 	}
 	env := Envelope{From: "a@example.at", To: []string{"b@example.net"},
-		Client: "c", Route: "r", Received: time.Now().UTC()}
+		Origin: "c", Route: "r", Received: time.Now().UTC()}
 	whole, err := s.Enqueue(env, strings.NewReader("body\r\n"), 0, time.Hour)
 	if err != nil {
 		t.Fatal(err)
@@ -1423,7 +1424,7 @@ func TestRecoverDropsAPairWhoseMetadataIsCorrupt(t *testing.T) {
 		t.Fatal(err)
 	}
 	env := Envelope{From: "a@example.at", To: []string{"b@example.net"},
-		Client: "c", Route: "r", Received: time.Now().UTC()}
+		Origin: "c", Route: "r", Received: time.Now().UTC()}
 	id, err := s.Enqueue(env, strings.NewReader("body\r\n"), 0, time.Hour)
 	if err != nil {
 		t.Fatal(err)
@@ -1467,7 +1468,7 @@ func TestRecoverReadsEveryBatch(t *testing.T) {
 		m := Meta{
 			ID: id, NextAttempt: base, Expires: base.Add(96 * time.Hour),
 			Envelope: Envelope{From: "a@example.at", To: []string{"b@example.net"},
-				Client: "c", Route: "r", Received: base},
+				Origin: "c", Route: "r", Received: base},
 		}
 		b, err := json.Marshal(m)
 		if err != nil {
@@ -1504,4 +1505,69 @@ func loadIDForTest(i int) ID {
 		b[k] = alphabet[(i>>(5*k))&31]
 	}
 	return ID(b[:])
+}
+
+// Envelope.Origin was called Client until 2026-09-21 and kept the old JSON
+// tag, because this is persisted metadata: a spool directory written by the
+// previous binary has to go on being readable, and one written by this binary
+// has to stay readable if it is rolled back. The tag is the whole of that
+// guarantee, so it is pinned here rather than left to a reader of the struct.
+func TestEnvelopeOriginKeepsItsOnDiskName(t *testing.T) {
+	b, err := json.Marshal(Envelope{Origin: "printers", Route: "r"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), `"client":"printers"`) {
+		t.Fatalf("Origin is not written as \"client\", so a rollback loses it: %s", b)
+	}
+	if strings.Contains(string(b), `"origin"`) {
+		t.Fatalf("the field name leaked into the on-disk format: %s", b)
+	}
+
+	// And the other direction: metadata an earlier version wrote.
+	var env Envelope
+	if err := json.Unmarshal([]byte(`{"from":"a@example.at","client":"erp","route":"r"}`), &env); err != nil {
+		t.Fatal(err)
+	}
+	if env.Origin != "erp" {
+		t.Errorf("Origin = %q from a pre-rename envelope, want %q", env.Origin, "erp")
+	}
+}
+
+// The same guarantee through the spool rather than the struct: a message
+// whose metadata file predates the rename keeps its origin across a restart,
+// which is what the history journal, the bounce digest and the canary
+// counters all key on.
+func TestPreRenameMetadataRecoversItsOrigin(t *testing.T) {
+	dir := t.TempDir()
+	if _, err := Open(dir); err != nil {
+		t.Fatal(err)
+	}
+	id, err := NewID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	queue := filepath.Join(dir, "spool", "queue")
+	now := time.Now().UTC()
+	meta := fmt.Sprintf(
+		`{"id":%q,"envelope":{"from":"a@example.at","to":["b@example.net"],"client":"printers","route":"r","size":4,"received":%q},"next_attempt":%q,"expires":%q}`,
+		id, now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano), now.Add(time.Hour).Format(time.RFC3339Nano))
+	if err := os.WriteFile(filepath.Join(queue, id.String()+".json"), []byte(meta), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(queue, id.String()+".eml"), []byte("body"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, ok := reopened.Claim(now.Add(time.Minute))
+	if !ok {
+		t.Fatal("the pre-rename message was not recovered")
+	}
+	if m.Envelope.Origin != "printers" {
+		t.Errorf("Origin = %q after recovery, want %q", m.Envelope.Origin, "printers")
+	}
 }

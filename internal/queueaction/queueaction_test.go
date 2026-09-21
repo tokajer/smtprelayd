@@ -36,7 +36,7 @@ func queued(t *testing.T, sp *spool.Spool, st *store.Store) spool.ID {
 	t.Helper()
 	now := time.Now().UTC()
 	env := spool.Envelope{From: "device@example.at", To: []string{"ops@example.net"},
-		Client: "printers", Route: "m365", Listener: "smtp",
+		Origin: "printers", Route: "m365", Listener: "smtp",
 		RemoteAddr: "10.10.5.9", Received: now}
 	id, err := sp.Enqueue(env, strings.NewReader("Subject: x\r\n\r\nbody\r\n"), 0, time.Hour)
 	if err != nil {

@@ -19,7 +19,126 @@ fix below): the MSI installs without error, exactly one service registration
 remains (no duplicate), the on-disk binary is replaced, and the service keeps
 running afterwards. Uninstall remains unverified. Log rotation and Windows ACL
 verification at startup are complete.
-**Last session**: 2026-09-21 (fifty-third session) — A second architectural
+**Last session**: 2026-09-21 (fifty-fourth session) — **All six planned
+restructurings taken.** None changes behaviour, and the exported surface of
+every package touched was diffed against `HEAD`: the only differences are the
+two intended field renames and the one new function. `go test -race ./...` is
+green over the whole tree.
+
+**3 — `spool.Spool` no longer owns four sets of state.** The mirror of
+`spool/failed` is a `failedStore` (its index, byte total, retention, and the
+directory path, since `reindex` and `sweep` are entirely about that
+directory), and the quota is a `quotaLedger` (ceiling, threshold,
+reservations). `Spool` keeps the live queue. The point was not the line count:
+neither type can reach the live queue, so "these three locks are never held
+nested" is now a property of the call graph. The one place the three meet is
+`Spool.liveAndFailedBytes`, which asks each in turn; `quotaLedger` holds no
+idea of what the spool occupies, taking it as a parameter to `reserve`, which
+is what makes the ordering impossible to get wrong from inside the ledger.
+`QuotaWarning`'s short-circuit was kept deliberately — it reads the limits
+first and never composes `usedBytes` when nothing is configured. 58 exported
+symbols, unchanged.
+
+**4 — `Envelope.Client` is `Origin`, JSON tag still `"client"`.** The field
+holds a client name, a canary name or a notification source, and it was being
+re-explained at every site that touched it. `selfmail.Message.Client` went
+with it so the composer matches the envelope; `store.MessageRecord.Client` did
+not, because that one is a column. The tag is the on-disk compatibility
+guarantee in both directions and is pinned by two tests — one on the struct,
+one writing a pre-rename metadata file by hand and claiming it back through a
+reopened spool. **The plan was wrong about one thing**: it suggested
+`config.reservedNames` might become unnecessary. It does not — naming the
+field honestly does not stop the three uses sharing one key space, which is
+what that guard refuses a collision in. Its comment now says so.
+
+**5 — `httpx.Serve`** holds the goroutine, the `ctx.Done()` select and the
+five-second drain that `web.Serve` and `metrics.Serve` had a copy of each.
+`accept` is a closure because the TLS decision is the caller's (metrics is TLS
+beyond loopback, plaintext on loopback; the dashboard never), and a
+`component` string exists so "web listener failed" and "metrics listener
+failed" stay byte-identical instead of being unified into a third wording —
+that would have been an observable change. Each package keeps its own
+timeouts, which were always deliberately different.
+
+**6 — `connCounter` is in `admission.go`.** `match.go` is 54 lines holding the
+CIDR `Matcher` alone, down from 138 with three concerns in it before **1** and
+this. A pure file move; the tests moved with their subject.
+
+**1** and **2** were taken first.
+
+**The definition of done is complete for all three sessions of this work.**
+`gosec` and `govulncheck` were missing from the two previous runs because
+neither was installed here; both were installed and run at the versions CI
+pins (`ci.yml`: govulncheck v1.6.0, gosec v2.28.0, `-severity=medium`).
+**govulncheck: no vulnerabilities found. gosec: 0 issues over 76 files and
+14 904 lines, with the tree's 18 `#nosec` annotations unchanged** — none was
+added for any of this work. Together with `gofmt`, `go vet`, both builds,
+`scripts/check-banned-imports.sh` on all three targets and `go test -race`
+over the whole tree, every gate `CLAUDE.md` names is now green rather than
+deferred to CI.
+
+**2 — the Prometheus exposition has its own file.** `expositionSeries`,
+`snapshot`, `series`, `perRoute`, `label` and `text()` moved to
+`internal/metrics/exposition.go`; `metrics.go` keeps the `Registry`, the
+counter methods and `Status()` — the read model the dashboard's route page and
+sidebar and `GET /api/v1/queue` render from — and `http.go` keeps everything
+HTTP. 601 lines in one file became 351 + 290. Two departures from the plan,
+both recorded in the new file's doc comment: `ServeHTTP` stayed in `http.go`,
+because method routing and a content type are not the format; and the entry
+point stayed the unexported `text()` instead of becoming
+`func Exposition(*Registry) string`, because it has exactly one caller and an
+exported renderer with none outside the package is API surface for its own
+sake (`CLAUDE.md` §5).
+
+It was verified as a pure move rather than asserted to be one: a
+deterministically seeded registry — three routes including one that needs
+label escaping, two canaries, every counter touched — was rendered on `HEAD`
+and on the working tree and the dumps diffed. **57 lines identical**, the only
+differences being the three gauges that are functions of uptime
+(`uptime_seconds`, the two `last_delivery_time` families, and
+`delivery_rate_per_minute`, which is `delivered_total` over uptime). The
+throwaway dump test was deleted afterwards.
+
+**1 — the per-minute token bucket is one implementation again.**
+
+`listener.rateLimiter` and `delivery.routeLimiter` were the same algorithm in
+two files — a map of buckets, refill once a minute, `limit <= 0` means
+unlimited — differing only in whether the caller wanted a `bool` or also the
+wait until the refill. New `internal/ratelimit` holds one `Limiter` with
+`Allow(key, limit, now) (wait, ok)`. The listener ignores the wait, because it
+refuses the transaction rather than scheduling it; the dispatcher still defers
+a message by exactly that value. `internal/delivery/ratelimit.go` and its test
+are deleted, the bucket is out of `internal/listener/match.go`, and both test
+suites are merged in the new package at **100% statement coverage**.
+
+**Behaviour-preserving, and checked rather than asserted.** The whole diff at
+the two call sites is the method name and the extra return value; the 451
+reply, the "client rate limit exceeded" warning and `hold(meta, wait)` are
+untouched. The listener's old create-then-maybe-refill and the dispatcher's
+create-or-refill give the same token state in all three cases — miss, stale,
+fresh — and differ only in replacing the bucket pointer instead of mutating it
+on a stale hit, which nothing holds. `internal/listener` reads 76.9% → 76.0%
+and `internal/delivery` 78.9% → 77.8%: the covered code moved into a package
+of its own, nothing lost a test.
+
+**Three properties neither old suite had** came with the merge: the wait
+shrinks as the window runs out and never reaches zero (the dispatcher defers
+by it, so a zero would be a spin loop), concurrent callers get exactly `limit`
+tokens between them (both callers share one `Limiter` across goroutines), and
+an unlimited key allocates no bucket at all.
+
+**`internal/api`'s `failLimiter` is deliberately not folded in**, and the new
+package's doc comment says why rather than leaving it to look like an
+oversight: its keys are source addresses chosen by whoever is failing to
+authenticate, so it needs eviction and a ceiling on the table — which is the
+opposite of a `Limiter`, whose key space must be bounded by the configuration.
+That precondition is now stated on the type and pinned by a test.
+
+Item **6** of the plan shrank as a result: the rate limiter is gone from
+`match.go`, so only `connCounter` and its two key helpers are left to move.
+`MEMORY.md` section 3 carries the dated amendment and the new package's row.
+
+**Session before that**: 2026-09-21 (fifty-third session) — A second architectural
 review of the whole tree, everything from it acted on except the six
 restructurings (now tracked in "Planned restructurings" below), and the last
 of the seventh review's deferred findings fixed. The previous review moved
@@ -159,11 +278,11 @@ rather than inviting a fourth rediscovery, which is what it was written for.
 **Verified**: `gofmt` clean, `go vet ./...` clean, `go build ./...` and
 `GOOS=windows go build ./...` clean, `scripts/check-banned-imports.sh` clean
 on all three targets, full `go test ./...` green, and `go test -race` green
-over spool, bounce, listener, web and api. `gosec` and `govulncheck` were
-**not** run — neither is installed on this machine; CI still has to confirm
-them.
+over spool, bounce, listener, web and api. `gosec` and `govulncheck` were not
+run in that session and are confirmed clean in the fifty-fourth's closing run
+below, which covers this work too.
 
-**Session before that**: 2026-09-21 (fifty-second session) — An architectural review
+**Three sessions ago**: 2026-09-21 (fifty-second session) — An architectural review
 of the whole tree, then every finding from it acted on. The review was about
 structure rather than behaviour, so most of it moved code without changing
 what it does; three findings turned out to be defects and are listed first.
@@ -235,7 +354,7 @@ notifier's copy rather than the store's. The test now wires the store the way
 **`internal/config` no longer claims to reload.** Nothing in the tree ever
 has; `MEMORY.md` section 3 carries the dated correction.
 
-**Three sessions ago**: 2026-09-21 (fifty-first session) — Two reviews, both acting
+**Four sessions ago**: 2026-09-21 (fifty-first session) — Two reviews, both acting
 on what the load measurement had exposed, and both ending in things the
 measurement said rather than things the code looked like.
 
@@ -4867,81 +4986,130 @@ from. They are behaviour-preserving by intent: none of them should change a
 log line, a metric, an HTTP response or an on-disk byte, which is also the
 acceptance test for each.
 
-Ordered by value over effort, which is the order to take them in.
+Ordered by value over effort, which was the order they were taken in. **All
+six are done** (fifty-fourth session). The section is kept rather than deleted
+so that the reasoning behind each is findable from the code it changed, and so
+that what was decided against — exporting a renderer with no external caller,
+folding `api.failLimiter` into the shared limiter, dropping
+`config.reservedNames` — is on the record too.
 
 **1. `internal/ratelimit` for the two identical per-minute token buckets.**
-`listener.rateLimiter` (`internal/listener/match.go`) and
-`delivery.routeLimiter` (`internal/delivery/ratelimit.go`) are the same
-algorithm written twice: a map of buckets, refill once a minute, `limit <= 0`
-means unlimited. They differ only in the return type — the listener wants a
-`bool`, the dispatcher wants the wait duration as well. ~50 lines each, one of
-them in the mail path, and a correctness fix to one will not reach the other.
-`config.Validate`'s negative-value check already has to reason about both
-conventions at once (`internal/config/validate.go`, the comment above the
-`MaxMessageMB < 0` test). *First step*: one type with
-`Allow(key string, limit int, now time.Time) (time.Duration, bool)`; the
-listener ignores the duration. Both existing test files port over directly.
+**Done 2026-09-21 (fifty-fourth session).** `listener.rateLimiter` and
+`delivery.routeLimiter` were the same algorithm in two files, differing only
+in whether the caller wanted a `bool` or also the wait until the refill. One
+`Limiter` now, with
+`Allow(key string, limit int, now time.Time) (wait time.Duration, ok bool)`;
+the listener ignores the wait because it refuses the transaction outright,
+and the dispatcher still defers by exactly it. `internal/delivery/ratelimit.go`
+and its test are gone, the bucket is out of `internal/listener/match.go`, and
+both suites are merged in `internal/ratelimit/ratelimit_test.go` at 100%
+statement coverage — plus three properties neither suite had: that the wait
+shrinks across the window without reaching zero, that concurrent callers get
+exactly `limit` tokens between them, and that an unlimited key allocates no
+bucket at all.
+
+Behaviour-preserving, as the item required: the diff at the two call sites is
+the method name and the extra return value, and the 451 reply, the warning
+line and `hold(meta, wait)` are untouched. The listener's old
+create-then-maybe-refill and the dispatcher's create-or-refill produce the
+same token state in all three cases (miss, stale, fresh); only the bucket
+pointer is replaced rather than mutated on a stale hit, which nothing holds.
+`internal/listener` reads 76.9% → 76.0% and `internal/delivery` 78.9% →
+77.8%, both because the covered code moved to a package of its own, not
+because anything lost a test.
+
+`internal/api`'s `failLimiter` is deliberately not folded in, and the new
+package's doc comment says why: its keys are source addresses chosen by
+whoever is failing to authenticate, so it needs the eviction and the ceiling
+a `Limiter` has neither of. The precondition that a `Limiter`'s key space is
+bounded by the configuration is stated on the type and pinned by a test.
 
 **2. Split the Prometheus exposition out of `internal/metrics`.**
-`Registry` is two things: the process's in-memory operational counter store,
-whose `Status()` is the read model the dashboard's route page and sidebar and
-`GET /api/v1/queue` all render from, and the renderer of the text exposition.
-A change to the exposition format lands in the same file as the data three
-HTTP surfaces depend on. *First step*: move `expositionSeries`, `snapshot`,
-`series`, `perRoute`, `label`, `text()` and `ServeHTTP` into
-`internal/metrics/exposition.go` behind `func Exposition(*Registry) string`.
-No caller changes; the package boundary stays where it is. The note now on
-`Registry` describing the double duty is the thing this makes unnecessary.
+**Done 2026-09-21 (fifty-fourth session).** `expositionSeries`, `snapshot`
+(the type and the method), `series`, `perRoute`, `label` and `text()` moved to
+`internal/metrics/exposition.go`; `metrics.go` keeps the `Registry`, the
+counter methods and `Status()`, and `http.go` keeps everything HTTP. 601 lines
+in one file became 351 + 290, and the line drawn is "how it is rendered"
+against "what is counted", with serving as a third.
+
+Two deliberate departures from the plan above. `ServeHTTP` stayed in
+`http.go`: it is method routing and a content type, not the format, and the
+file it was already in holds `Serve`, `Listen` and the two auth wrappers.
+And the entry point stayed the unexported `text()` rather than becoming
+`func Exposition(*Registry) string` — the exposition has exactly one caller,
+`ServeHTTP`, so an exported renderer would be API surface for its own sake,
+which `CLAUDE.md` §5 rules out. The file's own doc comment records both
+choices.
+
+**Verified as a pure move, not argued.** A deterministically seeded registry
+(three routes including one needing label escaping, two canaries, every
+counter touched) was rendered on `HEAD` and on the working tree and the two
+dumps diffed: **57 lines identical**, with only the three inherently
+uptime-dependent gauges differing — `smtprelayd_uptime_seconds`,
+`smtprelayd_last_delivery_time`/`canary_last_delivery_time`, and
+`smtprelayd_delivery_rate_per_minute`, which is `delivered_total` over
+uptime. The throwaway dump test was removed afterwards.
 
 **3. `failedStore` and `quotaLedger` as types inside `internal/spool`.**
-`Spool` is 1021 lines and owns four sets of state behind three locks: the
-live queue, the mirror of `spool/failed`, the quota ledger and the depth
-cache. The fifty-second session correctly split the lock and wrote down that
-the three "share no invariant" — but they still share a struct, so every
-method can reach all three and the "never held nested" rule is enforced only
-by a comment. Both defects fixed in the fifty-third session were cross-index
-accounting mistakes, which is the failure this shape permits. *First step*:
-extract `failedStore` (`failedMu`, `failedIndex`, `failedBytes`, `failedTTL`,
-plus `putFailed`, `dropFailed`, `indexFailed`, `SweepFailed`,
-`SetFailedRetention`) as a type in the same package; `Spool` then holds a
-value and the lock-ordering rule becomes a property of the call graph.
-`quotaLedger` is the same move for `quotaMu`, `maxQuotaBytes`,
-`warnQuotaPercent` and `reserved`. Do them one at a time; `usedBytes` is the
-only place that reads across all three.
+**Done 2026-09-21 (fifty-fourth session).** `failedStore` owns the mirror of
+`spool/failed` — its index, its byte total, its retention and the directory
+path itself, since `reindex` and `sweep` are entirely about that directory —
+and `quotaLedger` owns the ceiling, the warning threshold and the
+reservations. `Spool` holds one of each and keeps only the live queue.
+
+The point was never the line count: it is that neither type can reach the live
+queue, so "these three locks are never held nested" stopped being a comment.
+The only place the three meet is `Spool.liveAndFailedBytes`, which asks each in
+turn and has released one lock before taking the next. `quotaLedger`
+deliberately holds no idea of what the spool occupies — `reserve(n, occupied)`
+takes it as a parameter — which is what makes that ordering impossible to get
+wrong from inside the ledger.
+
+`QuotaWarning`'s short-circuit was preserved on purpose: it reads the limits
+first and returns before composing `usedBytes` when no quota or threshold is
+configured, so the three totals are not walked for a result that would be
+discarded. The exported API of `internal/spool` is unchanged — 58 symbols,
+diffed against `HEAD` — with `SweepFailed`, `SetFailedRetention`, `SetQuota`
+and `QuotaWarning` now thin delegations.
 
 **4. `spool.Envelope.Client` → `Origin`.**
-The field holds three different things: a client name for relayed mail, a
-canary's name for a canary, and a notification source for a digest or expiry
-warning. The overload is load-bearing — `internal/bounce` groups digests by
-it, so distinct canary names report separately — and it is currently explained
-in four separate comments plus a `reservedNames` table in the config
-validator that exists to stop the namespaces colliding. *First step*: rename
-the field, keep the JSON tag as `"client"` for on-disk compatibility (the
-`Kind` migration in the same struct is the pattern), and say once in its doc
-comment that it is the grouping key. Callers: `internal/listener/session.go`,
-`internal/canary`, `internal/bounce`, `internal/selfmail`,
-`internal/delivery` (`recordOutcome` reads it as a canary name). Four
-comments and, arguably, the need for `reservedNames` go away with it.
+**Done 2026-09-21 (fifty-fourth session).** The field holds a client's name
+for relayed mail, a canary's own name for a probe, and a notification source
+for a digest or an expiry warning, and it was being re-explained at every site
+that set or read it. `selfmail.Message.Client` went with it, so the composer's
+vocabulary matches the envelope it fills; `store.MessageRecord.Client` did
+**not**, because that one is a database column.
+
+The JSON tag stays `"client"`. This is persisted metadata: a spool directory
+written by an earlier binary has to stay readable, and one written by this
+binary has to survive a rollback. Both directions are pinned —
+`TestEnvelopeOriginKeepsItsOnDiskName` asserts the tag on the way out and
+reads a pre-rename envelope on the way in, and
+`TestPreRenameMetadataRecoversItsOrigin` writes a pre-rename metadata file by
+hand and claims it back through a reopened spool.
+
+One thing the plan got wrong: it said the need for `config.reservedNames`
+might go away with the rename. It does not. Naming the field honestly does not
+stop the three uses sharing one key space, which is exactly what that guard
+refuses a collision in; its comment now says so.
 
 **5. `httpx.Serve` for the duplicated HTTP serve/shutdown blocks.**
-`web.Serve` and `metrics.Serve` carry the same `errCh` + `select` on
-`ctx.Done()` + five-second `Shutdown` structure, with different timeout
-constants (deliberate, documented) and one extra TLS branch. They are also
-asymmetric in a way that has no reason: `web.Serve(ctx, ln, handler, log)`
-takes a handler, `metrics.Serve(ctx, cfg, ln, reg, log)` builds its own.
-*First step*: `httpx.Serve(ctx, ln, *http.Server, log) error`, each package
-keeping its own timeouts and handler assembly and passing the configured
-server. Smallest of the six, and the one with the least behind it.
+**Done 2026-09-21 (fifty-fourth session).** One `Serve(ctx, srv, accept,
+component, log)` holds the goroutine, the select on `ctx.Done()` and the
+five-second drain. `accept` is a closure because whether a listener is TLS is
+the caller's decision: the metrics endpoint is TLS beyond loopback and
+plaintext on loopback, the dashboard never. `component` exists so the two
+existing log lines — "web listener failed", "metrics listener failed" — stay
+byte-identical rather than being unified into a third wording, which would
+have been an observable change. Each package keeps its own timeouts, which
+were always deliberately different.
 
-**6. Move `rateLimiter` and `connCounter` out of `internal/listener/match.go`.**
-The file is named for the CIDR `Matcher` and also holds the two admission
-controls, so nothing points a reader looking for "where is the connection cap
-enforced" at it. The tree already separates by concern this way (`wire.go`
-out of `session.go`, `schema.go` out of `store.go`). *First step*: an
-`admission.go` in the same package — or, if **1** lands first, the rate
-limiter goes to `internal/ratelimit` and only `connCounter` moves. Do this
-after **1**, not before.
-
+**6. Move `connCounter` out of `internal/listener/match.go`.**
+**Done 2026-09-21 (fifty-fourth session).** `connCounter`, `connKeyClient`,
+`connKeyUnmatched` and their tests are in `admission.go` and
+`admission_test.go`. `match.go` is 54 lines and holds the CIDR `Matcher`
+alone; it was 138 with three concerns in it before **1** and this. A pure file
+move, no symbol renamed.
 
 ## Open questions
 

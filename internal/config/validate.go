@@ -35,6 +35,11 @@ const SourceExpiryWatch = "expiry-watch"
 // itself. A client or canary answering to one of them would silently divert
 // those notifications, so the name is refused rather than documented as a
 // trap.
+//
+// Still needed after spool.Envelope.Client became Origin on 2026-09-21. That
+// rename says honestly that the field holds a client name, a canary name or a
+// notification source -- it does not stop the three sharing one key space,
+// which is what this refuses a collision in.
 var reservedNames = map[string]string{
 	SourceExpiryWatch: "the certificate and secret expiry watcher",
 }

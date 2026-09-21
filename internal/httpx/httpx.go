@@ -18,6 +18,8 @@
 package httpx
 
 import (
+	"context"
+	"errors"
 	"log/slog"
 	"net"
 	"net/http"
@@ -115,4 +117,40 @@ func ParseTimeRange(q url.Values, since, until **time.Time) string {
 		*until = &t
 	}
 	return ""
+}
+
+// shutdownGrace is how long an in-flight request has to finish once the
+// context is cancelled. Both listeners this serves are local and answer in
+// milliseconds; the grace exists so a dashboard page mid-render is not cut
+// off, not so a slow client can hold shutdown open.
+const shutdownGrace = 5 * time.Second
+
+// Serve runs srv until ctx is cancelled, then drains it, and reports what
+// went wrong if anything did.
+//
+// accept is what actually accepts -- srv.Serve(ln) or
+// srv.ServeTLS(ln, "", "") -- because whether a listener is TLS is the
+// caller's decision, not this function's. The metrics endpoint is TLS when it
+// binds beyond loopback and plaintext on loopback; the dashboard is never
+// TLS. component names the listener in the one log line this writes, so that
+// the two callers keep the messages they had before this was shared.
+//
+// A closed server is not a failure: Shutdown makes accept return
+// http.ErrServerClosed, which is the normal end of the ctx.Done path.
+func Serve(ctx context.Context, srv *http.Server, accept func() error, component string, log *slog.Logger) error {
+	errCh := make(chan error, 1)
+	go func() { errCh <- accept() }()
+
+	select {
+	case <-ctx.Done():
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownGrace)
+		defer cancel()
+		return srv.Shutdown(shutdownCtx)
+	case err := <-errCh:
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Error(component+" listener failed", "error", err)
+			return err
+		}
+		return nil
+	}
 }

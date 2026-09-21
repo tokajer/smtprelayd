@@ -142,7 +142,7 @@ func TestASaturatedRouteDoesNotStallTheOtherRoutes(t *testing.T) {
 		t.Helper()
 		id, err := sp.Enqueue(spool.Envelope{
 			From: "device@example.at", To: []string{"ops@example.net"},
-			Client: "printers", Route: route, Received: at,
+			Origin: "printers", Route: route, Received: at,
 		}, strings.NewReader("Subject: t\r\n\r\nbody\r\n"), 0, time.Hour)
 		if err != nil {
 			t.Fatal(err)
@@ -202,7 +202,7 @@ func TestDispatchHoldsASaturatedRouteAndMovesOn(t *testing.T) {
 	base := time.Now().UTC().Add(-time.Hour)
 	for i := 0; i < 20; i++ {
 		env := spool.Envelope{From: "a@example.at", To: []string{"b@example.net"},
-			Route: "full", Client: "printers", Received: base.Add(time.Duration(i) * time.Second)}
+			Route: "full", Origin: "printers", Received: base.Add(time.Duration(i) * time.Second)}
 		if _, err := sp.Enqueue(env, strings.NewReader("x"), 0, time.Hour); err != nil {
 			t.Fatal(err)
 		}

@@ -320,7 +320,7 @@ func (n *Notifier) enqueue(source string, recipients []string, subject, bodyText
 		To:           recipients,
 		Subject:      subject,
 		Body:         bodyText,
-		Client:       source,
+		Origin:       source,
 		Route:        n.cfg.Bounce.NotifyRoute,
 		Listener:     "bounce-notifier",
 		Kind:         spool.KindNotification,

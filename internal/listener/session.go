@@ -312,7 +312,10 @@ func (s *session) doMail(arg string) {
 	if !s.checkSizeParam(params) {
 		return
 	}
-	if !s.srv.rate.allow(s.client.Name, s.client.RateLimitPerMin, time.Now()) {
+	// The wait is ignored: an SMTP transaction is refused outright rather
+	// than held, and 451 already tells the client to come back later. The
+	// delivery dispatcher is the caller that schedules by it.
+	if _, ok := s.srv.rate.Allow(s.client.Name, s.client.RateLimitPerMin, time.Now()); !ok {
 		s.log.Warn("client rate limit exceeded", "limit_per_min", s.client.RateLimitPerMin)
 		s.reply(451, "4.7.0 rate limit exceeded, try again later")
 		return
@@ -492,7 +495,7 @@ func (s *session) commitCopies(staged *spool.Staged, res rewrite.Result, groups 
 			From:         res.EnvelopeFrom,
 			To:           append([]string(nil), g.Recipients...),
 			OriginalFrom: res.OriginalFrom,
-			Client:       s.client.Name,
+			Origin:       s.client.Name,
 			Route:        g.Route,
 			Listener:     s.srv.lc.Name,
 			RemoteAddr:   s.remote.String(),

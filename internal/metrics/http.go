@@ -6,7 +6,6 @@ package metrics
 import (
 	"context"
 	"crypto/tls"
-	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -123,7 +122,7 @@ func Serve(ctx context.Context, cfg *config.Config, ln net.Listener, reg *Regist
 		IdleTimeout:  120 * time.Second,
 	}
 
-	errCh := make(chan error, 1)
+	accept := func() error { return srv.Serve(ln) }
 	if public {
 		cert, err := tls.LoadX509KeyPair(cfg.TLS.CertFile, cfg.TLS.KeyFile)
 		if err != nil {
@@ -132,21 +131,7 @@ func Serve(ctx context.Context, cfg *config.Config, ln net.Listener, reg *Regist
 		}
 		srv.TLSConfig = &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12}
 		log.Info("metrics listener requires a read-scope bearer token", "address", addr)
-		go func() { errCh <- srv.ServeTLS(ln, "", "") }()
-	} else {
-		go func() { errCh <- srv.Serve(ln) }()
+		accept = func() error { return srv.ServeTLS(ln, "", "") }
 	}
-
-	select {
-	case <-ctx.Done():
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		return srv.Shutdown(shutdownCtx)
-	case err := <-errCh:
-		if err != nil && !errors.Is(err, http.ErrServerClosed) {
-			log.Error("metrics listener failed", "error", err)
-			return err
-		}
-		return nil
-	}
+	return httpx.Serve(ctx, srv, accept, "metrics", log)
 }

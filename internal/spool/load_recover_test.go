@@ -46,7 +46,7 @@ func TestLoadRecoveryAtOneMillion(t *testing.T) {
 					NextAttempt: base, Expires: base.Add(96 * time.Hour),
 					Envelope: Envelope{
 						From: "device@example.at", To: []string{"someone@partner.example"},
-						Client: "printers", Route: "m365", Listener: "smtp",
+						Origin: "printers", Route: "m365", Listener: "smtp",
 						RemoteAddr: "10.10.5.42", Helo: "printer-01.example.at",
 						Received: base.Add(time.Duration(i) * time.Microsecond),
 					},

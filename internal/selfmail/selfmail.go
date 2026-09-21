@@ -45,9 +45,12 @@ type Message struct {
 	Subject string
 	Body    string
 
-	// Client is the history journal's grouping key, and for a canary also
-	// what internal/bounce groups digest entries by.
-	Client   string
+	// Origin is who composed the message: a notification source, or a
+	// canary's name. It becomes spool.Envelope.Origin and the history
+	// journal's client column, and internal/bounce groups digest entries by
+	// it. Named for what it holds rather than for one of the things it can
+	// be; see the field on spool.Envelope.
+	Origin   string
 	Route    string
 	Listener string
 
@@ -89,7 +92,7 @@ func (m *Mailer) Send(msg Message, lifetime time.Duration, now time.Time) (spool
 	env := spool.Envelope{
 		From:       msg.EnvelopeFrom,
 		To:         msg.To,
-		Client:     msg.Client,
+		Origin:     msg.Origin,
 		Route:      msg.Route,
 		Listener:   msg.Listener,
 		RemoteAddr: "internal",
@@ -106,7 +109,7 @@ func (m *Mailer) Send(msg Message, lifetime time.Duration, now time.Time) (spool
 	recipientsJSON, _ := json.Marshal(msg.To)
 	if rerr := m.store.RecordMessage(store.MessageRecord{
 		QueueID:      id.String(),
-		Client:       msg.Client,
+		Client:       msg.Origin,
 		Route:        msg.Route,
 		EnvelopeFrom: msg.EnvelopeFrom,
 		Recipients:   string(recipientsJSON),

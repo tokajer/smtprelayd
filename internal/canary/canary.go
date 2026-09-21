@@ -161,7 +161,7 @@ func waitUntil(ctx context.Context, deadline time.Time) bool {
 // than building a second one, since being reported is the whole purpose of a
 // canary.
 //
-// Client is the canary's own Name, not a shared constant: internal/bounce
+// Origin is the canary's own Name, not a shared constant: internal/bounce
 // groups digest entries by it, so distinct names keep each canary's failures
 // reported separately, and config.Validate has already guaranteed no canary
 // name collides with a real client's.
@@ -179,7 +179,7 @@ func (r *Runner) send(now time.Time) error {
 		To:           []string{r.canary.Recipient},
 		Subject:      subject,
 		Body:         body.String(),
-		Client:       r.canary.Name,
+		Origin:       r.canary.Name,
 		Route:        r.canary.Route,
 		Listener:     "canary",
 		Kind:         spool.KindCanary,

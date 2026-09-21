@@ -23,7 +23,7 @@ func queueList(t *testing.T, sp *spool.Spool, st *store.Store, to ...string) (sp
 	now := time.Now().UTC()
 	env := spool.Envelope{
 		From: "device@example.at", To: to,
-		Client: "printers", Route: "smarthost", Received: now,
+		Origin: "printers", Route: "smarthost", Received: now,
 	}
 	id, err := sp.Enqueue(env, strings.NewReader("Subject: invoice\r\n\r\nbody\r\n"), 0, time.Hour)
 	if err != nil {

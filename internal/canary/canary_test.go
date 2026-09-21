@@ -74,8 +74,8 @@ func TestSendEnqueuesAnOrdinaryNonNotificationCanaryMessage(t *testing.T) {
 	if meta.Envelope.Notification {
 		t.Error("envelope flagged as a notification; a canary must not be, or its failure would never reach the bounce digest")
 	}
-	if meta.Envelope.Client != "m365-daily" {
-		t.Errorf("Client = %q, want the canary's own name", meta.Envelope.Client)
+	if meta.Envelope.Origin != "m365-daily" {
+		t.Errorf("Client = %q, want the canary's own name", meta.Envelope.Origin)
 	}
 	if meta.Envelope.From != "canary@example.at" {
 		t.Errorf("From = %q, want the configured sender", meta.Envelope.From)
@@ -157,7 +157,7 @@ func TestSendDistinguishesTwoCanariesByName(t *testing.T) {
 		if !ok {
 			break
 		}
-		seen[meta.Envelope.Client] = meta.Envelope.Route
+		seen[meta.Envelope.Origin] = meta.Envelope.Route
 	}
 	if seen["m365-daily"] != "m365" {
 		t.Errorf("m365-daily routed to %q, want m365", seen["m365-daily"])

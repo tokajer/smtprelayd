@@ -44,7 +44,7 @@ func TestLoadSpoolOnDisk(t *testing.T) {
 			}
 			env := Envelope{
 				From: "device@example.at", To: []string{"someone@partner.example"},
-				Client: "printers", Route: "m365", Listener: "smtp",
+				Origin: "printers", Route: "m365", Listener: "smtp",
 				RemoteAddr: "10.10.5.42", Received: time.Now().UTC(),
 			}
 			start := time.Now()

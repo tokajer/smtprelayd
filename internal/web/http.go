@@ -5,7 +5,6 @@ package web
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -13,6 +12,7 @@ import (
 	"time"
 
 	"github.com/tokajer/smtprelayd/internal/config"
+	"github.com/tokajer/smtprelayd/internal/httpx"
 )
 
 // dashboardPages is the dashboard's read-only page set: the template each one
@@ -116,21 +116,7 @@ func Serve(ctx context.Context, ln net.Listener, handler http.Handler, log *slog
 		IdleTimeout:  120 * time.Second,
 	}
 
-	errCh := make(chan error, 1)
-	go func() { errCh <- srv.Serve(ln) }()
-
-	select {
-	case <-ctx.Done():
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		return srv.Shutdown(shutdownCtx)
-	case err := <-errCh:
-		if err != nil && !errors.Is(err, http.ErrServerClosed) {
-			log.Error("web listener failed", "error", err)
-			return err
-		}
-		return nil
-	}
+	return httpx.Serve(ctx, srv, func() error { return srv.Serve(ln) }, "web", log)
 }
 
 // Listen binds the dashboard's socket. Split from Serve for the reason

@@ -16,6 +16,7 @@ import (
 
 	"github.com/tokajer/smtprelayd/internal/config"
 	"github.com/tokajer/smtprelayd/internal/metrics"
+	"github.com/tokajer/smtprelayd/internal/ratelimit"
 	"github.com/tokajer/smtprelayd/internal/rewrite"
 	"github.com/tokajer/smtprelayd/internal/router"
 	"github.com/tokajer/smtprelayd/internal/spool"
@@ -40,7 +41,7 @@ type Server struct {
 	match   *Matcher
 	router  *router.Router
 	rules   map[string]*rewrite.Rules
-	rate    *rateLimiter
+	rate    *ratelimit.Limiter
 	conns   *connCounter
 	sem     chan struct{}
 
@@ -84,7 +85,7 @@ func New(cfg *config.Config, sp *spool.Spool, log *slog.Logger, st *store.Store,
 		}
 		rules[cl.Name] = r
 	}
-	rate := newRateLimiter()
+	rate := ratelimit.New()
 	conns := newConnCounter()
 	sem := make(chan struct{}, cfg.Limits.MaxConnections)
 

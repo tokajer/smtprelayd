@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -24,13 +25,95 @@ type failedEntry struct {
 	at   time.Time
 }
 
-// indexFailed accounts for what is already sitting in spool/failed at startup.
-// Unlike the queue sweep above, nothing here is removed or repaired: these
-// messages are kept deliberately, and the operator's requeue action is the
-// only thing that should resurrect one. This only makes them visible to the
-// quota and to the retention sweep.
-func (s *Spool) indexFailed() error {
-	entries, err := os.ReadDir(s.failed)
+// failedStore is the mirror of the spool/failed directory: what each message
+// kept there costs, when it landed, and how long it may stay.
+//
+// A type with a lock of its own, because it shares no invariant with the live
+// queue. Nothing here may ever be claimed, leased or delivered, so it needs
+// none of the guarantees Spool.mu provides -- and a permanently failed message
+// leaves the live index without leaving the disk, so a quota that summed only
+// that index would let a client which reliably fails free its own quota while
+// still occupying the filesystem the quota exists to protect.
+//
+// Until 2026-09-21 this was four fields on Spool behind a failedMu, which
+// meant every Spool method could reach it and the rule that its lock is never
+// held while another is taken was a comment rather than a property of the call
+// graph. Both accounting defects fixed that day were cross-index mistakes,
+// which is the failure that shape permits.
+type failedStore struct {
+	// dir is spool/failed. Owned here because reindex and sweep are entirely
+	// about that directory; the Spool methods that move files into or out of
+	// it reach the path through this field.
+	dir string
+
+	mu    sync.Mutex
+	index map[ID]failedEntry
+	bytes int64
+	ttl   time.Duration
+}
+
+func newFailedStore(dir string) *failedStore {
+	return &failedStore{dir: dir, index: map[ID]failedEntry{}}
+}
+
+// path is the name of one of a failed message's two files.
+func (f *failedStore) path(id ID, ext string) string {
+	return filepath.Join(f.dir, id.String()+ext)
+}
+
+// put records a message now sitting in spool/failed.
+func (f *failedStore) put(id ID, e failedEntry) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if old, ok := f.index[id]; ok {
+		f.bytes -= old.size
+	}
+	f.index[id] = e
+	f.bytes += e.size
+}
+
+// drop removes a message from the mirror, reporting what it had been costing.
+func (f *failedStore) drop(id ID) (failedEntry, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	e, ok := f.index[id]
+	if ok {
+		f.bytes -= e.size
+		delete(f.index, id)
+	}
+	return e, ok
+}
+
+// has reports whether spool/failed still holds this message.
+func (f *failedStore) has(id ID) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	_, ok := f.index[id]
+	return ok
+}
+
+// occupied is what these messages cost on disk, for the quota.
+func (f *failedStore) occupied() int64 {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.bytes
+}
+
+// setRetention configures how long a permanently failed message's files are
+// kept. Zero disables the sweep.
+func (f *failedStore) setRetention(d time.Duration) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.ttl = d
+}
+
+// reindex accounts for what is already sitting in spool/failed at startup.
+// Unlike the queue sweep in recover, nothing here is removed or repaired:
+// these messages are kept deliberately, and the operator's requeue action is
+// the only thing that should resurrect one. This only makes them visible to
+// the quota and to the retention sweep.
+func (f *failedStore) reindex() error {
+	entries, err := os.ReadDir(f.dir)
 	if err != nil {
 		return err
 	}
@@ -48,7 +131,7 @@ func (s *Spool) indexFailed() error {
 			continue
 		}
 		size := int64(0)
-		if fi, err := os.Stat(filepath.Join(s.failed, id.String()+".eml")); err == nil {
+		if fi, err := os.Stat(f.path(id, ".eml")); err == nil {
 			size = fi.Size()
 		}
 		// The body's own size, not Envelope.Size: what the quota is about is
@@ -62,9 +145,63 @@ func (s *Spool) indexFailed() error {
 		// definitions of what the spool occupies. Both now mean "the bodies",
 		// which understates the total by one metadata file per message -- a
 		// known, uniform few hundred bytes against a ceiling in gigabytes.
-		s.putFailed(id, failedEntry{size: size, at: info.ModTime()})
+		f.put(id, failedEntry{size: size, at: info.ModTime()})
 	}
 	return nil
+}
+
+// sweep deletes messages that have been sitting in spool/failed for longer
+// than the configured retention, freeing both the disk and the quota they
+// hold. Their history rows are untouched: what a failure was and what the
+// smarthost said about it outlives the copy of the message itself, and
+// history.retention_days governs that separately.
+//
+// Returns the number of messages removed and the bytes freed. A retention of
+// zero disables the sweep, which keeps every failure forever -- the behaviour
+// before this existed, still reachable deliberately rather than by omission.
+func (f *failedStore) sweep(now time.Time) (removed int, freed int64) {
+	f.mu.Lock()
+	ttl := f.ttl
+	if ttl <= 0 {
+		f.mu.Unlock()
+		return 0, 0
+	}
+	var expired []ID
+	for id, e := range f.index {
+		if now.Sub(e.at) > ttl {
+			expired = append(expired, id)
+		}
+	}
+	f.mu.Unlock()
+
+	for _, id := range expired {
+		// Tracked across both extensions rather than acted on inside the
+		// loop: a "continue" there only advances to the next extension, so
+		// the accounting below ran even when nothing had been deleted --
+		// dropping the entry from the index, reporting its bytes as freed,
+		// and leaving the files occupying the disk untracked by the quota
+		// until the next restart re-read the directory. removeRetry exists
+		// precisely because this failure is expected on Windows.
+		gone := true
+		for _, ext := range []string{".json", ".eml"} {
+			if err := removeRetry(f.path(id, ext)); err != nil && !os.IsNotExist(err) {
+				gone = false
+			}
+		}
+		if !gone {
+			// Leave it indexed so the next sweep tries again rather than
+			// losing track of bytes that are still on the disk.
+			continue
+		}
+		if e, still := f.drop(id); still {
+			removed++
+			freed += e.size
+		}
+	}
+	if removed > 0 {
+		_ = syncDir(f.dir)
+	}
+	return removed, freed
 }
 
 // renameRetry moves a path, retrying briefly, for the reason given on
@@ -101,8 +238,8 @@ func (s *Spool) Fail(m *Meta, reason string) error {
 	// that failed permanently is attempted all over again.
 	for _, ext := range []string{".json", ".eml"} {
 		src := filepath.Join(s.queue, m.ID.String()+ext)
-		dst := filepath.Join(s.failed, m.ID.String()+ext)
-		// The body only, matching both the live index and indexFailed; see
+		dst := s.failed.path(m.ID, ext)
+		// The body only, matching both the live index and reindex; see
 		// the note there on why the metadata file is left out of all three.
 		if ext == ".eml" {
 			if fi, err := os.Stat(src); err == nil {
@@ -114,7 +251,7 @@ func (s *Spool) Fail(m *Meta, reason string) error {
 			// index, so returning here would leave whichever half did move
 			// sitting in spool/failed charged to nobody -- the quota would
 			// lose those bytes until a restart re-read the directory, which
-			// is precisely the accounting failedIndex exists to keep. The
+			// is precisely the accounting failedStore exists to keep. The
 			// entry is written below for what is actually there, and the
 			// error is reported afterwards.
 			if moveErr == nil {
@@ -124,72 +261,20 @@ func (s *Spool) Fail(m *Meta, reason string) error {
 	}
 	// Still counted against the quota, from the other index. The message left
 	// the queue; it did not leave the disk.
-	s.putFailed(m.ID, failedEntry{size: onDisk, at: time.Now()})
+	s.failed.put(m.ID, failedEntry{size: onDisk, at: time.Now()})
 
 	if moveErr != nil {
 		return moveErr
 	}
-	return syncDir(s.failed)
+	return syncDir(s.failed.dir)
 }
 
-// SweepFailed deletes messages that have been sitting in spool/failed for
-// longer than the configured retention, freeing both the disk and the quota
-// they hold. Their history rows are untouched: what a failure was and what the
-// smarthost said about it outlives the copy of the message itself, and
-// history.retention_days governs that separately.
-//
-// Returns the number of messages removed and the bytes freed. A retention of
-// zero disables the sweep, which keeps every failure forever -- the behaviour
-// before this existed, still reachable deliberately rather than by omission.
+// SweepFailed deletes messages whose retention has run out; see
+// failedStore.sweep, which does the work.
 func (s *Spool) SweepFailed(now time.Time) (removed int, freed int64) {
-	s.failedMu.Lock()
-	ttl := s.failedTTL
-	if ttl <= 0 {
-		s.failedMu.Unlock()
-		return 0, 0
-	}
-	var expired []ID
-	for id, e := range s.failedIndex {
-		if now.Sub(e.at) > ttl {
-			expired = append(expired, id)
-		}
-	}
-	s.failedMu.Unlock()
-
-	for _, id := range expired {
-		// Tracked across both extensions rather than acted on inside the
-		// loop: a "continue" there only advances to the next extension, so
-		// the accounting below ran even when nothing had been deleted --
-		// dropping the entry from failedIndex, reporting its bytes as freed,
-		// and leaving the files occupying the disk untracked by the quota
-		// until the next restart re-read the directory. removeRetry exists
-		// precisely because this failure is expected on Windows.
-		gone := true
-		for _, ext := range []string{".json", ".eml"} {
-			if err := removeRetry(filepath.Join(s.failed, id.String()+ext)); err != nil && !os.IsNotExist(err) {
-				gone = false
-			}
-		}
-		if !gone {
-			// Leave it indexed so the next sweep tries again rather than
-			// losing track of bytes that are still on the disk.
-			continue
-		}
-		if e, still := s.dropFailed(id); still {
-			removed++
-			freed += e.size
-		}
-	}
-	if removed > 0 {
-		_ = syncDir(s.failed)
-	}
-	return removed, freed
+	return s.failed.sweep(now)
 }
 
 // SetFailedRetention configures how long spool/failed keeps a permanently
 // failed message's files. Zero disables the sweep.
-func (s *Spool) SetFailedRetention(d time.Duration) {
-	s.failedMu.Lock()
-	defer s.failedMu.Unlock()
-	s.failedTTL = d
-}
+func (s *Spool) SetFailedRetention(d time.Duration) { s.failed.setRetention(d) }

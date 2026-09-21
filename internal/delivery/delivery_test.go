@@ -82,7 +82,7 @@ func testManager(t *testing.T) (*Manager, *spool.Spool, *bounce.Notifier, *metri
 func TestFailRecordsRealClientFailureButNotANotificationsOwn(t *testing.T) {
 	m, sp, notifier, _ := testManager(t)
 
-	env := spool.Envelope{From: "a@example.at", To: []string{"b@example.net"}, Route: "m365", Client: "printers", Received: time.Now()}
+	env := spool.Envelope{From: "a@example.at", To: []string{"b@example.net"}, Route: "m365", Origin: "printers", Received: time.Now()}
 	if _, err := sp.Enqueue(env, strings.NewReader("x"), 0, time.Hour); err != nil {
 		t.Fatal(err)
 	}
@@ -96,7 +96,7 @@ func TestFailRecordsRealClientFailureButNotANotificationsOwn(t *testing.T) {
 		t.Fatalf("pending = %d after a real client failure, want 1", got)
 	}
 
-	notifEnv := spool.Envelope{From: "", To: []string{"ops@example.at"}, Route: "m365", Client: "printers", Received: time.Now(), Notification: true}
+	notifEnv := spool.Envelope{From: "", To: []string{"ops@example.at"}, Route: "m365", Origin: "printers", Received: time.Now(), Notification: true}
 	if _, err := sp.Enqueue(notifEnv, strings.NewReader("y"), 0, time.Hour); err != nil {
 		t.Fatal(err)
 	}
@@ -120,7 +120,7 @@ func TestFailRecordsRealClientFailureButNotANotificationsOwn(t *testing.T) {
 func TestFailRecordsACanarysOwnFailureUnlikeANotifications(t *testing.T) {
 	m, sp, notifier, _ := testManager(t)
 
-	env := spool.Envelope{From: "canary@example.at", To: []string{"ops@example.at"}, Route: "m365", Client: "smtprelayd-canary", Received: time.Now(), Canary: true}
+	env := spool.Envelope{From: "canary@example.at", To: []string{"ops@example.at"}, Route: "m365", Origin: "smtprelayd-canary", Received: time.Now(), Canary: true}
 	if _, err := sp.Enqueue(env, strings.NewReader("x"), 0, time.Hour); err != nil {
 		t.Fatal(err)
 	}
@@ -322,7 +322,7 @@ func TestExtractSMTPError(t *testing.T) {
 func TestHoldDoesNotConsumeTheRetryBudget(t *testing.T) {
 	m, sp, _, _ := testManager(t)
 	env := spool.Envelope{From: "a@example.at", To: []string{"b@example.net"},
-		Route: "m365", Client: "printers", Received: time.Now()}
+		Route: "m365", Origin: "printers", Received: time.Now()}
 	if _, err := sp.Enqueue(env, strings.NewReader("x"), 0, time.Hour); err != nil {
 		t.Fatal(err)
 	}
@@ -361,7 +361,7 @@ func TestHoldDoesNotConsumeTheRetryBudget(t *testing.T) {
 func TestHoldNeverDefersPastExpiry(t *testing.T) {
 	m, sp, _, _ := testManager(t)
 	env := spool.Envelope{From: "a@example.at", To: []string{"b@example.net"},
-		Route: "m365", Client: "printers", Received: time.Now()}
+		Route: "m365", Origin: "printers", Received: time.Now()}
 	if _, err := sp.Enqueue(env, strings.NewReader("x"), 0, 2*time.Minute); err != nil {
 		t.Fatal(err)
 	}

@@ -34,9 +34,23 @@ import (
 
 // Envelope is everything known about a message at the moment it was accepted.
 type Envelope struct {
-	From       string    `json:"from"`
-	To         []string  `json:"to"`
-	Client     string    `json:"client"`
+	From string   `json:"from"`
+	To   []string `json:"to"`
+
+	// Origin is who composed the message, and it is the grouping key the
+	// relay's own reporting uses: a client's name for relayed mail, a
+	// canary's name for a probe, a notification source for a digest or an
+	// expiry warning. internal/bounce groups digest entries by it, which is
+	// what keeps each canary's failures reported separately, and
+	// config.reservedNames refuses a client name that would collide with a
+	// source the relay uses itself.
+	//
+	// It was called Client until 2026-09-21, which named one of the three
+	// things it holds and needed saying again at every place that set or read
+	// it. The JSON tag keeps the old spelling: this is persisted metadata, and
+	// a binary rolled back has to go on reading a queued message's origin.
+	Origin string `json:"client"`
+
 	Route      string    `json:"route"`
 	Listener   string    `json:"listener"`
 	RemoteAddr string    `json:"remote_addr"`
@@ -124,20 +138,23 @@ var ErrQuotaExceeded = errors.New("spool: quota exceeded")
 // visible once its metadata file has been renamed into place, so a crash
 // halfway through an enqueue leaves rubbish in tmp and nothing in the queue.
 type Spool struct {
-	root   string
-	tmp    string
-	queue  string
-	failed string
+	root  string
+	tmp   string
+	queue string
 
 	// Three locks, not one. They guard three sets of state that share no
-	// invariant: the live queue, the mirror of spool/failed, and the quota
-	// ledger. One mutex over all of them meant a retention sweep of
+	// invariant: the live queue below, the mirror of spool/failed, and the
+	// quota ledger. One mutex over all of them meant a retention sweep of
 	// spool/failed, or a dashboard asking for the quota, stopped Commit and
 	// ClaimBatch -- and it is why QueueDepth needed a cache and Requeue
 	// needed to hold a lease instead of the lock.
 	//
-	// They are never held nested. usedBytes takes each in turn and releases
-	// it before taking the next; see the note there on what that costs.
+	// The other two are values of their own rather than more fields here,
+	// since 2026-09-21. That is what makes "never held nested" a property of
+	// the call graph instead of a comment: neither type can reach the live
+	// queue, so the only place the three meet is Spool.liveAndFailedBytes,
+	// which asks each in turn and has released one lock before taking the
+	// next.
 
 	// mu guards the live queue: index, leased, indexBytes and the depth
 	// cache derived from them.
@@ -157,25 +174,11 @@ type Spool struct {
 	depthAt     time.Time
 	depthWindow time.Duration
 
-	// failedMu guards the mirror of spool/failed. A permanently failed
-	// message leaves the live index but not the disk, so a quota that summed
-	// only index would let a client which reliably fails free its own quota
-	// while continuing to occupy the filesystem. Kept as a separate map
-	// rather than folded into index because nothing may ever claim, lease or
-	// deliver these -- which is also why it needs none of mu's invariants.
-	failedMu    sync.Mutex
-	failedIndex map[ID]failedEntry
-	failedBytes int64
-	failedTTL   time.Duration
-
-	// quotaMu guards the ceiling and what has been admitted against it.
-	quotaMu          sync.Mutex
-	maxQuotaBytes    int64
-	warnQuotaPercent int
-
-	// reserved is what commits in flight have been admitted for and not yet
-	// indexed; see reserveQuota.
-	reserved int64
+	// failed mirrors the spool/failed directory and owns its path; quota is
+	// the size ceiling and what has been admitted against it. See failed.go
+	// and quota.go.
+	failed *failedStore
+	quota  *quotaLedger
 }
 
 // putLocked inserts or replaces a message in the live index, keeping
@@ -197,42 +200,18 @@ func (s *Spool) dropLocked(id ID) {
 	}
 }
 
-// putFailed records a message now sitting in spool/failed.
-func (s *Spool) putFailed(id ID, e failedEntry) {
-	s.failedMu.Lock()
-	defer s.failedMu.Unlock()
-	if old, ok := s.failedIndex[id]; ok {
-		s.failedBytes -= old.size
-	}
-	s.failedIndex[id] = e
-	s.failedBytes += e.size
-}
-
-// dropFailed removes a message from the mirror of spool/failed, reporting
-// what it had been costing.
-func (s *Spool) dropFailed(id ID) (failedEntry, bool) {
-	s.failedMu.Lock()
-	defer s.failedMu.Unlock()
-	e, ok := s.failedIndex[id]
-	if ok {
-		s.failedBytes -= e.size
-		delete(s.failedIndex, id)
-	}
-	return e, ok
-}
-
 // Open prepares the spool directories and recovers any prior state.
 func Open(dataDir string) (*Spool, error) {
 	s := &Spool{
-		root:        dataDir,
-		tmp:         filepath.Join(dataDir, "spool", "tmp"),
-		queue:       filepath.Join(dataDir, "spool", "queue"),
-		failed:      filepath.Join(dataDir, "spool", "failed"),
-		index:       map[ID]*Meta{},
-		leased:      map[ID]bool{},
-		failedIndex: map[ID]failedEntry{},
+		root:   dataDir,
+		tmp:    filepath.Join(dataDir, "spool", "tmp"),
+		queue:  filepath.Join(dataDir, "spool", "queue"),
+		index:  map[ID]*Meta{},
+		leased: map[ID]bool{},
+		failed: newFailedStore(filepath.Join(dataDir, "spool", "failed")),
+		quota:  newQuotaLedger(),
 	}
-	for _, d := range []string{s.tmp, s.queue, s.failed} {
+	for _, d := range []string{s.tmp, s.queue, s.failed.dir} {
 		if err := os.MkdirAll(d, 0o700); err != nil {
 			return nil, err
 		}
@@ -295,7 +274,7 @@ func (s *Spool) recover() error {
 		}
 	}
 
-	return s.indexFailed()
+	return s.failed.reindex()
 }
 
 // syncDirFn is syncDir, indirected so that a test can make it fail. The only
@@ -771,10 +750,7 @@ func (s *Spool) Has(id ID) bool {
 	if live {
 		return true
 	}
-	s.failedMu.Lock()
-	defer s.failedMu.Unlock()
-	_, ok := s.failedIndex[id]
-	return ok
+	return s.failed.has(id)
 }
 
 // RouteDepth is the queue depth of one route, split by whether a message is
@@ -928,8 +904,8 @@ func (s *Spool) requeueLive(m *Meta) error {
 // requeueFailed moves a message from spool/failed back into the queue. The
 // caller holds the lease, which is what keeps Discard away from the renames.
 func (s *Spool) requeueFailed(id ID) error {
-	failedMeta := filepath.Join(s.failed, id.String()+".json")
-	//#nosec G304 -- failedMeta is s.failed joined with an ID the caller has already put through ParseID
+	failedMeta := s.failed.path(id, ".json")
+	//#nosec G304 -- failedMeta is spool/failed joined with an ID the caller has already put through ParseID
 	b, err := os.ReadFile(failedMeta)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -951,7 +927,7 @@ func (s *Spool) requeueFailed(id ID) error {
 	// held by a scanner makes this fail with a sharing violation rather than
 	// with a missing file, and losing that race here refuses an operator's
 	// requeue for a message that is perfectly intact.
-	failedBody := filepath.Join(s.failed, id.String()+".eml")
+	failedBody := s.failed.path(id, ".eml")
 	if err := renameRetry(failedBody, s.dataPath(id)); err != nil {
 		return err
 	}
@@ -980,13 +956,13 @@ func (s *Spool) requeueFailed(id ID) error {
 	if err := syncDir(s.queue); err != nil {
 		return err
 	}
-	if err := syncDir(s.failed); err != nil {
+	if err := syncDir(s.failed.dir); err != nil {
 		return err
 	}
 	s.mu.Lock()
 	s.putLocked(&m)
 	s.mu.Unlock()
-	s.dropFailed(id)
+	s.failed.drop(id)
 	return nil
 }
 
@@ -1027,7 +1003,7 @@ func (s *Spool) Discard(id ID) error {
 	// Both files are attempted before any error is reported, so one that
 	// cannot be unlinked does not leave the other in place.
 	var failure error
-	for _, dir := range []string{s.queue, s.failed} {
+	for _, dir := range []string{s.queue, s.failed.dir} {
 		for _, ext := range []string{".eml", ".json"} {
 			err := removeRetry(filepath.Join(dir, id.String()+ext))
 			switch {
@@ -1054,7 +1030,7 @@ func (s *Spool) Discard(id ID) error {
 	s.mu.Lock()
 	s.dropLocked(id)
 	s.mu.Unlock()
-	s.dropFailed(id)
+	s.failed.drop(id)
 
 	if !removed {
 		return ErrNotFound
@@ -1062,7 +1038,7 @@ func (s *Spool) Discard(id ID) error {
 	if err := syncDir(s.queue); err != nil {
 		return err
 	}
-	return syncDir(s.failed)
+	return syncDir(s.failed.dir)
 }
 
 // syncDir and ensureMode are platform-specific; see dirsync_unix.go and

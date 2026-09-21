@@ -58,6 +58,57 @@ libraries that do not exist understated it in the one direction that matters.
 
 ## 3. Component layout
 
+**Amended 2026-09-21.** `internal/ratelimit` is new, and is the one
+restructuring so far taken out of the fifty-third session's architectural
+review. The per-minute token bucket existed twice — `listener.rateLimiter`
+capping a compromised internal device, `delivery.routeLimiter` pacing what one
+smarthost is handed — as the same algorithm in two files, differing only in
+whether the caller wanted a bool or also the wait until the refill. A
+correctness fix to a bucket refill should not have to be remembered in two
+places, and `internal/config`'s negative-value check already had to reason
+about both conventions at once. One `Limiter` with
+`Allow(key, limit, now) (wait, ok)`; the listener ignores the wait, since it
+refuses the transaction rather than scheduling it. Behaviour-preserving: the
+token accounting, the 451 reply and the dispatcher's `hold(meta, wait)` are
+unchanged. `internal/api`'s `failLimiter` is deliberately **not** folded in —
+its keys are source addresses chosen by whoever is failing to authenticate, so
+it needs eviction and a ceiling on the table, which a `Limiter` has neither of
+and must not grow.
+
+The `internal/metrics` row is widened the same day for restructuring **2** of
+that review: the package was described only as "Prometheus text exposition",
+but its `Status()` is the read model the dashboard's route page and sidebar and
+`GET /api/v1/queue` render from — which is why `internal/web` and
+`internal/api` import it, and why a change to the wire format used to land in
+the same file as the data three HTTP surfaces depend on. The exposition now
+sits in its own `exposition.go`; nothing moved packages and nothing became
+exported.
+
+Restructurings **3** to **6** of the same review landed with them, and one is
+a schema-adjacent decision worth recording here rather than only in
+`PROGRESS.md`. **`spool.Envelope.Client` is now `Origin`, and its JSON tag
+stays `"client"`.** The field holds three different things — a client's name
+for relayed mail, a canary's own name, a notification source for a digest or
+an expiry warning — and `internal/bounce` groups digest entries by it, so the
+overload is load-bearing and was being re-explained at every site that set or
+read it. The tag is unchanged because this is persisted metadata: a spool
+directory written by an earlier binary has to stay readable, and one written
+by this binary has to survive a rollback. Two tests pin that in both
+directions. `config.reservedNames` **stays**: naming the field honestly does
+not stop the three uses sharing one key space, which is what that guard
+refuses a collision in.
+
+Also from 3 to 6, none of which changes behaviour or any exported symbol:
+`spool.Spool`'s mirror of `spool/failed` and its quota ledger are now
+`failedStore` and `quotaLedger`, types with their own locks inside the same
+package, so "these locks are never held nested" is a property of the call
+graph rather than a comment — the only place the three meet is
+`Spool.liveAndFailedBytes`, which asks each in turn; `httpx.Serve` holds the
+HTTP serve-and-drain loop the dashboard and the metrics endpoint had a copy of
+each; and `internal/listener`'s connection counter moved to its own
+`admission.go`, which is what was left of that file's second concern once the
+rate limiter went to `internal/ratelimit`.
+
 **Corrected 2026-09-21.** The `internal/config` row said "TOML load,
 validation, reload". Nothing in the tree reloads a configuration and nothing
 ever has: the loaded `*Config` is handed to the listener set, the delivery
@@ -70,21 +121,44 @@ decision that starts with those consumers, not with the loader.
 ```
 cmd/smtprelayd/        service wrapper, CLI (run, install, uninstall, queue)
 internal/config       TOML load and validation
-internal/listener     ports 25 / 587 / 465, STARTTLS, SASL, client matching
-internal/spool        durable on-disk queue
-internal/rewrite      per-client sender rewriting
+internal/listener     ports 25 / 587 / 465, STARTTLS, SASL, client matching,
+                      per-client connection caps
+internal/spool        durable on-disk queue, failed-message mirror, quota ledger
+internal/rewrite      per-client sender rewriting, header-block parser
 internal/router       recipient domain -> route
+internal/ratelimit    per-minute token bucket, shared by listener and delivery
 internal/delivery     worker pool, backoff, per-route concurrency
 internal/delivery/smarthost  SMTP client, PLAIN / LOGIN / XOAUTH2
 internal/authms365    Entra ID token acquisition and caching
 internal/store        SQLite message and attempt history
 internal/web          dashboard, server-side rendered
-internal/metrics      Prometheus text exposition
+internal/metrics      in-memory counters, Status() read model,
+                      Prometheus text exposition (exposition.go)
 internal/api          JSON API, admin actions, audit log
 internal/bounce       bounce digest notification, loop prevention, volume cap
+internal/expiry       what is about to stop working: certificate, client secret
+internal/selfmail     spools mail the relay composed itself (digest, warning,
+                      canary), so the three cannot drift apart
+internal/canary       periodic synthetic message per [[canary]] entry
+internal/queueaction  requeue and delete, shared by the dashboard and the API
+internal/httpx        bearer token, source address, loopback Host check,
+                      HTTP serve-and-drain -- the primitives more than one of
+                      the three HTTP surfaces needs
+internal/logging      structured JSON logging, rotation, central redaction
+internal/certgen      self-signed certificate for an internal listener
+internal/selftest     active open-relay check against the running instance
 internal/fsmode       restrict files created by dependencies to 0600
 internal/buildpolicy  first-party import ban, enforced as a test
 ```
+
+**Completed 2026-09-21.** This list had seventeen rows for twenty-five
+components. The eight it left out were not new -- `expiry`, `selfmail`,
+`canary`, `queueaction`, `httpx`, `logging`, `certgen` and `selftest` had all
+been in the tree for sessions -- so a section called "component layout"
+described two thirds of the components, which is worse than describing none:
+a reader checking whether a concern already has a home could conclude it did
+not, and write a second one. The order is roughly the order a message
+travels.
 
 ## 4. Queue design
 

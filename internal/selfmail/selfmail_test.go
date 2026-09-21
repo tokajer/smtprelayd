@@ -59,7 +59,7 @@ func TestHeaderFromAndEnvelopeFromAreIndependent(t *testing.T) {
 		To:           []string{"ops@example.at"},
 		Subject:      "digest",
 		Body:         "two failures\r\n",
-		Client:       "expiry-watch",
+		Origin:       "expiry-watch",
 		Route:        "m365",
 		Listener:     "bounce-notifier",
 		Kind:         spool.KindNotification,
@@ -94,7 +94,7 @@ func TestCanaryKeepsARealSenderAndIsNotANotification(t *testing.T) {
 		To:           []string{"probe@example.at"},
 		Subject:      "canary",
 		Body:         "probe\r\n",
-		Client:       "m365-daily",
+		Origin:       "m365-daily",
 		Route:        "m365",
 		Listener:     "canary",
 		Kind:         spool.KindCanary,
@@ -126,7 +126,7 @@ func TestHeaderBlockIsTerminatedAndComplete(t *testing.T) {
 	if _, err := New(sp, st, log).Send(Message{
 		HeaderFrom: "a@example.at", EnvelopeFrom: "a@example.at",
 		To: []string{"b@example.at", "c@example.at"}, Subject: "s", Body: "the body\r\n",
-		Client: "x", Route: "r", Listener: "l",
+		Origin: "x", Route: "r", Listener: "l",
 	}, time.Hour, now); err != nil {
 		t.Fatal(err)
 	}
@@ -159,7 +159,7 @@ func TestJournalRecordsWhatWasSpooled(t *testing.T) {
 	id, err := New(sp, st, log).Send(Message{
 		HeaderFrom: "a@example.at", EnvelopeFrom: "a@example.at",
 		To: []string{"b@example.at"}, Subject: "recorded", Body: "x\r\n",
-		Client: "canary-1", Route: "m365", Listener: "canary", Kind: spool.KindCanary,
+		Origin: "canary-1", Route: "m365", Listener: "canary", Kind: spool.KindCanary,
 	}, time.Hour, time.Now())
 	if err != nil {
 		t.Fatal(err)
