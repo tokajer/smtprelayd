@@ -5,6 +5,7 @@ package rewrite
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -279,5 +280,80 @@ func TestHeaderValueOnUnparsableBlockYieldsEmpty(t *testing.T) {
 	// propagate that as an error since it is best-effort metadata.
 	if got := HeaderValue("Subject: x\r\n\r\ntrailing", "Subject"); got != "" {
 		t.Errorf("got %q for an unparsable block, want empty", got)
+	}
+}
+
+// ParseHeaders is the same answers as the one-shot helpers, for one parse
+// instead of one per value. It has to stay that way, because the one-shot
+// helpers are now thin wrappers over it and internal/listener's journal reads
+// four values through it for every accepted message.
+func TestParseHeadersAgreesWithTheOneShotHelpers(t *testing.T) {
+	for _, block := range []string{
+		plainHeaders,
+		"Subject: a\r\n\tcontinued\r\nMessage-ID: <x@y>\r\n\r\n",
+		"Subject: x\r\n\r\ntrailing", // the one input parseBlock rejects
+		"",
+	} {
+		p := ParseHeaders(block)
+		if got, want := p.Count(), HeaderCount(block); got != want {
+			t.Errorf("block %q: Count() = %d, HeaderCount = %d", block, got, want)
+		}
+		for _, name := range []string{"Subject", "Message-ID", "Content-Type", "X-Missing"} {
+			if got, want := p.Value(name), HeaderValue(block, name); got != want {
+				t.Errorf("block %q, %s: Value() = %q, HeaderValue = %q", block, name, got, want)
+			}
+		}
+	}
+}
+
+// A nil *Parsed answers like an unparsable block rather than panicking: the
+// callers of this are metadata extraction for the history store, and none of
+// them may fail a message over a header it could not read.
+func TestNilParsedIsUsable(t *testing.T) {
+	var p *Parsed
+	if got := p.Value("Subject"); got != "" {
+		t.Errorf("Value on nil = %q, want empty", got)
+	}
+	if got := p.Count(); got != 0 {
+		t.Errorf("Count on nil = %d, want 0", got)
+	}
+}
+
+// benchHeaders is a header block at the default limits.max_headers of 200,
+// carrying the three fields the journal reads by name.
+func benchHeaders() string {
+	var b strings.Builder
+	b.WriteString("Subject: quarterly scan\r\n")
+	b.WriteString("Message-ID: <0123456789@device.example>\r\n")
+	b.WriteString("Content-Type: text/plain; charset=utf-8\r\n")
+	for i := 0; i < 197; i++ {
+		fmt.Fprintf(&b, "X-Filler-%03d: some plausible header value here\r\n", i)
+	}
+	b.WriteString("\r\n")
+	return b.String()
+}
+
+// The two benchmarks the journal's fix turns on: four values out of one block.
+// BenchmarkHeaderValuesOneShot is what internal/listener paid per route copy
+// of every accepted message, BenchmarkHeaderValuesParsedOnce is what it pays
+// now.
+func BenchmarkHeaderValuesOneShot(b *testing.B) {
+	h := benchHeaders()
+	for b.Loop() {
+		_ = HeaderValue(h, "Subject")
+		_ = HeaderValue(h, "Message-ID")
+		_ = HeaderValue(h, "Content-Type")
+		_ = HeaderCount(h)
+	}
+}
+
+func BenchmarkHeaderValuesParsedOnce(b *testing.B) {
+	h := benchHeaders()
+	for b.Loop() {
+		p := ParseHeaders(h)
+		_ = p.Value("Subject")
+		_ = p.Value("Message-ID")
+		_ = p.Value("Content-Type")
+		_ = p.Count()
 	}
 }

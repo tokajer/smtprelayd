@@ -20,6 +20,42 @@ import (
 // header value is made safe to store, is not protocol handling, and this is
 // the half of the file a change to the journal schema touches.
 
+// journalMeta is what the history journal records about a message that is the
+// same for every route copy of it: the values read out of the rewritten
+// header block, already sanitised and bounded.
+//
+// It is a value computed once per message rather than four reads inside
+// journalAccepted, because rewrite.HeaderValue and rewrite.HeaderCount each
+// parse the whole block. A message whose recipients split across three routes
+// therefore parsed it twelve times -- and a parse allocates per header line,
+// up to the default limits.max_headers of 200 -- for four values that cannot
+// differ between the copies.
+type journalMeta struct {
+	subject     string
+	messageID   string
+	contentType string
+	headerCount int
+}
+
+// journalMetaOf reads the journal's per-message values from the rewritten
+// header block in one parse. It describes what was spooled, so it reads the
+// rewritten block rather than the headers the client sent.
+func (s *session) journalMetaOf(headers string) journalMeta {
+	h := rewrite.ParseHeaders(headers)
+	m := journalMeta{
+		messageID:   sanitizeHeaderMeta(h.Value("Message-ID"), maxStoredMessageID),
+		contentType: sanitizeHeaderMeta(h.Value("Content-Type"), maxStoredContentType),
+		headerCount: h.Count(),
+	}
+	// Subject is stored only if retain_subjects is enabled; store.RecordMessage
+	// redacts it again regardless, this just avoids reading the header for
+	// nothing.
+	if s.srv.cfg.History.RetainSubjects {
+		m.subject = sanitizeSubject(h.Value("Subject"))
+	}
+	return m
+}
+
 // journalAccepted records one queued copy in the history store. The write is
 // best-effort: the message is already queued for delivery, and a problem in
 // the history store must not undo that or fail the session over it. It is
@@ -27,20 +63,13 @@ import (
 // 2026-09-18 the error was discarded and a database that had stopped
 // accepting writes showed up only as a queue view that no longer listed new
 // mail.
-func (s *session) journalAccepted(id spool.ID, g router.Group, res rewrite.Result, received time.Time, size int64, lifetime time.Duration) string {
-	// Subject is stored only if retain_subjects is enabled; store.RecordMessage
-	// redacts it again regardless, this just avoids parsing the header block
-	// for nothing.
+//
+// meta carries the values shared by every copy; the caller reads them once
+// before the loop over route groups. size is the staged size rather than the
+// size the client announced, for the reason journalMetaOf reads the rewritten
+// headers.
+func (s *session) journalAccepted(id spool.ID, g router.Group, res rewrite.Result, meta journalMeta, received time.Time, size int64, lifetime time.Duration) {
 	recipientsJSON, _ := json.Marshal(g.Recipients)
-	subject := ""
-	if s.srv.cfg.History.RetainSubjects {
-		subject = sanitizeSubject(rewrite.HeaderValue(res.Headers, "Subject"))
-	}
-	// Journal metadata describes what was spooled, so it is read from
-	// the rewritten header block and the staged size rather than from
-	// the headers the client sent or the size it announced.
-	messageID := sanitizeHeaderMeta(rewrite.HeaderValue(res.Headers, "Message-ID"), maxStoredMessageID)
-	contentType := sanitizeHeaderMeta(rewrite.HeaderValue(res.Headers, "Content-Type"), maxStoredContentType)
 	err := s.srv.store.RecordMessage(store.MessageRecord{
 		QueueID:      id.String(),
 		Client:       s.client.Name,
@@ -48,13 +77,13 @@ func (s *session) journalAccepted(id spool.ID, g router.Group, res rewrite.Resul
 		EnvelopeFrom: res.EnvelopeFrom,
 		OriginalFrom: res.OriginalFrom,
 		Recipients:   string(recipientsJSON),
-		Subject:      subject,
+		Subject:      meta.subject,
 		Listener:     s.srv.lc.Name,
 		RemoteAddr:   s.remote.String(),
-		MessageID:    messageID,
-		ContentType:  contentType,
+		MessageID:    meta.messageID,
+		ContentType:  meta.contentType,
 		SizeBytes:    size,
-		HeaderCount:  rewrite.HeaderCount(res.Headers),
+		HeaderCount:  meta.headerCount,
 		Helo:         sanitizeHeaderMeta(s.helo, maxStoredHelo),
 		ReceivedAt:   received,
 		ExpiresAt:    received.Add(lifetime),
@@ -66,7 +95,6 @@ func (s *session) journalAccepted(id spool.ID, g router.Group, res rewrite.Resul
 			s.srv.metrics.JournalWriteFailure()
 		}
 	}
-	return messageID
 }
 
 // Bounds on the header values kept in the history store. These are display

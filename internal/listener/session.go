@@ -483,6 +483,10 @@ func (s *session) commitCopies(staged *spool.Staged, res rewrite.Result, groups 
 	committed := make([]spool.ID, 0, len(groups))
 	ids := make([]string, 0, len(groups))
 
+	// Once, not once per group: the header block is the same for every copy,
+	// and reading these four values costs a parse each. See journalMeta.
+	meta := s.journalMetaOf(res.Headers)
+
 	for _, g := range groups {
 		env := spool.Envelope{
 			From:         res.EnvelopeFrom,
@@ -506,13 +510,13 @@ func (s *session) commitCopies(staged *spool.Staged, res rewrite.Result, groups 
 		committed = append(committed, id)
 		ids = append(ids, id.String())
 
-		messageID := s.journalAccepted(id, g, res, env.Received, staged.Size(), lifetime)
+		s.journalAccepted(id, g, res, meta, env.Received, staged.Size(), lifetime)
 
 		s.log.Info("message accepted",
 			"queue_id", id.String(), "from", res.EnvelopeFrom,
 			"original_from", res.OriginalFrom, "rewritten", res.Rewritten,
 			"recipients", len(g.Recipients), "route", g.Route, "route_reason", g.Reason,
-			"message_id", messageID, "size_bytes", staged.Size())
+			"message_id", meta.messageID, "size_bytes", staged.Size())
 	}
 
 	return ids, true

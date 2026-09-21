@@ -68,16 +68,60 @@ func parseBlock(s string) (*block, error) {
 	return b, nil
 }
 
+// Parsed is a header block parsed once, for a caller that needs several
+// values out of it.
+//
+// It exists because parsing is not cheap and the one-shot helpers below hide
+// that: each of them parses the whole block, allocating per header line, so
+// reading four values cost four parses of up to limits.max_headers fields.
+// internal/listener's journal was doing exactly that, once per route copy of
+// every accepted message, for four values that cannot differ between copies.
+//
+// Best-effort like the helpers: a block that will not parse yields a Parsed
+// that answers "" and 0. Every caller is metadata extraction for the history
+// store, and none of them may fail a message over a header it could not read.
+type Parsed struct {
+	b *block
+}
+
+// ParseHeaders parses a raw header block for repeated reads. The zero value
+// of the result is usable: a nil receiver and an unparsable block behave
+// alike.
+func ParseHeaders(headers string) *Parsed {
+	blk, err := parseBlock(headers)
+	if err != nil {
+		return &Parsed{}
+	}
+	return &Parsed{b: blk}
+}
+
+// Value returns the unfolded value of the first occurrence of name, or "" if
+// it is absent.
+func (p *Parsed) Value(name string) string {
+	if p == nil || p.b == nil {
+		return ""
+	}
+	return p.b.value(strings.ToLower(name))
+}
+
+// Count returns the number of header fields, a folded continuation counting
+// towards the field it continues rather than as a field of its own.
+func (p *Parsed) Count() int {
+	if p == nil || p.b == nil {
+		return 0
+	}
+	return len(p.b.fields)
+}
+
 // HeaderValue returns the unfolded value of the first occurrence of name in a
 // raw header block. Unlike Apply, this is best-effort metadata extraction for
 // the history store, not the rewriting path: a block that fails to parse or
 // a header that is absent both yield "" rather than an error.
+//
+// One value from one block. Use ParseHeaders when you want several, or the
+// block is parsed once per value.
 func HeaderValue(headers, name string) string {
-	blk, err := parseBlock(headers)
-	if err != nil {
-		return ""
-	}
-	return blk.value(strings.ToLower(name))
+	return ParseHeaders(headers).Value(name)
 }
 
 // HeaderCount returns the number of header fields in a raw header block, a
@@ -85,11 +129,7 @@ func HeaderValue(headers, name string) string {
 // a field of its own. Best-effort like HeaderValue: an unparsable block
 // yields 0.
 func HeaderCount(headers string) int {
-	blk, err := parseBlock(headers)
-	if err != nil {
-		return 0
-	}
-	return len(blk.fields)
+	return ParseHeaders(headers).Count()
 }
 
 func (b *block) count(name string) int {

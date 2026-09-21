@@ -219,6 +219,14 @@ func TestRequireTLSIsEnforcedAtMailFrom(t *testing.T) {
 // needs as soon as a message is actually committed.
 func serveQueued(t *testing.T, cfg *config.Config) *smtpConn {
 	t.Helper()
+	s, _ := serveQueuedWithStore(t, cfg)
+	return s
+}
+
+// serveQueuedWithStore is serveQueued for a test that also has to read back
+// what was journalled.
+func serveQueuedWithStore(t *testing.T, cfg *config.Config) (*smtpConn, *store.Store) {
+	t.Helper()
 	dir := t.TempDir()
 	sp, err := spool.Open(dir)
 	if err != nil {
@@ -260,7 +268,7 @@ func serveQueued(t *testing.T, cfg *config.Config) *smtpConn {
 	}
 	s := &smtpConn{t: t, c: conn, br: bufio.NewReader(conn)}
 	s.expect("banner", "220")
-	return s
+	return s, st
 }
 
 // queueConfig is plainConfig plus the route a committed message needs.
@@ -386,5 +394,96 @@ func TestSessionEndsWhenItsRepliesCannotBeWritten(t *testing.T) {
 	}
 	if !s.writeFailed {
 		t.Error("the failed write was not recorded")
+	}
+}
+
+// A message whose recipients split across two routes becomes two queued
+// copies, and the journal metadata read out of the header block has to be
+// identical on both: it describes the message, not the copy.
+//
+// This is what makes hoisting the four reads out of the per-group loop safe.
+// journalAccepted used to do them itself, and rewrite.HeaderValue and
+// rewrite.HeaderCount each parse the whole block, so this message cost eight
+// parses where it now costs one. Nothing about the recorded row may change
+// with it.
+func TestJournalMetadataIsIdenticalForEveryRouteCopy(t *testing.T) {
+	cfg := queueConfig()
+	// The subject is only read when history.retain_subjects is on, which is
+	// the shipped default; queueConfig leaves the whole History block zero.
+	cfg.History.RetainSubjects = true
+	cfg.Routes = []config.Route{
+		{Name: "r", Default: true, Host: "smtp.example", Port: 587, Auth: "none", TLS: "none"},
+		{Name: "partner", Host: "smtp.partner.example", Port: 587, Auth: "none", TLS: "none",
+			Domains: []string{"partner.example"}},
+	}
+	s, st := serveQueuedWithStore(t, cfg)
+
+	s.send("EHLO probe.test")
+	s.expect("EHLO", "250")
+	s.send("MAIL FROM:<device@example.test>")
+	s.expect("MAIL FROM", "250")
+	s.send("RCPT TO:<ops@example.test>")
+	s.expect("RCPT TO default route", "250")
+	s.send("RCPT TO:<someone@partner.example>")
+	s.expect("RCPT TO partner route", "250")
+	s.send("DATA")
+	s.expect("DATA", "354")
+
+	s.send("Subject: quarterly scan")
+	s.send("Message-ID: <abc123@device.example>")
+	s.send("Content-Type: text/plain; charset=utf-8")
+	s.send("X-Device: scanner-4")
+	s.send("")
+	s.send("body")
+	s.send(".")
+	accepted := s.expect("end of data", "250")
+
+	// Two copies, named in the acceptance reply: "queued as <id> <id>".
+	fields := strings.Fields(accepted)
+	ids := fields[len(fields)-2:]
+	if len(ids) != 2 || ids[0] == ids[1] {
+		t.Fatalf("expected two distinct queue ids in %q", accepted)
+	}
+
+	var first *store.Message
+	for _, id := range ids {
+		msg, err := st.FindMessageByID(id)
+		if err != nil {
+			t.Fatalf("FindMessageByID(%s): %v", id, err)
+		}
+		if msg == nil {
+			t.Fatalf("no history row for %s", id)
+		}
+		if first == nil {
+			first = msg
+			// The values themselves, once: a test that only compared the two
+			// copies would pass just as well if both were empty.
+			if msg.Subject != "quarterly scan" {
+				t.Errorf("Subject = %q, want %q", msg.Subject, "quarterly scan")
+			}
+			if msg.MessageID != "<abc123@device.example>" {
+				t.Errorf("MessageID = %q", msg.MessageID)
+			}
+			if msg.ContentType != "text/plain; charset=utf-8" {
+				t.Errorf("ContentType = %q", msg.ContentType)
+			}
+			// The four headers sent. The relay's own Received header is not
+			// among them: Commit prepends it per copy, so it is not part of
+			// the rewritten block these values are read from -- which is
+			// also why the count can be shared between the copies at all.
+			if msg.HeaderCount != 4 {
+				t.Errorf("HeaderCount = %d, want 4", msg.HeaderCount)
+			}
+			continue
+		}
+		if msg.Subject != first.Subject || msg.MessageID != first.MessageID ||
+			msg.ContentType != first.ContentType || msg.HeaderCount != first.HeaderCount {
+			t.Errorf("copy %s journalled different metadata than %s:\n %+v\n %+v",
+				msg.QueueID, first.QueueID, msg, first)
+		}
+		// And the copies do differ where they should.
+		if msg.Route == first.Route {
+			t.Errorf("both copies went to route %q; the recipients did not split", msg.Route)
+		}
 	}
 }

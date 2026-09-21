@@ -20,10 +20,11 @@ remains (no duplicate), the on-disk binary is replaced, and the service keeps
 running afterwards. Uninstall remains unverified. Log rotation and Windows ACL
 verification at startup are complete.
 **Last session**: 2026-09-21 (fifty-third session) — A second architectural
-review of the whole tree, and everything from it acted on except the
-restructurings, which were deliberately deferred (see the end of this entry).
-The previous review moved code; this one found three defects and one
-misplaced security control, so those come first.
+review of the whole tree, everything from it acted on except the six
+restructurings (now tracked in "Planned restructurings" below), and the last
+of the seventh review's deferred findings fixed. The previous review moved
+code; this one found three defects and one misplaced security control, so
+those come first.
 
 **The loopback Host-header check was guarding the wrong thing.** It lived
 inside `web.Server.Handler()`, but the dashboard shares its socket with the
@@ -115,16 +116,45 @@ is what happens "if metrics are disabled" now say what is true — it is for
 tests, `cmd/smtprelayd` always builds one, and `metrics.enabled` governs the
 HTTP endpoint alone.
 
-**Deliberately deferred, by decision**: the review's restructurings were
-listed and not done — extracting `failedStore` and `quotaLedger` as types out
-of `spool.Spool`, splitting the Prometheus exposition out of
-`internal/metrics` from the `Status()` read model the dashboard and API
-render from, a shared `internal/ratelimit` for the two identical per-minute
-token buckets (`listener.rateLimiter` and `delivery.routeLimiter`, ~50
-duplicated lines each), renaming `spool.Envelope.Client` to `Origin` for the
-three things it holds, `httpx.Serve` for the duplicated HTTP
-serve/shutdown blocks, and moving `rateLimiter`/`connCounter` out of
-`listener/match.go`. They are the next session's candidates.
+**The last of the seventh review's deferred findings is fixed**, which is
+what closes that list. `journalAccepted` re-parsed the header block three to
+four times per route group — `rewrite.HeaderValue` and `rewrite.HeaderCount`
+each parse the whole thing — for four values that describe the message and
+cannot differ between its copies. It waited on sign-off because the fix needs
+a new exported API in another package; that was given this session.
+`rewrite.ParseHeaders` returns a `*Parsed` answering `Value` and `Count` from
+one parse, the two one-shot helpers became wrappers over it (so
+`internal/selfmail`'s single call is untouched), and the four values are
+hoisted into a `journalMeta` computed once in `commitCopies`. Measured at the
+default `limits.max_headers = 200`: **81.9µs → 20.6µs, 1646 → 417 allocations,
+122.7 KB → 30.8 KB** for one set of four reads; a message splitting across
+three routes went from twelve parses to one.
+`TestJournalMetadataIsIdenticalForEveryRouteCopy` drives a two-route
+transaction over a real socket and asserts both history rows carry the same
+subject, Message-ID, Content-Type and header count, which is the property
+that makes the hoist legitimate. Writing it corrected two wrong assumptions
+of mine: the subject is only read when `history.retain_subjects` is on, and
+the relay's own `Received` header is *not* in the counted block, because
+`Commit` prepends it per copy — which is also why the count can be shared at
+all.
+
+**The restructurings now have a section of their own**, "Planned
+restructurings" below, with what/where/why and a first step for each of the
+six, ordered by value over effort: a shared `internal/ratelimit` for the two
+identical token buckets, splitting the exposition out of `internal/metrics`,
+`failedStore`/`quotaLedger` as types inside `spool`, `Envelope.Client` →
+`Origin`, `httpx.Serve`, and moving the admission controls out of
+`listener/match.go`. All six are behaviour-preserving by intent, which is
+also each one's acceptance test. They were not done here: `CLAUDE.md` §4
+wants restructuring signed off separately.
+
+**"Open defects" was two thirds stale.** Of the three deferred findings from
+the seventh review, two had been fixed in the fifty-first session (`Claim`'s
+walk-and-sort became `ClaimBatch`'s bounded heap; `retentionCleanup` moved to
+the dispatcher's tick) and the section still listed them as open — as it did
+the note that `routes()` was "still 158 lines", which is 26 and split six
+ways. The section now records all three as closed, with where and when,
+rather than inviting a fourth rediscovery, which is what it was written for.
 
 **Verified**: `gofmt` clean, `go vet ./...` clean, `go build ./...` and
 `GOOS=windows go build ./...` clean, `scripts/check-banned-imports.sh` clean
@@ -4673,40 +4703,41 @@ here rather than only in that file:
 
 ## Open defects
 
-### Deferred findings from the seventh review (2026-09-17)
+### Deferred findings from the seventh review (2026-09-17) — all resolved
 
-Found by the review agents while checking the five fixes above. All three are
-**pre-existing**, none was introduced by that change, and all three were left
-alone deliberately to keep it behaviour-preserving. Recorded so they are not
-rediscovered from scratch a fourth time.
+All three were pre-existing performance defects, recorded at the time so they
+would not be rediscovered from scratch a fourth time. They are kept here as
+closed rather than deleted, because that is what the record was for.
 
-- **`internal/listener/session.go`, `journalAccepted` re-parses the header
-  block 3–4 times per route group.** `rewrite.HeaderValue` and
-  `rewrite.HeaderCount` each call `parseBlock`, which allocates per header
-  line; with the default `limits.max_headers = 200` that is up to ~400
-  allocations per parse, taken once for Message-ID, once for Content-Type,
-  once for the count and once more for the subject when
-  `history.retain_subjects` is on (the default). All four results are
-  invariant across groups. The fix is one helper in `internal/rewrite` that
-  parses once and returns all four, called once before the loop — but that is
-  a new exported API in another package and wants its own sign-off.
-- **`internal/spool/spool.go`, `Claim` is an O(N) walk plus a slice allocation
-  plus an O(N·logN) sort, under `s.mu`, called in a drain loop.** Draining a
-  backlog of N messages therefore costs N walks and N sorts. It wants a single
-  oldest-due message, so a one-pass minimum scan replaces both the slice and
-  the sort. This is the mutex `Commit`'s `overQuota` now also takes, so an
-  inbound burst during a backlog drain queues behind it.
-- **`internal/store/store.go`, `retentionCleanup` runs a full-table `DELETE`
-  while holding `s.mu`, from inside `RecordAttempt`.** Once an hour, one
-  delivery worker's attempt write blocks every other store writer for the
-  duration. It belongs on the existing ticker in `internal/delivery`, with
-  `s.mu` held only around the `lastCleanup` timestamp.
+- **`Claim`'s O(N) walk plus sort under `s.mu`, called in a drain loop.**
+  Fixed in the fifty-first session: `ClaimBatch` keeps the `max` oldest due
+  messages in a bounded heap in one scan, and `Claim` is `ClaimBatch(now, 1,
+  nil)`. Measured before the change: 22 hours to drain a million messages
+  one at a time.
+- **`retentionCleanup`'s full-table `DELETE` under `s.mu`, from inside
+  `RecordAttempt`.** Fixed in the fifty-first session: `RetentionSweep` runs
+  on the dispatcher's own tick and deletes in chunks, and `s.mu` now covers
+  only the `lastCleanup` timestamp (`claimCleanup`). Measured at a million
+  rows: the delete took 15.6s, and SQLite has one writer.
+- **`journalAccepted` re-parses the header block 3–4 times per route
+  group.** Fixed in the fifty-third session, which is the sign-off the item
+  was waiting for. `rewrite.ParseHeaders` returns a `*Parsed` that answers
+  `Value` and `Count` from one parse; `HeaderValue` and `HeaderCount` are now
+  thin wrappers over it, so `internal/selfmail`'s single call is unchanged.
+  The four values are hoisted out of the per-group loop into a `journalMeta`
+  computed once in `commitCopies` — they describe the message, not the copy.
+  Measured at the default `limits.max_headers = 200`, four values out of one
+  block: **81.9µs → 20.6µs, 1646 → 417 allocations, 122.7 KB → 30.8 KB.** A
+  message splitting across three routes went from twelve parses to one.
+  `TestJournalMetadataIsIdenticalForEveryRouteCopy` drives a two-route
+  transaction over a real socket and asserts both history rows carry the same
+  subject, Message-ID, Content-Type and header count — the property that
+  makes the hoist legitimate.
 
-Also noted and *not* acted on: `routes()` is still 158 lines with four-deep
-nesting after the `Validate` split — the one section the split did not
-actually break up. Splitting it further into `routeTLS`/`routeAuth`/
-`routeNetworks` is a new finding beyond what was approved.
-
+The same entry also noted that `routes()` was still 158 lines with four-deep
+nesting after the `Validate` split. That is stale too: it is 26 lines and is
+split into `routeIdentity`, `routeTLS`, `routeAuth`, `routeCAPin`,
+`routeDomains` and `routeSources`.
 
 ### An upgraded package leaves the old binary running (2026-08-11)
 
@@ -4826,6 +4857,91 @@ still worth doing next time someone is at that machine.
 The `secure-datadir` custom action is sequenced to run on repair and upgrade
 as well, and neither has been exercised. That is the open half of this defect,
 tracked in the phase 5 checklist rather than here.
+
+## Planned restructurings
+
+Taken from the fifty-third session's architectural review. Each was
+deliberately **not** done in that session — `CLAUDE.md` §4 wants restructuring
+signed off separately — and each is recorded here with enough detail to start
+from. They are behaviour-preserving by intent: none of them should change a
+log line, a metric, an HTTP response or an on-disk byte, which is also the
+acceptance test for each.
+
+Ordered by value over effort, which is the order to take them in.
+
+**1. `internal/ratelimit` for the two identical per-minute token buckets.**
+`listener.rateLimiter` (`internal/listener/match.go`) and
+`delivery.routeLimiter` (`internal/delivery/ratelimit.go`) are the same
+algorithm written twice: a map of buckets, refill once a minute, `limit <= 0`
+means unlimited. They differ only in the return type — the listener wants a
+`bool`, the dispatcher wants the wait duration as well. ~50 lines each, one of
+them in the mail path, and a correctness fix to one will not reach the other.
+`config.Validate`'s negative-value check already has to reason about both
+conventions at once (`internal/config/validate.go`, the comment above the
+`MaxMessageMB < 0` test). *First step*: one type with
+`Allow(key string, limit int, now time.Time) (time.Duration, bool)`; the
+listener ignores the duration. Both existing test files port over directly.
+
+**2. Split the Prometheus exposition out of `internal/metrics`.**
+`Registry` is two things: the process's in-memory operational counter store,
+whose `Status()` is the read model the dashboard's route page and sidebar and
+`GET /api/v1/queue` all render from, and the renderer of the text exposition.
+A change to the exposition format lands in the same file as the data three
+HTTP surfaces depend on. *First step*: move `expositionSeries`, `snapshot`,
+`series`, `perRoute`, `label`, `text()` and `ServeHTTP` into
+`internal/metrics/exposition.go` behind `func Exposition(*Registry) string`.
+No caller changes; the package boundary stays where it is. The note now on
+`Registry` describing the double duty is the thing this makes unnecessary.
+
+**3. `failedStore` and `quotaLedger` as types inside `internal/spool`.**
+`Spool` is 1021 lines and owns four sets of state behind three locks: the
+live queue, the mirror of `spool/failed`, the quota ledger and the depth
+cache. The fifty-second session correctly split the lock and wrote down that
+the three "share no invariant" — but they still share a struct, so every
+method can reach all three and the "never held nested" rule is enforced only
+by a comment. Both defects fixed in the fifty-third session were cross-index
+accounting mistakes, which is the failure this shape permits. *First step*:
+extract `failedStore` (`failedMu`, `failedIndex`, `failedBytes`, `failedTTL`,
+plus `putFailed`, `dropFailed`, `indexFailed`, `SweepFailed`,
+`SetFailedRetention`) as a type in the same package; `Spool` then holds a
+value and the lock-ordering rule becomes a property of the call graph.
+`quotaLedger` is the same move for `quotaMu`, `maxQuotaBytes`,
+`warnQuotaPercent` and `reserved`. Do them one at a time; `usedBytes` is the
+only place that reads across all three.
+
+**4. `spool.Envelope.Client` → `Origin`.**
+The field holds three different things: a client name for relayed mail, a
+canary's name for a canary, and a notification source for a digest or expiry
+warning. The overload is load-bearing — `internal/bounce` groups digests by
+it, so distinct canary names report separately — and it is currently explained
+in four separate comments plus a `reservedNames` table in the config
+validator that exists to stop the namespaces colliding. *First step*: rename
+the field, keep the JSON tag as `"client"` for on-disk compatibility (the
+`Kind` migration in the same struct is the pattern), and say once in its doc
+comment that it is the grouping key. Callers: `internal/listener/session.go`,
+`internal/canary`, `internal/bounce`, `internal/selfmail`,
+`internal/delivery` (`recordOutcome` reads it as a canary name). Four
+comments and, arguably, the need for `reservedNames` go away with it.
+
+**5. `httpx.Serve` for the duplicated HTTP serve/shutdown blocks.**
+`web.Serve` and `metrics.Serve` carry the same `errCh` + `select` on
+`ctx.Done()` + five-second `Shutdown` structure, with different timeout
+constants (deliberate, documented) and one extra TLS branch. They are also
+asymmetric in a way that has no reason: `web.Serve(ctx, ln, handler, log)`
+takes a handler, `metrics.Serve(ctx, cfg, ln, reg, log)` builds its own.
+*First step*: `httpx.Serve(ctx, ln, *http.Server, log) error`, each package
+keeping its own timeouts and handler assembly and passing the configured
+server. Smallest of the six, and the one with the least behind it.
+
+**6. Move `rateLimiter` and `connCounter` out of `internal/listener/match.go`.**
+The file is named for the CIDR `Matcher` and also holds the two admission
+controls, so nothing points a reader looking for "where is the connection cap
+enforced" at it. The tree already separates by concern this way (`wire.go`
+out of `session.go`, `schema.go` out of `store.go`). *First step*: an
+`admission.go` in the same package — or, if **1** lands first, the rate
+limiter goes to `internal/ratelimit` and only `connCounter` moves. Do this
+after **1**, not before.
+
 
 ## Open questions
 
