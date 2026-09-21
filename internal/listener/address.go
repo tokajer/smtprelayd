@@ -46,6 +46,14 @@ func parsePath(arg string) (addr string, params []string, err error) {
 
 // validateAddress checks structure and length. allowEmpty covers the null
 // reverse path used by bounces.
+//
+// This is deliberately looser than config.ValidAddress, which governs what an
+// operator may write into a header: a device's envelope address may carry
+// eight-bit octets or a quoted local part and still be relayed as is, because
+// it is only ever placed back into MAIL FROM and RCPT TO, never composed into
+// a header line. What both refuse is the same -- control characters, an
+// oversized part, a malformed domain -- so an address that passes here cannot
+// split a line downstream either.
 func validateAddress(addr string, allowEmpty bool) error {
 	if addr == "" {
 		if allowEmpty {

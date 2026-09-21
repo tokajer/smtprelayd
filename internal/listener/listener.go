@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/tokajer/smtprelayd/internal/config"
+	"github.com/tokajer/smtprelayd/internal/metrics"
 	"github.com/tokajer/smtprelayd/internal/rewrite"
 	"github.com/tokajer/smtprelayd/internal/router"
 	"github.com/tokajer/smtprelayd/internal/spool"
@@ -28,6 +29,11 @@ type Server struct {
 	log   *slog.Logger
 	spool *spool.Spool
 	store *store.Store
+
+	// metrics may be nil: the counters it feeds (session panics, journal
+	// write failures) are then simply not kept, which is what a test that
+	// does not care about them wants.
+	metrics *metrics.Registry
 
 	tlsConf *tls.Config
 	match   *Matcher
@@ -57,8 +63,8 @@ type Set struct {
 
 // New builds all listeners from the configuration. The TLS material and the
 // client matcher are shared, so a certificate problem fails before any socket
-// is bound.
-func New(cfg *config.Config, sp *spool.Spool, log *slog.Logger, st *store.Store) (*Set, error) {
+// is bound. reg may be nil; see Server.metrics.
+func New(cfg *config.Config, sp *spool.Spool, log *slog.Logger, st *store.Store, reg *metrics.Registry) (*Set, error) {
 	match, err := NewMatcher(cfg.Clients)
 	if err != nil {
 		return nil, err
@@ -93,12 +99,12 @@ func New(cfg *config.Config, sp *spool.Spool, log *slog.Logger, st *store.Store)
 	set := &Set{}
 	for _, lc := range cfg.Listeners {
 		s := &Server{
-			cfg: cfg, lc: lc, spool: sp, store: st,
+			cfg: cfg, lc: lc, spool: sp, store: st, metrics: reg,
 			log:   log.With("listener", lc.Name),
 			match: match, router: rt, rules: rules,
 			rate: rate, conns: conns, sem: sem,
 		}
-		if lc.TLS != "none" {
+		if lc.TLS != config.TLSNone {
 			if cert == nil {
 				return nil, fmt.Errorf("listener %s: tls %s requires a certificate", lc.Name, lc.TLS)
 			}
@@ -178,16 +184,39 @@ func (s *Server) listen() error {
 	return nil
 }
 
+// acceptBackoffMax bounds the pause after a failed Accept. The bounds are
+// net/http's: 5ms doubling to one second.
+const acceptBackoffMax = time.Second
+
 func (s *Server) accept(ctx context.Context) {
+	var delay time.Duration
 	for {
 		conn, err := s.ln.Accept()
 		if err != nil {
 			if ctx.Err() != nil || errors.Is(err, net.ErrClosed) {
 				return
 			}
-			s.log.Warn("accept failed", "error", err)
+			// An Accept that fails for a reason other than the socket being
+			// closed -- descriptor exhaustion is the usual one -- fails again
+			// at once if retried at once, and until 2026-09-18 this loop did
+			// exactly that: one Warn line per iteration, as fast as the CPU
+			// allowed, for as long as the condition lasted. Backing off the
+			// way net/http does turns that into a few lines a second and
+			// leaves the CPU to the sessions that are already open.
+			if delay == 0 {
+				delay = 5 * time.Millisecond
+			} else if delay *= 2; delay > acceptBackoffMax {
+				delay = acceptBackoffMax
+			}
+			s.log.Warn("accept failed", "error", err, "retry_in", delay)
+			select {
+			case <-time.After(delay):
+			case <-ctx.Done():
+				return
+			}
 			continue
 		}
+		delay = 0
 		select {
 		case s.sem <- struct{}{}:
 		default:
@@ -220,6 +249,9 @@ func (s *Server) accept(ctx context.Context) {
 				if r := recover(); r != nil {
 					s.log.Error("session panic", "panic", fmt.Sprint(r),
 						"remote", conn.RemoteAddr().String())
+					if s.metrics != nil {
+						s.metrics.SessionPanic()
+					}
 				}
 				<-s.sem
 				s.wg.Done()

@@ -58,7 +58,7 @@ func TestOneDeadRecipientDoesNotStopTheOthers(t *testing.T) {
 		"550 5.1.1 <gone@example.net>: recipient does not exist",
 		"250 2.1.5 recipient ok",
 	)
-	m, sp, st := managerAgainst(t, f)
+	m, sp, st, _, _ := managerAgainst(t, f)
 	id, meta := queueList(t, sp, st,
 		"alice@example.net", "gone@example.net", "bob@example.net")
 
@@ -95,7 +95,7 @@ func TestEveryRecipientRefusedIsStillAPermanentFailure(t *testing.T) {
 		"550 5.1.1 no such user",
 		"550 5.1.1 no such user",
 	)
-	m, sp, st := managerAgainst(t, f)
+	m, sp, st, _, _ := managerAgainst(t, f)
 	id, meta := queueList(t, sp, st, "gone@example.net", "also-gone@example.net")
 
 	m.attempt(context.Background(), meta)
@@ -117,7 +117,7 @@ func TestATemporarilyRefusedRecipientDefersTheWholeMessage(t *testing.T) {
 		"250 2.1.5 recipient ok",
 		"451 4.3.0 mailbox temporarily unavailable",
 	)
-	m, sp, st := managerAgainst(t, f)
+	m, sp, st, _, _ := managerAgainst(t, f)
 	id, meta := queueList(t, sp, st, "alice@example.net", "busy@example.net")
 
 	m.attempt(context.Background(), meta)
@@ -134,7 +134,7 @@ func TestATemporarilyRefusedRecipientDefersTheWholeMessage(t *testing.T) {
 // above is distinguishable from it rather than being noise on every row.
 func TestAFullDeliveryRecordsNoRefusal(t *testing.T) {
 	f := startFakeSmarthost(t, "250 2.0.0 accepted")
-	m, sp, st := managerAgainst(t, f)
+	m, sp, st, _, _ := managerAgainst(t, f)
 	id, meta := queueList(t, sp, st, "alice@example.net", "bob@example.net")
 
 	m.attempt(context.Background(), meta)
@@ -162,13 +162,13 @@ func TestARefusedRecipientReachesTheMetrics(t *testing.T) {
 		"250 2.1.5 recipient ok",
 		"550 5.1.1 <gone@example.net>: recipient does not exist",
 	)
-	m, sp, st := managerAgainst(t, f)
+	m, sp, st, _, reg := managerAgainst(t, f)
 	_, meta := queueList(t, sp, st, "alice@example.net", "gone@example.net")
 
 	m.attempt(context.Background(), meta)
 
 	var found bool
-	for _, s := range m.Metrics().Status() {
+	for _, s := range reg.Status() {
 		if s.Route != "smarthost" {
 			continue
 		}
@@ -193,12 +193,12 @@ func TestARefusedRecipientReachesTheMetrics(t *testing.T) {
 // message instead of naming a dead address.
 func TestACleanDeliveryRefusesNobody(t *testing.T) {
 	f := startFakeSmarthost(t, "250 2.0.0 accepted")
-	m, sp, st := managerAgainst(t, f)
+	m, sp, st, _, reg := managerAgainst(t, f)
 	_, meta := queueList(t, sp, st, "alice@example.net", "bob@example.net")
 
 	m.attempt(context.Background(), meta)
 
-	for _, s := range m.Metrics().Status() {
+	for _, s := range reg.Status() {
 		if s.Route == "smarthost" && s.RecipientsRefused != 0 {
 			t.Errorf("recipients_refused = %d after a clean delivery, want 0", s.RecipientsRefused)
 		}
@@ -216,7 +216,7 @@ func TestEveryRefusedRecipientIsRecorded(t *testing.T) {
 		"550 5.1.1 <gone2@example.net>: recipient does not exist",
 		"550 5.1.1 <gone3@example.net>: recipient does not exist",
 	)
-	m, sp, st := managerAgainst(t, f)
+	m, sp, st, _, reg := managerAgainst(t, f)
 	id, meta := queueList(t, sp, st,
 		"alice@example.net", "gone1@example.net", "gone2@example.net", "gone3@example.net")
 
@@ -236,7 +236,7 @@ func TestEveryRefusedRecipientIsRecorded(t *testing.T) {
 		}
 	}
 	// The metric and the page must agree on how many there were.
-	for _, s := range m.Metrics().Status() {
+	for _, s := range reg.Status() {
 		if s.Route == "smarthost" && s.RecipientsRefused != 3 {
 			t.Errorf("metric says %d refused, the row names three", s.RecipientsRefused)
 		}

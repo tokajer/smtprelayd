@@ -37,9 +37,10 @@ const keyBits = 2048
 // that renewal is not routine toil, short enough that a key which leaks does
 // not stay valid indefinitely.
 //
-// Nothing warns as this approaches: the certificate expiry metric
-// docs/guides/SECURITY.md describes does not exist yet, so the expiry date
-// the command prints is currently the only notice an operator gets.
+// The approaching expiry is warned about in three places, none of them here:
+// internal/expiry reads the deadline, bounce.ExpiryWatcher mails about it,
+// and smtprelayd_expiry_seconds exposes it. The date this command prints is
+// the first notice, not the only one.
 const DefaultValidity = 825 * 24 * time.Hour
 
 // Options describes the certificate to produce.

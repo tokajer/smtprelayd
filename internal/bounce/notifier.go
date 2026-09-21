@@ -24,13 +24,18 @@ import (
 // schedule, from what the store already recorded — never from data carried
 // through the failure callback itself.
 type Notifier struct {
-	cfg   *config.Config
-	spool *spool.Spool
-	store *store.Store
-	log   *slog.Logger
+	cfg    *config.Config
+	spool  *spool.Spool
+	store  *store.Store
+	mailer *selfmail.Mailer
+	log    *slog.Logger
 
-	mu           sync.Mutex
-	pending      map[string][]string // client name -> queue IDs awaiting the next digest
+	mu      sync.Mutex
+	pending map[string][]string // client name -> queue IDs awaiting the next digest
+	// overflow counts the failures past maxPendingPerClient, whose IDs are
+	// not kept. The digest reports them as a number so its total still
+	// matches what actually failed.
+	overflow     map[string]int
 	hourStart    time.Time
 	sentThisHour int
 }
@@ -39,10 +44,20 @@ type Notifier struct {
 // may be called beforehand; it will only queue events, never send anything.
 func New(cfg *config.Config, sp *spool.Spool, st *store.Store, log *slog.Logger) *Notifier {
 	return &Notifier{
-		cfg: cfg, spool: sp, store: st, log: log.With("component", "bounce"),
-		pending: map[string][]string{}, hourStart: time.Now(),
+		cfg: cfg, spool: sp, store: st, mailer: selfmail.New(sp, st, log.With("component", "bounce")),
+		log:     log.With("component", "bounce"),
+		pending: map[string][]string{}, overflow: map[string]int{}, hourStart: time.Now(),
 	}
 }
+
+// maxPendingPerClient bounds how many queue IDs one client accumulates for
+// its next digest. The digest itself lists at most maxDigestEntries and says
+// how many more there were, and every failure is a history row either way,
+// so the IDs past this point buy nothing -- while bounce.max_per_hour can
+// suppress sending for an hour at a time, during which nothing drains this.
+// The overflow is counted instead of kept, so the digest's total is still
+// the true one.
+const maxPendingPerClient = 10 * maxDigestEntries
 
 // RecordFail queues a permanently failed or expired message for the next
 // digest. Callers must only invoke this when a message has actually been
@@ -51,6 +66,10 @@ func New(cfg *config.Config, sp *spool.Spool, st *store.Store, log *slog.Logger)
 func (n *Notifier) RecordFail(client, queueID string) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
+	if len(n.pending[client]) >= maxPendingPerClient {
+		n.overflow[client]++
+		return
+	}
 	n.pending[client] = append(n.pending[client], queueID)
 }
 
@@ -64,6 +83,9 @@ func (n *Notifier) Pending() int {
 	total := 0
 	for _, ids := range n.pending {
 		total += len(ids)
+	}
+	for _, n := range n.overflow {
+		total += n
 	}
 	return total
 }
@@ -109,7 +131,9 @@ func (n *Notifier) dispatch(now time.Time) {
 		n.hourStart, n.sentThisHour = now, 0
 	}
 	pending := n.pending
+	overflow := n.overflow
 	n.pending = map[string][]string{}
+	n.overflow = map[string]int{}
 	n.mu.Unlock()
 
 	for client, ids := range pending {
@@ -129,6 +153,7 @@ func (n *Notifier) dispatch(now time.Time) {
 			// volume cap's design: exceeding it suppresses sending, not
 			// the underlying record of what failed.
 			n.pending[client] = append(n.pending[client], ids...)
+			n.overflow[client] += overflow[client]
 		} else {
 			n.sentThisHour++
 		}
@@ -136,11 +161,11 @@ func (n *Notifier) dispatch(now time.Time) {
 
 		if capped {
 			n.log.Warn("bounce notification suppressed: hourly volume cap reached",
-				"client", client, "queued_failures", len(ids))
+				"client", client, "queued_failures", len(ids)+overflow[client])
 			continue
 		}
 
-		if err := n.send(client, recipients, ids, now); err != nil {
+		if err := n.send(client, recipients, ids, overflow[client], now); err != nil {
 			n.log.Error("sending bounce digest failed", "client", client, "error", err)
 		}
 	}
@@ -169,11 +194,12 @@ const maxDigestEntries = 200
 // Notification flag (so the delivery manager never treats its own failure
 // as another bounce to notify about), and never having passed through the
 // listener at all, which is what keeps it out of sender rewriting.
-func (n *Notifier) send(client string, recipients, ids []string, now time.Time) error {
-	subject := fmt.Sprintf("[smtprelayd] %d delivery failure(s) for %s", len(ids), client)
+func (n *Notifier) send(client string, recipients, ids []string, overflow int, now time.Time) error {
+	total := len(ids) + overflow
+	subject := fmt.Sprintf("[smtprelayd] %d delivery failure(s) for %s", total, client)
 
 	var body strings.Builder
-	fmt.Fprintf(&body, "%d message(s) from client %q could not be delivered:\r\n", len(ids), client)
+	fmt.Fprintf(&body, "%d message(s) from client %q could not be delivered:\r\n", total, client)
 
 	listed := ids
 	if len(listed) > maxDigestEntries {
@@ -186,10 +212,11 @@ func (n *Notifier) send(client string, recipients, ids []string, now time.Time) 
 			fmt.Fprintf(&body, "\r\nQueue ID:   %s\r\n(history record unavailable)\r\n", id)
 			continue
 		}
-		subj := msg.Subject
-		if !n.cfg.History.RetainSubjects {
-			subj = "[redacted]"
-		}
+		// msg.Subject is already redacted when history.retain_subjects is
+		// off: the store applies that on the way out of every read, which is
+		// where it was consolidated to precisely so that no caller has to
+		// remember. Re-applying it here was a fourth copy of the policy that
+		// happened to agree.
 		var code int
 		var resp string
 		if len(msg.Attempts) > 0 {
@@ -197,12 +224,12 @@ func (n *Notifier) send(client string, recipients, ids []string, now time.Time) 
 			code, resp = last.SMTPCode, last.SMTPResp
 		}
 		fmt.Fprintf(&body, "\r\nQueue ID:   %s\r\nFrom:       %s\r\nTo:         %s\r\nSubject:    %s\r\nResponse:   %d %s\r\n",
-			id, msg.EnvelopeFrom, strings.Join(msg.Recipients, ", "), subj, code, resp)
+			id, msg.EnvelopeFrom, strings.Join(msg.Recipients, ", "), msg.Subject, code, resp)
 	}
 
-	if omitted := len(ids) - len(listed); omitted > 0 {
+	if omitted := total - len(listed); omitted > 0 {
 		fmt.Fprintf(&body, "\r\n... and %d more, not listed here. All %d are in the history:\r\n"+
-			"the bounces view, filtered by client %q.\r\n", omitted, len(ids), client)
+			"the bounces view, filtered by client %q.\r\n", omitted, total, client)
 	}
 
 	queueID, err := n.enqueue(client, recipients, subject, body.String(), now)
@@ -210,7 +237,7 @@ func (n *Notifier) send(client string, recipients, ids []string, now time.Time) 
 		return err
 	}
 	n.log.Info("bounce digest queued", "client", client, "queue_id", queueID,
-		"failures", len(ids), "listed", len(listed))
+		"failures", total, "listed", len(listed))
 	return nil
 }
 
@@ -256,7 +283,7 @@ func (n *Notifier) Notify(source, subject, bodyText string, now time.Time) error
 // null reverse path, and Notification keeps the delivery manager from
 // treating a failure to deliver it as another bounce to report.
 func (n *Notifier) enqueue(source string, recipients []string, subject, bodyText string, now time.Time) (string, error) {
-	id, err := selfmail.Enqueue(n.spool, n.store, n.log, selfmail.Message{
+	id, err := n.mailer.Send(selfmail.Message{
 		HeaderFrom:   n.cfg.Bounce.Sender,
 		EnvelopeFrom: "",
 		To:           recipients,
@@ -265,7 +292,7 @@ func (n *Notifier) enqueue(source string, recipients []string, subject, bodyText
 		Client:       source,
 		Route:        n.cfg.Bounce.NotifyRoute,
 		Listener:     "bounce-notifier",
-		Notification: true,
+		Kind:         spool.KindNotification,
 	}, time.Duration(n.cfg.Queue.MaxLifetimeHours)*time.Hour, now)
 	if err != nil {
 		return "", err

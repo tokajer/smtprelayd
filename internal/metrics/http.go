@@ -83,8 +83,29 @@ func requireLoopbackHost(next http.Handler, log *slog.Logger) http.Handler {
 	})
 }
 
-// Serve runs the metrics HTTP listener until ctx is cancelled. Any path other
-// than the configured one gets the ServeMux default of 404.
+// Listen binds the metrics socket. Split from Serve so that an address
+// already in use fails startup synchronously, before the service reports
+// itself started; see web.Listen.
+func Listen(cfg *config.Config) (net.Listener, error) {
+	ln, err := net.Listen("tcp", cfg.Metrics.Address)
+	if err != nil {
+		return nil, fmt.Errorf("metrics: %w", err)
+	}
+	return ln, nil
+}
+
+// isPublic reports whether the configured address binds beyond loopback,
+// which is what decides between the token-authenticated TLS listener and the
+// open loopback one.
+func isPublic(cfg *config.Config) bool {
+	if host, _, err := net.SplitHostPort(cfg.Metrics.Address); err == nil {
+		return !config.IsLoopbackHost(host)
+	}
+	return true
+}
+
+// Serve runs the metrics HTTP listener on ln until ctx is cancelled. Any
+// path other than the configured one gets the ServeMux default of 404.
 //
 // A loopback listener is served in the clear with no authentication, which is
 // what Checkmk polling on the host itself wants. A listener that binds beyond
@@ -92,14 +113,11 @@ func requireLoopbackHost(next http.Handler, log *slog.Logger) http.Handler {
 // config.Validate refuses such an address unless both a token and a
 // certificate exist, so the two halves cannot disagree about which mode this
 // is in.
-func Serve(ctx context.Context, cfg *config.Config, reg *Registry, log *slog.Logger) error {
+func Serve(ctx context.Context, cfg *config.Config, ln net.Listener, reg *Registry, log *slog.Logger) error {
 	addr := cfg.Metrics.Address
 	var handler http.Handler = reg
 
-	public := true
-	if host, _, err := net.SplitHostPort(addr); err == nil {
-		public = !config.IsLoopbackHost(host)
-	}
+	public := isPublic(cfg)
 	if public {
 		handler = requireToken(cfg, handler, log)
 	} else {
@@ -110,7 +128,6 @@ func Serve(ctx context.Context, cfg *config.Config, reg *Registry, log *slog.Log
 	mux.Handle(cfg.Metrics.Path, handler)
 
 	srv := &http.Server{
-		Addr:              addr,
 		Handler:           mux,
 		ReadHeaderTimeout: 5 * time.Second,
 		// Tighter than the dashboard's: the exposition is rendered from
@@ -126,13 +143,14 @@ func Serve(ctx context.Context, cfg *config.Config, reg *Registry, log *slog.Log
 	if public {
 		cert, err := tls.LoadX509KeyPair(cfg.TLS.CertFile, cfg.TLS.KeyFile)
 		if err != nil {
+			_ = ln.Close()
 			return fmt.Errorf("metrics: loading TLS certificate: %w", err)
 		}
 		srv.TLSConfig = &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12}
 		log.Info("metrics listener requires a read-scope bearer token", "address", addr)
-		go func() { errCh <- srv.ListenAndServeTLS("", "") }()
+		go func() { errCh <- srv.ServeTLS(ln, "", "") }()
 	} else {
-		go func() { errCh <- srv.ListenAndServe() }()
+		go func() { errCh <- srv.Serve(ln) }()
 	}
 
 	select {

@@ -14,6 +14,7 @@ import (
 	"github.com/tokajer/smtprelayd/internal/config"
 	"github.com/tokajer/smtprelayd/internal/httpx"
 	"github.com/tokajer/smtprelayd/internal/metrics"
+	"github.com/tokajer/smtprelayd/internal/queueaction"
 	"github.com/tokajer/smtprelayd/internal/spool"
 	"github.com/tokajer/smtprelayd/internal/store"
 )
@@ -29,6 +30,11 @@ type Server struct {
 	version string
 	log     *slog.Logger
 	fails   *failLimiter
+
+	// actions carries out requeue and delete. The dashboard holds the same
+	// thing: what those two mean for a message is one decision, and it used
+	// to be written out separately here and there.
+	actions *queueaction.Actor
 }
 
 // New builds an API server. reg may be nil if metrics are disabled, in
@@ -37,6 +43,7 @@ func New(cfg *config.Config, st *store.Store, sp *spool.Spool, reg *metrics.Regi
 	return &Server{
 		cfg: cfg, store: st, spool: sp, metrics: reg, version: version,
 		log: log.With("component", "api"), fails: newFailLimiter(),
+		actions: queueaction.New(sp, st, log.With("component", "api")),
 	}
 }
 

@@ -28,6 +28,11 @@ from the configuration — save it before closing the terminal. See
 Missing or malformed token yields `401`, valid token with insufficient scope
 yields `403`.
 
+The scopes bound what a token can do through the API, not what the holder of
+loopback access can do: the dashboard on the same listener performs requeue
+and delete without any token. `docs/guides/SECURITY.md` section 7 says what
+a deployment has to do about that.
+
 ## Endpoints
 
 ### `GET /api/v1/bounces`

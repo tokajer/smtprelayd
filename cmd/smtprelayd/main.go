@@ -10,8 +10,11 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
+	"io"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -27,6 +30,7 @@ import (
 	_ "time/tzdata"
 
 	"github.com/tokajer/smtprelayd/internal/api"
+	"github.com/tokajer/smtprelayd/internal/authms365"
 	"github.com/tokajer/smtprelayd/internal/bounce"
 	"github.com/tokajer/smtprelayd/internal/canary"
 	"github.com/tokajer/smtprelayd/internal/config"
@@ -48,32 +52,10 @@ const usage = `smtprelayd %s — Open Source SMTP Relay for Windows & Linux
 usage: smtprelayd [-config <file>] [-out <file>] [-force] [-days N] [-scope read|admin] <command>
 
 commands:
-  run        start the relay in the foreground (default)
-  check      validate the configuration and its bind addresses, then exit
-  selftest   attempt to relay through the running instance and fail if it works
-  gen-cert   write a self-signed certificate and key to the paths [tls]
-             cert_file and key_file already name, for an internal listener
-             with no CA behind it; refuses to overwrite either file unless
-             -force is given, and -days N sets a validity other than the
-             default (flags must come before the command, like -config)
-  token new  generate an API token, print it once, and print the
-             [[web.token]] block to paste into the configuration; -scope
-             selects read (default) or admin
-  version    print the version and exit
+%s
 
 Windows only, requires an elevated prompt:
-  install         register as a Windows service (runs as NT SERVICE\smtprelayd)
-  uninstall       remove the Windows service
-  start           start the registered Windows service
-  stop            stop the registered Windows service
-  secure-datadir  write the data directory ACL the service requires to start
-  purge-datadir   delete the data directory (spool and history); run by the
-                  MSI only when the uninstall dialog is answered "yes"
-  protect-secret  encrypt a secret with this machine's DPAPI key and write it
-                  to -out (flag must come before the command, like -config),
-                  for a dpapi:<path> reference in the configuration; reads
-                  the plaintext secret as a single line from stdin, e.g.:
-                  smtprelayd -out C:\ProgramData\SMTPRelayd\secret.bin protect-secret
+%s
 
 On Linux the service is managed with systemctl instead; the packaged unit
 file registers it as smtprelayd.service.
@@ -90,7 +72,9 @@ func main() {
 	force := fs.Bool("force", false, "allow gen-cert to overwrite an existing certificate and key")
 	days := fs.Int("days", 0, "validity in days for gen-cert (0 uses the default)")
 	scope := fs.String("scope", "read", "scope for token new: read or admin")
-	fs.Usage = func() { fmt.Fprintf(os.Stderr, usage, version) }
+	fs.Usage = func() {
+		fmt.Fprintf(os.Stderr, usage, version, commandList(false), commandList(true))
+	}
 	_ = fs.Parse(os.Args[1:])
 
 	cmd := "run"
@@ -98,8 +82,7 @@ func main() {
 		cmd = fs.Arg(0)
 	}
 
-	switch cmd {
-	case "install", "uninstall", "start", "stop":
+	if earlyCommands()[cmd] {
 		if err := controlService(cmd, *configPath); err != nil {
 			fmt.Fprintln(os.Stderr, "smtprelayd:", err)
 			os.Exit(1)
@@ -207,6 +190,12 @@ func run(cmd, configPath string, console bool, outPath string, force bool, days 
 		return serve(context.Background(), configPath, console, nil)
 
 	default:
+		// knownCommand rather than a bare error: a command that is in the
+		// table but not in this switch is a wiring mistake, and saying so is
+		// more use than "unknown command" for something the help lists.
+		if knownCommand(cmd) {
+			return fmt.Errorf("command %q is documented but not wired up; this is a bug", cmd)
+		}
 		return fmt.Errorf("unknown command %q, see -h", cmd)
 	}
 }
@@ -249,30 +238,7 @@ func serve(ctx context.Context, configPath string, console bool, ready chan<- er
 		return err
 	}
 
-	level, err := config.ParseLevel(cfg.Service.LogLevel)
-	if err != nil {
-		return err
-	}
-	logFile, err := config.LogPath(cfg.Service.DataDir, cfg.Log.File)
-	if err != nil {
-		// Load has already validated this; reaching here means the value
-		// changed underneath us, which is not a case to paper over.
-		return err
-	}
-	loc, err := config.ParseTimezone(cfg.Service.Timezone)
-	if err != nil {
-		// Same as above: Load already validated this value.
-		return err
-	}
-	log, closer, err := logging.New(logging.Options{
-		Level:      level,
-		File:       logFile,
-		Console:    console,
-		MaxSizeMB:  cfg.Log.MaxSizeMB,
-		MaxBackups: cfg.Log.MaxBackups,
-		MaxAgeDays: cfg.Log.MaxAgeDays,
-		Location:   loc,
-	})
+	log, closer, err := openLog(cfg, console)
 	if err != nil {
 		return err
 	}
@@ -282,14 +248,11 @@ func serve(ctx context.Context, configPath string, console bool, ready chan<- er
 	// is logged before it is returned: main() only echoes it to stderr (lost
 	// on a Windows service with no console), while the log file is what an
 	// operator actually checks afterward.
-	sp, err := spool.Open(cfg.Service.DataDir)
+	sp, err := openSpool(cfg)
 	if err != nil {
 		log.Error("spool: failed to open", "error", err)
 		return err
 	}
-	sp.SetQuota(cfg.Limits.SpoolMaxGB, cfg.Limits.SpoolWarnPercent)
-	sp.SetFailedRetention(time.Duration(cfg.Queue.FailedRetentionHours) * time.Hour)
-
 	st, err := store.Open(cfg.Service.DataDir, log, cfg.History.RetentionDays, cfg.History.RetainSubjects)
 	if err != nil {
 		log.Error("store: failed to open", "error", err)
@@ -300,7 +263,15 @@ func serve(ctx context.Context, configPath string, console bool, ready chan<- er
 	log.Info("starting", "version", version, "config", cfg.Path,
 		"data_dir", cfg.Service.DataDir, "queued", sp.Len())
 
-	set, err := listener.New(cfg, sp, log, st)
+	// The registry is built here, ahead of everything that feeds it, and
+	// handed down: the listener counts session panics and journal failures
+	// into it, the delivery manager its outcomes, and the dashboard, the API
+	// and the metrics endpoint read it. It used to be built inside
+	// delivery.New and pulled back out through a getter, which hid the
+	// composition in a worker and left the listener with nothing to count on.
+	reg := metrics.New(metrics.ConfigExpiry(cfg), sp, routeNames(cfg), canaryNames(cfg), nil)
+
+	set, err := listener.New(cfg, sp, log, st, reg)
 	if err != nil {
 		log.Error("listener: failed to start", "error", err)
 		return err
@@ -322,60 +293,24 @@ func serve(ctx context.Context, configPath string, console bool, ready chan<- er
 		bg.Wait()
 	}()
 
-	dm, err := delivery.New(cfg, sp, log, st)
+	notifier := bounce.New(cfg, sp, st, log)
+	dm, err := delivery.New(cfg, sp, log, st, reg, notifier)
 	if err != nil {
 		log.Error("delivery: failed to start", "error", err)
 		return err
 	}
-	if err := dm.VerifyTokens(ctx); err != nil {
-		log.Error("delivery: startup oauth2 token verification failed", "error", err)
+	if err := verifyTokens(ctx, dm, log); err != nil {
 		return err
 	}
-	done := make(chan struct{})
-	bg.Go(func() {
-		dm.Run(ctx)
-		close(done)
-	})
-	bg.Go(func() { dm.Notifier().Run(ctx) })
-	for _, c := range cfg.Canaries {
-		r := canary.New(cfg, c, sp, st, log)
-		bg.Go(func() { r.Run(ctx) })
-	}
-	// Started unconditionally: it reports through the notifier, which
-	// declines to send when bounce.notify is empty, so an unconfigured
-	// contact costs one idle ticker rather than needing a switch of its own.
-	expiryWatcher := bounce.NewExpiryWatcher(cfg, dm.Notifier(), log)
-	bg.Go(func() { expiryWatcher.Run(ctx) })
+	done := startWorkers(ctx, &bg, cfg, sp, st, log, dm, notifier)
 
-	if cfg.Metrics.Enabled {
-		bg.Go(func() {
-			if err := metrics.Serve(ctx, cfg, dm.Metrics(), log); err != nil {
-				log.Error("metrics listener stopped", "error", err)
-			}
-		})
-	}
-
-	if cfg.Web.Enabled {
-		ws, err := web.New(cfg, st, sp, dm.Metrics(), version, log)
-		if err != nil {
-			log.Error("web: failed to start", "error", err)
-			return err
-		}
-		as := api.New(cfg, st, sp, dm.Metrics(), version, log)
-
-		// The dashboard and the JSON API share one listener, per
-		// docs/dev/PHASE4-PLAN.md: the api handler is mounted under /api/v1/
-		// with that prefix stripped, so its own routes are registered
-		// without it, and everything else falls through to the dashboard.
-		mux := http.NewServeMux()
-		mux.Handle("/api/v1/", http.StripPrefix("/api/v1", as.Handler()))
-		mux.Handle("/", ws.Handler())
-
-		bg.Go(func() {
-			if err := web.Serve(ctx, cfg, mux, log); err != nil {
-				log.Error("web listener stopped", "error", err)
-			}
-		})
+	// Both HTTP sockets are bound here, synchronously, for the reason
+	// set.Bind is separate from set.Run: a port already in use used to be a
+	// log line from a goroutine after the service had reported itself
+	// started, and on Windows the SCM then showed a running service with no
+	// dashboard.
+	if err := startHTTP(ctx, &bg, cfg, st, sp, reg, log); err != nil {
+		return err
 	}
 
 	if err := set.Bind(); err != nil {
@@ -462,6 +397,165 @@ func checkEnvironment(cfg *config.Config) error {
 		return fmt.Errorf("binary directory: %w", err)
 	}
 	return nil
+}
+
+// verifyTokens fetches an OAuth2 token for every xoauth2 route at startup
+// and decides whether a failure is fatal.
+//
+// Only a rejection the token endpoint itself issued is: the credentials are
+// wrong and no retry changes that. An endpoint that cannot be reached is a
+// different matter -- refusing to bind the listeners while Microsoft is down
+// turns a delivery outage into an acceptance outage, and the devices this
+// relay serves do not queue. Mail is then accepted into the spool and the
+// token is fetched again at the first delivery attempt. Decided 2026-08-21,
+// narrowed 2026-09-18; see MEMORY.md.
+func verifyTokens(ctx context.Context, dm *delivery.Manager, log *slog.Logger) error {
+	err := dm.VerifyTokens(ctx)
+	if err == nil {
+		return nil
+	}
+	var cred *authms365.CredentialError
+	if errors.As(err, &cred) {
+		log.Error("delivery: startup oauth2 token verification failed, the credentials were rejected", "error", err)
+		return err
+	}
+	log.Warn("delivery: startup oauth2 token verification could not reach the token endpoint; "+
+		"starting anyway, deliveries retry it", "error", err)
+	return nil
+}
+
+// openLog resolves the logging configuration and builds the process logger.
+// Every value it reads was already validated by config.Load; reaching an
+// error here means the file changed underneath us, which is not a case to
+// paper over.
+func openLog(cfg *config.Config, console bool) (*slog.Logger, io.Closer, error) {
+	level, err := config.ParseLevel(cfg.Service.LogLevel)
+	if err != nil {
+		return nil, nil, err
+	}
+	logFile, err := config.LogPath(cfg.Service.DataDir, cfg.Log.File)
+	if err != nil {
+		return nil, nil, err
+	}
+	loc, err := config.ParseTimezone(cfg.Service.Timezone)
+	if err != nil {
+		return nil, nil, err
+	}
+	return logging.New(logging.Options{
+		Level:      level,
+		File:       logFile,
+		Console:    console,
+		MaxSizeMB:  cfg.Log.MaxSizeMB,
+		MaxBackups: cfg.Log.MaxBackups,
+		MaxAgeDays: cfg.Log.MaxAgeDays,
+		Location:   loc,
+	})
+}
+
+// openSpool opens the queue directory and applies the configured quota and
+// failed-message retention.
+func openSpool(cfg *config.Config) (*spool.Spool, error) {
+	sp, err := spool.Open(cfg.Service.DataDir)
+	if err != nil {
+		return nil, err
+	}
+	sp.SetQuota(cfg.Limits.SpoolMaxGB, cfg.Limits.SpoolWarnPercent)
+	sp.SetFailedRetention(time.Duration(cfg.Queue.FailedRetentionHours) * time.Hour)
+	return sp, nil
+}
+
+// startWorkers launches every background goroutine that drains or watches
+// the spool, and returns a channel closed once the delivery manager has
+// stopped. The caller waits on it only to take an accurate final queue
+// count; shutdown itself is bg.Wait.
+func startWorkers(ctx context.Context, bg *sync.WaitGroup, cfg *config.Config,
+	sp *spool.Spool, st *store.Store, log *slog.Logger,
+	dm *delivery.Manager, notifier *bounce.Notifier) <-chan struct{} {
+	done := make(chan struct{})
+	bg.Go(func() {
+		dm.Run(ctx)
+		close(done)
+	})
+	bg.Go(func() { notifier.Run(ctx) })
+	lifetime := time.Duration(cfg.Queue.MaxLifetimeHours) * time.Hour
+	for _, c := range cfg.Canaries {
+		r := canary.New(c, cfg.Service.Hostname, lifetime, sp, st, log)
+		bg.Go(func() { r.Run(ctx) })
+	}
+	// Started unconditionally: it reports through the notifier, which
+	// declines to send when bounce.notify is empty, so an unconfigured
+	// contact costs one idle ticker rather than needing a switch of its own.
+	expiryWatcher := bounce.NewExpiryWatcher(cfg, notifier, log)
+	bg.Go(func() { expiryWatcher.Run(ctx) })
+	return done
+}
+
+// startHTTP binds and serves the metrics endpoint and the dashboard, each
+// only if enabled. Binding happens here, synchronously, so that an address
+// already in use fails startup instead of being logged from a goroutine
+// after the service has reported itself started.
+func startHTTP(ctx context.Context, bg *sync.WaitGroup, cfg *config.Config,
+	st *store.Store, sp *spool.Spool, reg *metrics.Registry, log *slog.Logger) error {
+	if cfg.Metrics.Enabled {
+		ln, err := metrics.Listen(cfg)
+		if err != nil {
+			log.Error("metrics: failed to bind", "error", err)
+			return err
+		}
+		bg.Go(func() {
+			if err := metrics.Serve(ctx, cfg, ln, reg, log); err != nil {
+				log.Error("metrics listener stopped", "error", err)
+			}
+		})
+	}
+	if !cfg.Web.Enabled {
+		return nil
+	}
+
+	ws, err := web.New(cfg, st, sp, reg, version, log)
+	if err != nil {
+		log.Error("web: failed to start", "error", err)
+		return err
+	}
+	as := api.New(cfg, st, sp, reg, version, log)
+
+	// The dashboard and the JSON API share one listener, per
+	// docs/dev/PHASE4-PLAN.md: the api handler is mounted under /api/v1/
+	// with that prefix stripped, so its own routes are registered without
+	// it, and everything else falls through to the dashboard.
+	mux := http.NewServeMux()
+	mux.Handle("/api/v1/", http.StripPrefix("/api/v1", as.Handler()))
+	mux.Handle("/", ws.Handler())
+
+	ln, err := web.Listen(cfg)
+	if err != nil {
+		log.Error("web: failed to bind", "error", err)
+		return err
+	}
+	bg.Go(func() {
+		if err := web.Serve(ctx, ln, mux, log); err != nil {
+			log.Error("web listener stopped", "error", err)
+		}
+	})
+	return nil
+}
+
+// routeNames and canaryNames are what the metrics registry is seeded with,
+// so a route or canary that has not delivered yet still reports zero.
+func routeNames(cfg *config.Config) []string {
+	out := make([]string, 0, len(cfg.Routes))
+	for _, r := range cfg.Routes {
+		out = append(out, r.Name)
+	}
+	return out
+}
+
+func canaryNames(cfg *config.Config) []string {
+	out := make([]string, 0, len(cfg.Canaries))
+	for _, c := range cfg.Canaries {
+		out = append(out, c.Name)
+	}
+	return out
 }
 
 func defaultConfigPath() string {

@@ -5,7 +5,9 @@ package authms365
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -235,5 +237,66 @@ func TestContextCancellationIsHonoured(t *testing.T) {
 	cancel()
 	if _, err := ts.Token(ctx); err == nil {
 		t.Fatal("a cancelled context still produced a token")
+	}
+}
+
+// TestCredentialRejectionIsTyped pins the line serve() decides on: a 400 or
+// 401 carrying an OAuth2 error code is the endpoint refusing these
+// credentials and must be a CredentialError, while an unreachable or failing
+// endpoint must not be -- refusing to start the relay while Microsoft is down
+// is the outage this distinction exists to prevent.
+func TestCredentialRejectionIsTyped(t *testing.T) {
+	cases := []struct {
+		name   string
+		status int
+		body   string
+		typed  bool
+	}{
+		{"invalid secret", http.StatusUnauthorized, `{"error":"invalid_client","error_description":"AADSTS7000215"}`, true},
+		{"unknown tenant", http.StatusBadRequest, `{"error":"invalid_request","error_description":"AADSTS90002"}`, true},
+		{"temporarily unavailable", http.StatusBadRequest, `{"error":"temporarily_unavailable","error_description":"try later"}`, false},
+		{"server error", http.StatusInternalServerError, `{"error":"server_error"}`, false},
+		{"throttled", http.StatusTooManyRequests, ``, false},
+		{"gateway page", http.StatusBadGateway, `<html>bad gateway</html>`, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ts := newTestSource(t, func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(tc.status)
+				fmt.Fprint(w, tc.body)
+			})
+			_, err := ts.Token(context.Background())
+			if err == nil {
+				t.Fatal("no error")
+			}
+			var cred *CredentialError
+			if got := errors.As(err, &cred); got != tc.typed {
+				t.Fatalf("CredentialError = %v, want %v for %v", got, tc.typed, err)
+			}
+		})
+	}
+}
+
+// A refused connection is the plainest form of "unreachable" and must never
+// read as a credential rejection.
+func TestUnreachableEndpointIsNotACredentialError(t *testing.T) {
+	ts, err := New(Options{TenantID: "contoso.example", ClientID: "id", Secret: "s"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := ln.Addr().String()
+	_ = ln.Close()
+	ts.endpoint = "http://" + addr + "/token"
+	_, err = ts.Token(context.Background())
+	if err == nil {
+		t.Fatal("no error against a closed port")
+	}
+	var cred *CredentialError
+	if errors.As(err, &cred) {
+		t.Fatalf("a refused connection was typed as a credential rejection: %v", err)
 	}
 }

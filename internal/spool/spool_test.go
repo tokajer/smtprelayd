@@ -4,10 +4,13 @@
 package spool
 
 import (
+	"encoding/json"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -31,7 +34,7 @@ func TestEnqueueClaimRemove(t *testing.T) {
 	if _, ok := s.Claim(time.Now()); ok {
 		t.Fatal("a leased message was handed out twice")
 	}
-	f, err := s.Open(id)
+	f, err := s.OpenBody(id)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -202,7 +205,7 @@ func TestRequeueFromFailedResetsAttemptsAndMovesFiles(t *testing.T) {
 	if got.Attempts != 0 {
 		t.Fatalf("attempts = %d, want reset to 0", got.Attempts)
 	}
-	f, err := s.Open(id)
+	f, err := s.OpenBody(id)
 	if err != nil {
 		t.Fatalf("body not readable after requeue: %v", err)
 	}
@@ -905,4 +908,463 @@ func TestDeferReschedulesWithoutWritingMetadata(t *testing.T) {
 	if got.ID != id {
 		t.Fatalf("claimed %s, want %s", got.ID, id)
 	}
+}
+
+// Requeue leases the message for the duration of its file operations instead
+// of holding the spool mutex across them (2026-09-18). Concurrent requeues of
+// one failed message must therefore still resolve to exactly one requeue:
+// every caller either succeeds or is told ErrBusy, the body ends up in the
+// queue once, and nothing is left behind in spool/failed.
+func TestConcurrentRequeueResolvesToOne(t *testing.T) {
+	s, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := enqueueAndFail(t, s, "Subject: x\r\n\r\nbody\r\n")
+
+	const callers = 8
+	var wg sync.WaitGroup
+	results := make(chan error, callers)
+	for i := 0; i < callers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			results <- s.Requeue(id)
+		}()
+	}
+	wg.Wait()
+	close(results)
+
+	ok, busy := 0, 0
+	for err := range results {
+		switch {
+		case err == nil:
+			ok++
+		case errors.Is(err, ErrBusy):
+			busy++
+		default:
+			t.Errorf("unexpected Requeue error: %v", err)
+		}
+	}
+	if ok == 0 {
+		t.Fatalf("every one of %d concurrent requeues was refused", callers)
+	}
+	if ok+busy != callers {
+		t.Fatalf("%d ok + %d busy != %d callers", ok, busy, callers)
+	}
+
+	if _, err := os.Stat(filepath.Join(s.failed, id.String()+".eml")); !os.IsNotExist(err) {
+		t.Errorf("the body is still in spool/failed: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(s.failed, id.String()+".json")); !os.IsNotExist(err) {
+		t.Errorf("the metadata is still in spool/failed: %v", err)
+	}
+	m, claimed := s.Claim(time.Now())
+	if !claimed || m.ID != id {
+		t.Fatalf("the requeued message is not claimable: %v %v", m, claimed)
+	}
+	if m.Attempts != 0 {
+		t.Errorf("Attempts = %d after a requeue, want 0", m.Attempts)
+	}
+	if _, again := s.Claim(time.Now()); again {
+		t.Error("the message was requeued more than once")
+	}
+}
+
+// ClaimBatch returns the globally oldest due messages, not the first max it
+// happens to walk past: the index is a map, so iteration order is random and
+// a bounded scan that kept the wrong end of it would starve the oldest mail
+// in the queue -- which is the one an operator is waiting on.
+func TestClaimBatchReturnsTheGloballyOldest(t *testing.T) {
+	s, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := time.Now().UTC().Add(-time.Hour)
+	want := make([]ID, 0, 5)
+	for i := 0; i < 50; i++ {
+		env := Envelope{From: "a@example.at", To: []string{"b@example.net"}, Client: "c", Route: "r",
+			Received: base.Add(time.Duration(i) * time.Minute)}
+		id, err := s.Enqueue(env, strings.NewReader("body"), 0, time.Hour)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if i < 5 {
+			want = append(want, id)
+		}
+	}
+
+	got := s.ClaimBatch(time.Now(), 5, nil)
+	if len(got) != 5 {
+		t.Fatalf("ClaimBatch returned %d messages, want 5", len(got))
+	}
+	for i, m := range got {
+		if m.ID != want[i] {
+			t.Fatalf("position %d is %s, want %s: the batch is not the oldest five in order", i, m.ID, want[i])
+		}
+	}
+	for _, m := range got {
+		if !s.leasedFor(m.ID) {
+			t.Fatalf("%s was returned but not leased", m.ID)
+		}
+	}
+}
+
+// skip is what keeps a tick from re-scanning the whole index once per message
+// queued behind a saturated route.
+func TestClaimBatchHonoursSkip(t *testing.T) {
+	s, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	for _, route := range []string{"busy", "free"} {
+		env := Envelope{From: "a@example.at", To: []string{"b@example.net"}, Client: "c",
+			Route: route, Received: now}
+		if _, err := s.Enqueue(env, strings.NewReader("body"), 0, time.Hour); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	got := s.ClaimBatch(time.Now(), 10, func(route string) bool { return route == "busy" })
+	if len(got) != 1 {
+		t.Fatalf("ClaimBatch returned %d messages, want 1", len(got))
+	}
+	if got[0].Envelope.Route != "free" {
+		t.Fatalf("returned a message for route %q, want the one route skip allowed", got[0].Envelope.Route)
+	}
+}
+
+// A max of zero or less asks for nothing and must lease nothing, rather than
+// falling through to "everything".
+func TestClaimBatchRefusesANonPositiveMax(t *testing.T) {
+	s, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	enqueueOneForTest(t, s)
+	if got := s.ClaimBatch(time.Now(), 0, nil); got != nil {
+		t.Fatalf("ClaimBatch(max=0) returned %d messages", len(got))
+	}
+	if _, ok := s.Claim(time.Now()); !ok {
+		t.Fatal("the message was leased by a batch that asked for none")
+	}
+}
+
+// Commit reserves against the quota rather than only checking it: two
+// commits that each fit alone must not both be admitted when together they
+// do not, which is what a check followed by a write allows.
+func TestConcurrentCommitsCannotOvershootTheQuota(t *testing.T) {
+	s, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	const body = 4096
+	// Room for four bodies, against eight concurrent commits.
+	s.mu.Lock()
+	s.maxQuotaBytes = 4 * body
+	s.mu.Unlock()
+
+	env := Envelope{From: "a@example.at", To: []string{"b@example.net"}, Client: "c", Route: "r",
+		Received: time.Now().UTC()}
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, _ = s.Enqueue(env, strings.NewReader(strings.Repeat("x", body)), 0, time.Hour)
+		}()
+	}
+	wg.Wait()
+
+	if used := s.spoolSize(); used > 4*body {
+		t.Fatalf("the spool holds %d bytes against a quota of %d", used, 4*body)
+	}
+}
+
+// leasedFor and enqueueOneForTest keep the assertions above off the spool's
+// internals beyond the one lock they have to take.
+func (s *Spool) leasedFor(id ID) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.leased[id]
+}
+
+func enqueueOneForTest(t *testing.T, s *Spool) ID {
+	t.Helper()
+	env := Envelope{From: "a@example.at", To: []string{"b@example.net"}, Client: "c", Route: "r",
+		Received: time.Now().UTC()}
+	id, err := s.Enqueue(env, strings.NewReader("body"), 0, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return id
+}
+
+// The dashboard sidebar, the API's health and routes endpoints and the
+// metrics exposition all read the depth, and each read used to walk the whole
+// index while holding the mutex that Commit, ClaimBatch, Remove and Defer
+// take -- 179ms at a million queued messages, per page view. How often mail
+// intake paused was therefore set by how many people were watching.
+func TestQueueDepthServesRepeatedReadsFromCache(t *testing.T) {
+	s, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	env := Envelope{From: "a@example.at", To: []string{"b@example.net"},
+		Client: "c", Route: "r", Received: time.Now().UTC()}
+	if _, err := s.Enqueue(env, strings.NewReader("x"), 0, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+
+	// A moment after both enqueues, so every message counts as claimable.
+	// Reading "now" from before them made an added message count as deferred
+	// -- its NextAttempt is the instant it was committed -- and the queued
+	// figure then stayed at 1 whether the cache was used or not, which is a
+	// test that passes for the wrong reason.
+	now := time.Now().Add(time.Minute)
+	first := s.QueueDepth(now)
+	if first["r"].Queued != 1 {
+		t.Fatalf("first read reported %d queued, want 1", first["r"].Queued)
+	}
+
+	// A second message inside the window is not expected to show yet: the
+	// staleness is the point, and asserting it here is what stops the cache
+	// from being quietly removed again.
+	if _, err := s.Enqueue(env, strings.NewReader("x"), 0, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if again := s.QueueDepth(now); again["r"].Queued != 1 {
+		t.Errorf("a read inside the cache window rescanned the index (reported %d)", again["r"].Queued)
+	}
+
+	// Past the window the index is read again. depthCacheFloor is the
+	// shortest window, so stepping past it is enough whatever the scan cost.
+	later := now.Add(depthCacheFloor + time.Second)
+	if fresh := s.QueueDepth(later); fresh["r"].Queued != 2 {
+		t.Errorf("after the cache window the depth is still %d, want 2", fresh["r"].Queued)
+	}
+}
+
+// The split is a function of the moment asked about, so a caller asking about
+// a different moment must never be served the cached answer -- which is how
+// the deferred half is tested everywhere else in this file.
+func TestQueueDepthDoesNotServeADifferentMomentFromCache(t *testing.T) {
+	s, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	env := Envelope{From: "a@example.at", To: []string{"b@example.net"},
+		Client: "c", Route: "r", Received: time.Now().UTC()}
+	id, err := s.Enqueue(env, strings.NewReader("x"), 0, 48*time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, ok := s.Claim(time.Now())
+	if !ok {
+		t.Fatal("nothing to claim")
+	}
+	m.NextAttempt = time.Now().Add(6 * time.Hour)
+	if err := s.Release(m); err != nil {
+		t.Fatal(err)
+	}
+	_ = id
+
+	now := time.Now()
+	if d := s.QueueDepth(now)["r"]; d.Deferred != 1 {
+		t.Fatalf("now: deferred %d, want 1", d.Deferred)
+	}
+	// Reaching past the deferral, immediately: same wall clock, different
+	// question. A cache keyed only on elapsed time would answer "deferred".
+	if d := s.QueueDepth(now.Add(12 * time.Hour))["r"]; d.Queued != 1 {
+		t.Errorf("a later moment was answered from the cache: queued %d, want 1", d.Queued)
+	}
+}
+
+// The caller gets a copy: writing into the returned map must not corrupt what
+// the next reader is served.
+func TestQueueDepthReturnsACopy(t *testing.T) {
+	s, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	env := Envelope{From: "a@example.at", To: []string{"b@example.net"},
+		Client: "c", Route: "r", Received: time.Now().UTC()}
+	if _, err := s.Enqueue(env, strings.NewReader("x"), 0, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	// Both return paths hand out a map, and both have to copy: the fresh
+	// scan and the cache hit. Writing into only the first leaves the second
+	// uncovered, and the second is the one that hands out the cache itself.
+	now := time.Now().Add(time.Minute)
+
+	fresh := s.QueueDepth(now) // scans
+	fresh["r"] = RouteDepth{Queued: 98}
+	if after := s.QueueDepth(now)["r"]; after.Queued != 1 {
+		t.Fatalf("writing into a freshly scanned result reached the cache: queued %d, want 1", after.Queued)
+	}
+
+	cached := s.QueueDepth(now) // served from the cache
+	cached["r"] = RouteDepth{Queued: 99}
+	if after := s.QueueDepth(now)["r"]; after.Queued != 1 {
+		t.Errorf("writing into a cached result reached the cache: queued %d, want 1", after.Queued)
+	}
+}
+
+// recover answers "does this message have a body" from the directory listing
+// it already read, not with a stat per message. The behaviour that has to
+// survive that change is what this pins: metadata without a body is dropped,
+// a body without usable metadata is dropped, and a complete pair is indexed.
+func TestRecoverHandlesEveryHalfPairFromOneListing(t *testing.T) {
+	dir := t.TempDir()
+	s, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	env := Envelope{From: "a@example.at", To: []string{"b@example.net"},
+		Client: "c", Route: "r", Received: time.Now().UTC()}
+	whole, err := s.Enqueue(env, strings.NewReader("body\r\n"), 0, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	orphanMeta, err := s.Enqueue(env, strings.NewReader("body\r\n"), 0, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	orphanBody, err := s.Enqueue(env, strings.NewReader("body\r\n"), 0, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	queue := filepath.Join(dir, "spool", "queue")
+	// One message loses its body, one loses its metadata, and one file is
+	// left behind whose name is not a queue id at all.
+	if err := os.Remove(filepath.Join(queue, orphanMeta.String()+".eml")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(queue, orphanBody.String()+".json")); err != nil {
+		t.Fatal(err)
+	}
+	stray := filepath.Join(queue, "not-a-queue-id.eml")
+	if err := os.WriteFile(stray, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	s2, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s2.Len() != 1 {
+		t.Fatalf("recovered %d messages, want only the complete one", s2.Len())
+	}
+	if !s2.Has(whole) {
+		t.Error("the complete message was not recovered")
+	}
+	for name, path := range map[string]string{
+		"metadata without a body":       filepath.Join(queue, orphanMeta.String()+".json"),
+		"body without metadata":         filepath.Join(queue, orphanBody.String()+".eml"),
+		"a file that is not a queue id": stray,
+	} {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Errorf("%s survived recovery: %v", name, err)
+		}
+	}
+	// And the complete pair is untouched.
+	for _, ext := range []string{".json", ".eml"} {
+		if _, err := os.Stat(filepath.Join(queue, whole.String()+ext)); err != nil {
+			t.Errorf("the complete message lost its %s: %v", ext, err)
+		}
+	}
+}
+
+// Metadata that will not parse is not a message: its body has to go too, or
+// it sits in the spool forever counting against the quota.
+func TestRecoverDropsAPairWhoseMetadataIsCorrupt(t *testing.T) {
+	dir := t.TempDir()
+	s, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	env := Envelope{From: "a@example.at", To: []string{"b@example.net"},
+		Client: "c", Route: "r", Received: time.Now().UTC()}
+	id, err := s.Enqueue(env, strings.NewReader("body\r\n"), 0, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	queue := filepath.Join(dir, "spool", "queue")
+	if err := os.WriteFile(filepath.Join(queue, id.String()+".json"), []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	s2, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s2.Len() != 0 {
+		t.Errorf("a message with unparsable metadata was recovered")
+	}
+	if _, err := os.Stat(filepath.Join(queue, id.String()+".eml")); !os.IsNotExist(err) {
+		t.Errorf("its body survived: %v", err)
+	}
+}
+
+// The queue directory is read in batches, so a spool holding more than one
+// batch is the only thing that exercises the loop. A break after the first
+// batch would silently lose every message past recoverBatch on restart --
+// mail the sender was told had been accepted.
+func TestRecoverReadsEveryBatch(t *testing.T) {
+	dir := t.TempDir()
+	queue := filepath.Join(dir, "spool", "queue")
+	if err := os.MkdirAll(queue, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	// Written directly rather than through Enqueue: this is about the
+	// directory loop, and Enqueue's three fsyncs per message would make a
+	// batch-and-a-bit take minutes.
+	const n = recoverBatch + 17
+	base := time.Now().UTC().Add(-time.Hour)
+	body := []byte("Subject: x\r\n\r\nbody\r\n")
+	for i := 0; i < n; i++ {
+		id := loadIDForTest(i)
+		m := Meta{
+			ID: id, NextAttempt: base, Expires: base.Add(96 * time.Hour),
+			Envelope: Envelope{From: "a@example.at", To: []string{"b@example.net"},
+				Client: "c", Route: "r", Received: base},
+		}
+		b, err := json.Marshal(m)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(queue, id.String()+".json"), b, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(queue, id.String()+".eml"), body, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	s, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.Len() != n {
+		t.Fatalf("recovered %d of %d messages; the directory loop stopped early", s.Len(), n)
+	}
+	// And the last one, which only the final batch can have reached.
+	if !s.Has(loadIDForTest(n - 1)) {
+		t.Error("the last message of the last batch was not recovered")
+	}
+}
+
+// loadIDForTest builds a queue id from a counter, in the alphabet ParseID
+// accepts. Ids outside it are skipped by recover, which would make the test
+// above pass for the wrong reason.
+func loadIDForTest(i int) ID {
+	const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567"
+	var b [16]byte
+	for k := 0; k < 16; k++ {
+		b[k] = alphabet[(i>>(5*k))&31]
+	}
+	return ID(b[:])
 }

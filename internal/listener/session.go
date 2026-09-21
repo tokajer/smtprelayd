@@ -7,7 +7,6 @@ import (
 	"bufio"
 	"context"
 	"crypto/tls"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -17,16 +16,28 @@ import (
 	"strconv"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	"github.com/tokajer/smtprelayd/internal/config"
 	"github.com/tokajer/smtprelayd/internal/rewrite"
 	"github.com/tokajer/smtprelayd/internal/router"
 	"github.com/tokajer/smtprelayd/internal/spool"
-	"github.com/tokajer/smtprelayd/internal/store"
 )
 
 const defaultMaxMessageMB = 50
+
+// Per-session defaults applied when a client or the limits block leaves the
+// value at zero. Named for the reason defaultMaxMessageMB is: an operator
+// auditing what this relay enforces should find every ceiling by searching
+// for its name, not by reading the function that happens to apply it.
+const (
+	// defaultMaxRecipients bounds one transaction when the matched client
+	// sets no max_recipients of its own.
+	defaultMaxRecipients = 100
+
+	// defaultTimeoutSec is the fallback for any of the read, write and data
+	// timeouts left unset.
+	defaultTimeoutSec = 60
+)
 
 const (
 	// unmatchedMaxConns bounds how many sockets one unauthorised source may
@@ -43,16 +54,9 @@ const (
 	unmatchedMaxSession = 30 * time.Second
 )
 
-var (
-	errLineTooLong = errors.New("line exceeds 1000 octets")
-	errNulByte     = errors.New("NUL byte in input")
-	errBareCR      = errors.New("bare CR in input")
-	errTooManyHdrs = errors.New("too many headers")
-	errHdrTooLarge = errors.New("header block too large")
-)
-
 type session struct {
 	srv  *Server
+	ctx  context.Context
 	conn net.Conn
 	br   *bufio.Reader
 	bw   *bufio.Writer
@@ -70,6 +74,12 @@ type session struct {
 	from     string
 	fromSet  bool
 	rcpts    []string
+
+	// writeFailed records that a reply could not be written. The peer is
+	// gone or the socket is wedged, so every further command would be read
+	// into a void and the session would sit there until its read deadline.
+	// The loop checks this and ends instead.
+	writeFailed bool
 }
 
 func (s *Server) handle(ctx context.Context, conn net.Conn) {
@@ -100,6 +110,7 @@ func (s *Server) handle(ctx context.Context, conn net.Conn) {
 
 	ss := &session{
 		srv:        s,
+		ctx:        ctx,
 		conn:       conn,
 		br:         bufio.NewReaderSize(conn, 4096),
 		bw:         bufio.NewWriter(conn),
@@ -141,20 +152,30 @@ func (s *Server) handle(ctx context.Context, conn net.Conn) {
 	}
 
 	ss.reply(220, s.cfg.Service.Hostname+" ESMTP smtprelayd")
-	ss.loop(ctx)
+	ss.loop()
 }
 
-func (s *session) loop(ctx context.Context) {
+// loop reads and dispatches commands until the session ends. The context is
+// s.ctx, set by handle; it is not a parameter because the session already
+// carries it and two spellings of the same value is one more than can be
+// right.
+func (s *session) loop() {
 	for {
-		if ctx.Err() != nil {
-			s.reply(421, "4.3.2 service shutting down")
+		if s.writeFailed {
+			// Nothing can be said about it: saying it is what just failed.
 			return
 		}
 		if !s.deadline.IsZero() && !time.Now().Before(s.deadline) {
 			s.reply(421, "4.7.0 session time limit reached")
 			return
 		}
-		_ = s.conn.SetReadDeadline(s.readDeadline(s.srv.cfg.Limits.ReadTimeoutSec))
+		// The shutdown check comes after the deadline is armed, not before:
+		// see armRead for why the order matters.
+		s.armRead(s.readDeadline(s.srv.cfg.Limits.ReadTimeoutSec))
+		if s.ctx.Err() != nil {
+			s.reply(421, "4.3.2 service shutting down")
+			return
+		}
 		line, err := readStructuredLine(s.br, maxLineOctet)
 		if err != nil {
 			if errors.Is(err, errLineTooLong) || errors.Is(err, errNulByte) || errors.Is(err, errBareCR) {
@@ -168,7 +189,7 @@ func (s *session) loop(ctx context.Context) {
 		case "EHLO", "HELO":
 			s.doHelo(verb, arg)
 		case "STARTTLS":
-			if !s.doStartTLS(ctx) {
+			if !s.doStartTLS() {
 				return
 			}
 		case "MAIL":
@@ -227,7 +248,7 @@ func (s *session) doHelo(verb, arg string) {
 	s.multiline(250, ext)
 }
 
-func (s *session) doStartTLS(ctx context.Context) bool {
+func (s *session) doStartTLS() bool {
 	if s.srv.lc.TLS != config.TLSStartTLS || s.srv.tlsConf == nil {
 		s.reply(502, "5.5.1 command not implemented")
 		return true
@@ -240,7 +261,12 @@ func (s *session) doStartTLS(ctx context.Context) bool {
 
 	tc := tls.Server(s.conn, s.srv.tlsConf)
 	_ = tc.SetDeadline(s.readDeadline(s.srv.cfg.Limits.ReadTimeoutSec))
-	if err := tc.HandshakeContext(ctx); err != nil {
+	if s.ctx.Err() != nil {
+		// Same race armRead closes: the deadline just set may have
+		// overwritten the expired one the shutdown hook installed.
+		_ = tc.SetDeadline(time.Now())
+	}
+	if err := tc.HandshakeContext(s.ctx); err != nil {
 		s.log.Debug("starttls handshake failed", "error", err)
 		return false
 	}
@@ -282,18 +308,8 @@ func (s *session) doMail(arg string) {
 		s.reply(501, "5.1.7 "+err.Error())
 		return
 	}
-	for _, p := range params {
-		if strings.HasPrefix(strings.ToUpper(p), "SIZE=") {
-			n, err := strconv.ParseInt(p[5:], 10, 64)
-			if err != nil {
-				s.reply(501, "5.5.4 invalid SIZE parameter")
-				return
-			}
-			if n > s.maxMessageBytes() {
-				s.reply(552, "5.3.4 message exceeds size limit")
-				return
-			}
-		}
+	if !s.checkSizeParam(params) {
+		return
 	}
 	if !s.srv.rate.allow(s.client.Name, s.client.RateLimitPerMin, time.Now()) {
 		s.log.Warn("client rate limit exceeded", "limit_per_min", s.client.RateLimitPerMin)
@@ -306,14 +322,49 @@ func (s *session) doMail(arg string) {
 	s.reply(250, "2.1.0 OK")
 }
 
+// checkSizeParam enforces the announced SIZE against this session's ceiling,
+// replying itself and reporting false when the transaction must not continue.
+// Refusing here costs the client one command instead of a whole transfer.
+func (s *session) checkSizeParam(params []string) bool {
+	for _, p := range params {
+		if !strings.HasPrefix(strings.ToUpper(p), "SIZE=") {
+			continue
+		}
+		n, err := strconv.ParseInt(p[len("SIZE="):], 10, 64)
+		if err != nil {
+			s.reply(501, "5.5.4 invalid SIZE parameter")
+			return false
+		}
+		if n > s.maxMessageBytes() {
+			s.reply(552, "5.3.4 message exceeds size limit")
+			return false
+		}
+	}
+	return true
+}
+
 func (s *session) doRcpt(arg string) {
 	if !s.fromSet {
 		s.reply(503, "5.5.1 send MAIL FROM first")
 		return
 	}
+	// After the fromSet check, never before it: an unmatched source is
+	// refused at MAIL FROM so that the reply names the actual reason, and
+	// checking the client first would move that refusal a command earlier.
+	//
+	// fromSet is only ever set by doMail, which refuses an unmatched source,
+	// so a nil client cannot get past the line above today. That is an
+	// invariant held at a distance of forty lines, and what it holds back is
+	// a nil dereference in the command path of a default-deny listener --
+	// recovered by the session guard, but as a counted panic and a dropped
+	// connection. Stated where it is relied on, it costs one comparison.
+	if s.client == nil {
+		s.reply(503, "5.5.1 send MAIL FROM first")
+		return
+	}
 	max := s.client.MaxRecipients
 	if max <= 0 {
-		max = 100
+		max = defaultMaxRecipients
 	}
 	if len(s.rcpts) >= max {
 		s.reply(452, "4.5.3 too many recipients")
@@ -355,7 +406,7 @@ func (s *session) doData() bool {
 	}
 
 	s.reply(354, "end data with <CR><LF>.<CR><LF>")
-	_ = s.conn.SetReadDeadline(s.readDeadline(s.srv.cfg.Limits.DataTimeoutSec))
+	s.armRead(s.readDeadline(s.srv.cfg.Limits.DataTimeoutSec))
 
 	dr := newDotReader(s.br)
 	hr := bufio.NewReader(dr)
@@ -446,14 +497,7 @@ func (s *session) commitCopies(staged *spool.Staged, res rewrite.Result, groups 
 		}
 		id, err := s.srv.spool.Commit(staged, env, lifetime, s.receivedHeader)
 		if err != nil {
-			// A partial accept would be delivered once and then again when
-			// the client retries, so the copies already made are withdrawn.
-			for _, done := range committed {
-				if rmErr := s.srv.spool.Remove(done); rmErr != nil {
-					s.log.Error("could not withdraw a partially queued copy",
-						"queue_id", done.String(), "error", rmErr)
-				}
-			}
+			s.withdraw(committed)
 			s.log.Error("enqueue failed", "route", g.Route, "error", err)
 			s.replyDataError(err)
 			return nil, false
@@ -473,80 +517,17 @@ func (s *session) commitCopies(staged *spool.Staged, res rewrite.Result, groups 
 	return ids, true
 }
 
-// journalAccepted records one queued copy in the history store. The write is
-// best-effort: the message is already queued for delivery, and a problem in
-// the history store must not undo that or fail the session over it.
-func (s *session) journalAccepted(id spool.ID, g router.Group, res rewrite.Result, received time.Time, size int64, lifetime time.Duration) string {
-	// Subject is stored only if retain_subjects is enabled; store.RecordMessage
-	// redacts it again regardless, this just avoids parsing the header block
-	// for nothing.
-	recipientsJSON, _ := json.Marshal(g.Recipients)
-	subject := ""
-	if s.srv.cfg.History.RetainSubjects {
-		subject = sanitizeSubject(rewrite.HeaderValue(res.Headers, "Subject"))
-	}
-	// Journal metadata describes what was spooled, so it is read from
-	// the rewritten header block and the staged size rather than from
-	// the headers the client sent or the size it announced.
-	messageID := sanitizeHeaderMeta(rewrite.HeaderValue(res.Headers, "Message-ID"), maxStoredMessageID)
-	contentType := sanitizeHeaderMeta(rewrite.HeaderValue(res.Headers, "Content-Type"), maxStoredContentType)
-	_ = s.srv.store.RecordMessage(store.MessageRecord{
-		QueueID:      id.String(),
-		Client:       s.client.Name,
-		Route:        g.Route,
-		EnvelopeFrom: res.EnvelopeFrom,
-		OriginalFrom: res.OriginalFrom,
-		Recipients:   string(recipientsJSON),
-		Subject:      subject,
-		Listener:     s.srv.lc.Name,
-		RemoteAddr:   s.remote.String(),
-		MessageID:    messageID,
-		ContentType:  contentType,
-		SizeBytes:    size,
-		HeaderCount:  rewrite.HeaderCount(res.Headers),
-		Helo:         sanitizeHeaderMeta(s.helo, maxStoredHelo),
-		ReceivedAt:   received,
-		ExpiresAt:    received.Add(lifetime),
-		TLSUsed:      s.isTLS,
-	})
-	return messageID
-}
-
-// Bounds on the header values kept in the history store. These are display
-// and journal metadata, not protocol values, so they are generous headroom
-// rather than protocol limits.
-const (
-	maxStoredSubject     = 500
-	maxStoredMessageID   = 200
-	maxStoredContentType = 200
-	maxStoredHelo        = 255 // the protocol limit doHelo already enforces
-)
-
-// sanitizeHeaderMeta strips control characters from a header value before it
-// enters the history store and bounds its length. This is metadata for
-// display, not a header that gets written back onto the wire, so stripping is
-// the right response to a stray control character rather than rejecting the
-// whole message the way the rewrite package does for From.
-func sanitizeHeaderMeta(s string, max int) string {
-	s = strings.Map(func(r rune) rune {
-		if r < 0x20 || r == 0x7f {
-			return -1
+// withdraw un-queues the copies made before a later one failed. A partial
+// accept would be delivered once and then again when the client retries the
+// whole message, so nothing may stay queued for a transaction the client is
+// about to be told was not accepted.
+func (s *session) withdraw(committed []spool.ID) {
+	for _, done := range committed {
+		if err := s.srv.spool.Remove(done); err != nil {
+			s.log.Error("could not withdraw a partially queued copy",
+				"queue_id", done.String(), "error", err)
 		}
-		return r
-	}, s)
-	if len(s) > max {
-		// Cut on a rune boundary: a stored half rune would render as a
-		// replacement character everywhere it is displayed.
-		for max > 0 && !utf8.RuneStart(s[max]) {
-			max--
-		}
-		s = s[:max]
 	}
-	return s
-}
-
-func sanitizeSubject(s string) string {
-	return sanitizeHeaderMeta(s, maxStoredSubject)
 }
 
 func (s *session) replyDataError(err error) {
@@ -601,6 +582,25 @@ func (s *session) maxMessageBytes() int64 {
 	return int64(mb) * 1024 * 1024
 }
 
+// armRead sets the read deadline for the next command or the data phase.
+//
+// handle installs a hook that expires the deadline when ctx is cancelled, so
+// that a session blocked in a read ends at once on shutdown. That hook and
+// this call race: a cancellation landing between the loop's shutdown check
+// and the SetReadDeadline here was overwritten by it, and the session then
+// sat in the read for the full read_timeout_sec -- or data_timeout_sec, five
+// minutes by default -- while Set.Close waited on it and the Windows SCM
+// counted down its stop timeout. Re-checking after arming closes the window:
+// the hook has either already fired, in which case the deadline is expired
+// again here, or has not, in which case it will fire against the deadline
+// just set.
+func (s *session) armRead(t time.Time) {
+	_ = s.conn.SetReadDeadline(t)
+	if s.ctx != nil && s.ctx.Err() != nil {
+		_ = s.conn.SetReadDeadline(time.Now())
+	}
+}
+
 // readDeadline is the per-command deadline, clamped to the session deadline so
 // that a source which simply stops sending cannot outlive its session budget
 // inside a single blocking read.
@@ -614,7 +614,7 @@ func (s *session) readDeadline(sec int) time.Time {
 
 func (s *session) timeout(sec int) time.Duration {
 	if sec <= 0 {
-		sec = 60
+		sec = defaultTimeoutSec
 	}
 	return time.Duration(sec) * time.Second
 }
@@ -625,10 +625,15 @@ func (s *session) resetTransaction() {
 	s.rcpts = nil
 }
 
+// reply writes one reply line. A write that fails is recorded rather than
+// returned: every caller answers the client and then either returns or falls
+// back to the command loop, which checks writeFailed and ends the session.
+// Before that the loop kept reading from a peer that had already gone, for
+// the whole read_timeout_sec, holding a connection slot the whole time.
 func (s *session) reply(code int, msg string) {
 	_ = s.conn.SetWriteDeadline(time.Now().Add(s.timeout(s.srv.cfg.Limits.WriteTimeoutSec)))
 	fmt.Fprintf(s.bw, "%d %s\r\n", code, msg)
-	_ = s.bw.Flush()
+	s.flush()
 }
 
 func (s *session) multiline(code int, lines []string) {
@@ -640,179 +645,12 @@ func (s *session) multiline(code int, lines []string) {
 		}
 		fmt.Fprintf(s.bw, "%d%s%s\r\n", code, sep, l)
 	}
-	_ = s.bw.Flush()
+	s.flush()
 }
 
-func splitCommand(line string) (verb, arg string) {
-	line = strings.TrimLeft(line, " \t")
-	if i := strings.IndexAny(line, " \t"); i >= 0 {
-		return strings.ToUpper(line[:i]), line[i+1:]
-	}
-	return strings.ToUpper(line), ""
-}
-
-// readLineLimited reads one line, refusing to buffer more than max octets so
-// that a client cannot exhaust memory with one long line. A bare LF is
-// accepted as a terminator because legacy devices emit them, but crlf reports
-// which terminator was actually seen: the end-of-data dot is the one place
-// where the difference decides whether the remainder of the stream is a
-// message body or an SMTP command, so that distinction must survive this far.
-func readLineLimited(br *bufio.Reader, max int) (line string, crlf bool, err error) {
-	var sb strings.Builder
-	for {
-		chunk, err := br.ReadSlice('\n')
-		if sb.Len()+len(chunk) > max {
-			return "", false, errLineTooLong
-		}
-		sb.Write(chunk)
-		if err == bufio.ErrBufferFull {
-			continue
-		}
-		if err != nil {
-			return "", false, err
-		}
-		break
-	}
-	s := strings.TrimSuffix(sb.String(), "\n")
-	if strings.HasSuffix(s, "\r") {
-		s, crlf = strings.TrimSuffix(s, "\r"), true
-	}
-	if strings.IndexByte(s, 0) >= 0 {
-		return "", false, errNulByte
-	}
-	return s, crlf, nil
-}
-
-// readStructuredLine reads a line that will be interpreted rather than
-// carried: an SMTP command, or a header line that is re-emitted into the
-// spooled message. A CR inside such a line is rejected, because the next
-// parser in the chain decides on its own whether that CR ends a line, and
-// that disagreement is what header injection is made of. Rejected rather
-// than stripped, per the rule that CR, LF and NUL fail a message instead of
-// being sanitised.
-//
-// The body deliberately does not go through here. A lone CR in a message
-// body is not a header and cannot split one; a legacy device that emits one
-// would lose the whole message for a byte that only ever reaches the
-// smarthost as content.
-func readStructuredLine(br *bufio.Reader, max int) (string, error) {
-	s, _, err := readLineLimited(br, max)
-	if err != nil {
-		return "", err
-	}
-	if strings.IndexByte(s, '\r') >= 0 {
-		return "", errBareCR
-	}
-	return s, nil
-}
-
-// dotReader yields the message body with transparency dots removed and the
-// 1000 octet line limit enforced.
-//
-// RFC 5321 ends DATA on <CRLF>.<CRLF>, and only that sequence may hand the
-// stream back to the command loop. Accepting a bare <LF>.<LF> there turns
-// "controls the message body" into "controls the envelope": whatever follows
-// the dot is executed as SMTP commands, so a contact form or an ERP system on
-// an allowlisted host could inject its own MAIL FROM and RCPT TO. Checking
-// only the dot line's own terminator is not enough — <LF>.<CRLF> smuggles
-// just as well — so the preceding line's terminator is tracked too.
-//
-// Legacy devices that speak bare LF throughout are exactly this relay's
-// users, so their end-of-data is still honoured rather than left to time out.
-// It sets smuggled instead, and the caller closes the session after
-// acknowledging the message: the message is delivered, the injection is not.
-type dotReader struct {
-	br   *bufio.Reader
-	rest []byte
-	done bool
-
-	// prevCRLF is the previous body line's terminator. It starts true so that
-	// an empty message (the dot as the very first line) is judged on the dot
-	// line alone; the DATA command that opened the phase is not a body line.
-	prevCRLF bool
-	smuggled bool
-}
-
-func newDotReader(br *bufio.Reader) *dotReader {
-	return &dotReader{br: br, prevCRLF: true}
-}
-
-func (d *dotReader) Read(p []byte) (int, error) {
-	for len(d.rest) == 0 {
-		if d.done {
-			return 0, io.EOF
-		}
-		line, crlf, err := readLineLimited(d.br, maxLineOctet)
-		if err != nil {
-			d.done = true
-			return 0, err
-		}
-		if line == "." {
-			d.done = true
-			d.smuggled = !crlf || !d.prevCRLF
-			return 0, io.EOF
-		}
-		d.prevCRLF = crlf
-		// Undo dot-stuffing: exactly one leading dot, per RFC 5321 4.5.2.
-		d.rest = []byte(strings.TrimPrefix(line, ".") + "\r\n")
-	}
-	n := copy(p, d.rest)
-	d.rest = d.rest[n:]
-	return n, nil
-}
-
-// scanHeaders reads the header block, enforces the parser limits, counts
-// existing Received headers for loop detection and drops headers that would
-// misrepresent the message origin.
-func scanHeaders(br *bufio.Reader, lim config.Limits) (headers string, received int, err error) {
-	var sb strings.Builder
-	count, size := 0, 0
-	dropping := false
-
-	for {
-		line, err := readStructuredLine(br, maxLineOctet)
-		if err != nil {
-			if errors.Is(err, io.EOF) {
-				// A message consisting of headers only and no blank line.
-				return sb.String(), received, nil
-			}
-			return "", 0, err
-		}
-		size += len(line) + 2
-		if size > lim.MaxHeaderBytes {
-			return "", 0, errHdrTooLarge
-		}
-		if line == "" {
-			sb.WriteString("\r\n")
-			return sb.String(), received, nil
-		}
-
-		folded := strings.HasPrefix(line, " ") || strings.HasPrefix(line, "\t")
-		if !folded {
-			count++
-			if count > lim.MaxHeaders {
-				return "", 0, errTooManyHdrs
-			}
-			name := line
-			if i := strings.IndexByte(line, ':'); i >= 0 {
-				name = line[:i]
-			}
-			switch strings.ToLower(strings.TrimSpace(name)) {
-			case "received":
-				received++
-				dropping = false
-			case "return-path", "x-original-from":
-				// Supplied by the client these are pure misdirection; the
-				// relay owns both.
-				dropping = true
-			default:
-				dropping = false
-			}
-		}
-		if dropping {
-			continue
-		}
-		sb.WriteString(line)
-		sb.WriteString("\r\n")
+func (s *session) flush() {
+	if err := s.bw.Flush(); err != nil {
+		s.writeFailed = true
+		s.log.Debug("writing a reply failed, ending the session", "error", err)
 	}
 }

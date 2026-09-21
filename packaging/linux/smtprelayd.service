@@ -51,7 +51,12 @@ RestrictSUIDSGID=yes
 LockPersonality=yes
 MemoryDenyWriteExecute=yes
 SystemCallArchitectures=native
+# @system-service is the allowlist; the two denials narrow it further, as
+# docs/dev/EXPLOIT-SURFACE.md section 3 requires. @privileged covers the
+# calls a service that never changes identity or loads a module has no use
+# for, @resources the ones that reassign CPU, memory and IO limits.
 SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
 SystemCallErrorNumber=EPERM
 UMask=0077
 

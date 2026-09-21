@@ -28,8 +28,8 @@ func TestPagingIsClampedAtBothEnds(t *testing.T) {
 		{"limit capped", 50000, 0, 1000, 0},
 		{"negative offset resets", 50, -5, 50, 0},
 		{"huge offset resets", 50, 1 << 62, 50, 0},
-		{"offset at the bound survives", 50, maxOffset, 50, maxOffset},
-		{"offset past the bound resets", 50, maxOffset + 1, 50, 0},
+		{"offset at the bound survives", 50, MaxOffset, 50, MaxOffset},
+		{"offset past the bound resets", 50, MaxOffset + 1, 50, 0},
 		{"ordinary paging untouched", 50, 200, 50, 200},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

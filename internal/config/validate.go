@@ -121,18 +121,22 @@ func (v *validator) add(format string, a ...any) {
 	v.errs = append(v.errs, fmt.Sprintf(format, a...))
 }
 
-// normalize applies the per-element defaults that Defaults cannot: they
+// Normalize applies the per-element defaults that Defaults cannot: they
 // belong to slice entries that do not exist until the file has been decoded.
 // It runs before validation so that the checks below read one settled value
-// rather than "the configured value, or the default if empty". It holds
-// exactly the defaults that are unconditional and independent of any other
-// field on the element. Two look like they belong here but do not:
+// rather than "the configured value, or the default if empty", and it is
+// exported so that a caller building a Config by hand -- a test, or a future
+// in-memory configuration -- can settle the same defaults without running
+// the whole validation, which used to be the only way to reach them and left
+// listener.New compensating with a default of its own. It is idempotent. It
+// holds exactly the defaults that are unconditional and independent of any
+// other field on the element. Two look like they belong here but do not:
 // route.oauth2.scope is set only when the route actually uses OAuth2, so
 // setting it unconditionally would populate the field on routes that never
 // read it; the domain lower-casing in routes() is interleaved with
 // duplicate-domain detection in the same loop and cannot be hoisted without
 // duplicating that loop.
-func (c *Config) normalize() {
+func (c *Config) Normalize() {
 	for i := range c.Listeners {
 		if c.Listeners[i].TLS == "" {
 			c.Listeners[i].TLS = defaultListenerTLS
@@ -161,7 +165,7 @@ func (c *Config) normalize() {
 // reaching one without that produces errors about values the operator never
 // wrote.
 func newValidator(c *Config) *validator {
-	c.normalize()
+	c.Normalize()
 	return &validator{c: c, clientNames: map[string]bool{}, routeNames: map[string]bool{}}
 }
 

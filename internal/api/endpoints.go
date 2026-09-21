@@ -4,7 +4,6 @@
 package api
 
 import (
-	"errors"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -13,6 +12,7 @@ import (
 	"github.com/tokajer/smtprelayd/internal/config"
 	"github.com/tokajer/smtprelayd/internal/httpx"
 	"github.com/tokajer/smtprelayd/internal/metrics"
+	"github.com/tokajer/smtprelayd/internal/queueaction"
 	"github.com/tokajer/smtprelayd/internal/spool"
 	"github.com/tokajer/smtprelayd/internal/store"
 )
@@ -226,18 +226,16 @@ func (s *Server) handleRequeue(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	tokenName, _ := r.Context().Value(tokenNameKey{}).(string)
-	switch err := s.spool.Requeue(id); {
-	case err == nil:
-		if aerr := s.store.RecordAudit(tokenName, httpx.SourceAddr(r), "requeue", id.String(), ""); aerr != nil {
-			s.log.Warn("audit log write failed", "action", "requeue", "queue_id", id.String(), "error", aerr)
-		}
+	switch s.actions.Requeue(id, tokenName, httpx.SourceAddr(r), "") {
+	case queueaction.Done:
 		writeJSON(w, http.StatusOK, map[string]string{"status": "requeued"})
-	case errors.Is(err, spool.ErrNotFound):
+	case queueaction.Missing:
 		writeJSONError(w, http.StatusNotFound, "message not found")
-	case errors.Is(err, spool.ErrBusy):
+	case queueaction.Busy:
 		writeJSONError(w, http.StatusConflict, "message is currently being delivered")
 	default:
-		s.serverError(w, "requeue", err)
+		// queueaction has already logged why.
+		writeJSONError(w, http.StatusInternalServerError, "internal error")
 	}
 }
 
@@ -248,37 +246,19 @@ func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	tokenName, _ := r.Context().Value(tokenNameKey{}).(string)
-	switch err := s.spool.Discard(id); {
-	case err == nil:
-		if rerr := s.store.RecordRemoval(id.String()); rerr != nil {
-			s.log.Warn("removal record write failed", "queue_id", id.String(), "error", rerr)
-		}
-		if aerr := s.store.RecordAudit(tokenName, httpx.SourceAddr(r), "delete", id.String(), ""); aerr != nil {
-			s.log.Warn("audit log write failed", "action", "delete", "queue_id", id.String(), "error", aerr)
-		}
+	switch s.actions.Delete(id, tokenName, httpx.SourceAddr(r), "") {
+	case queueaction.Done:
 		writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
-	case errors.Is(err, spool.ErrNotFound):
-		// The spool copy is already gone. If history still calls the message
-		// queued or deferred it keeps showing up as active in every listing,
-		// with nothing able to clear it, so the record is reconciled instead
-		// of answering 404 forever. The dashboard's delete does the same;
-		// the two entry points must not disagree about what delete means.
-		cleared, rerr := s.store.ReconcileRemoved(id.String())
-		if rerr != nil {
-			s.serverError(w, "delete", rerr)
-			return
-		}
-		if !cleared {
-			writeJSONError(w, http.StatusNotFound, "message not found")
-			return
-		}
-		if aerr := s.store.RecordAudit(tokenName, httpx.SourceAddr(r), "delete", id.String(), "no spool copy: history reconciled"); aerr != nil {
-			s.log.Warn("audit log write failed", "action", "delete", "queue_id", id.String(), "error", aerr)
-		}
+	case queueaction.Cleared:
+		// No spool copy was left and the history row that still called the
+		// message active has been reconciled. The dashboard reports the same
+		// case; see queueaction.Delete for why this is not a 404.
 		writeJSON(w, http.StatusOK, map[string]string{"status": "cleared"})
-	case errors.Is(err, spool.ErrBusy):
+	case queueaction.Missing:
+		writeJSONError(w, http.StatusNotFound, "message not found")
+	case queueaction.Busy:
 		writeJSONError(w, http.StatusConflict, "message is currently being delivered")
 	default:
-		s.serverError(w, "delete", err)
+		writeJSONError(w, http.StatusInternalServerError, "internal error")
 	}
 }

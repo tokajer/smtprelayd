@@ -61,6 +61,13 @@ type journalScan struct {
 }
 
 // Redacted is what a subject reads as once history.retain_subjects is off.
+//
+// There is a second constant of the same spelling in internal/logging, and
+// Secret.String in internal/config returns it too. The three are deliberately
+// separate: they redact a message subject, a log attribute and a credential,
+// and they answer to three different settings. Nothing should merge them --
+// but nothing should add a fourth either, which is what the literal in
+// internal/bounce had quietly become.
 const Redacted = "[redacted]"
 
 // redactSubject applies the retain_subjects policy on the way out.
@@ -87,6 +94,64 @@ func journalCols(prefix string) string {
 
 func (j *journalScan) dest() []interface{} {
 	return []interface{}{&j.messageID, &j.contentType, &j.sizeBytes, &j.headerCount, &j.helo}
+}
+
+// messageColumns is the SELECT list every message query shares, in the order
+// messageScan.dest expects it. prefix is the table alias including its dot,
+// or "". It exists for the reason journalCols does, one level up: the three
+// queries below used to write the list and its scan destinations out
+// separately, six places for thirteen columns, and a column added to one
+// pair or dropped from another compiles and then scans the wrong value into
+// the wrong field.
+func messageColumns(prefix string) string {
+	return prefix + "queue_id, " + prefix + "client, " + prefix + "route, " +
+		prefix + "envelope_from, " + prefix + "original_from, " + prefix + "recipients, " +
+		prefix + "subject, " + prefix + "listener, " + prefix + "remote_addr, " +
+		prefix + "received_at, " + prefix + "expires_at, " + prefix + "tls_used, " +
+		prefix + "created_at, " + journalCols(prefix)
+}
+
+// messageScan receives one row of messageColumns and turns it into a
+// Message. The timestamps and the recipient list arrive as text and the TLS
+// flag as an integer, which is what SQLite stores; message does that
+// conversion once for every caller.
+type messageScan struct {
+	m              Message
+	recipientsJSON string
+	tlsInt         int
+	receivedAt     string
+	expiresAt      string
+	createdAt      string
+	j              journalScan
+}
+
+// dest returns the scan destinations for messageColumns, followed by extra,
+// which is whatever the caller selected after the shared list.
+func (sc *messageScan) dest(extra ...any) []any {
+	out := append([]any{
+		&sc.m.QueueID, &sc.m.Client, &sc.m.Route, &sc.m.EnvelopeFrom, &sc.m.OriginalFrom,
+		&sc.recipientsJSON, &sc.m.Subject, &sc.m.Listener, &sc.m.RemoteAddr,
+		&sc.receivedAt, &sc.expiresAt, &sc.tlsInt, &sc.createdAt,
+	}, sc.j.dest()...)
+	return append(out, extra...)
+}
+
+// message finalises the scanned row. A timestamp that does not parse yields
+// the zero time rather than an error: the column is written by this package
+// in RFC 3339 and a malformed one means the row was edited by hand, which is
+// not a reason to fail a whole listing.
+func (sc *messageScan) message(s *Store) *Message {
+	m := sc.m
+	sc.j.apply(&m)
+	m.Subject = s.redactSubject(m.Subject)
+	m.TLSUsed = sc.tlsInt != 0
+	m.ReceivedAt, _ = time.Parse(time.RFC3339, sc.receivedAt)
+	m.ExpiresAt, _ = time.Parse(time.RFC3339, sc.expiresAt)
+	m.CreatedAt, _ = time.Parse(time.RFC3339, sc.createdAt)
+	if err := json.Unmarshal([]byte(sc.recipientsJSON), &m.Recipients); err != nil {
+		m.Recipients = []string{}
+	}
+	return &m
 }
 
 func (j *journalScan) apply(m *Message) {
@@ -141,7 +206,7 @@ var messageSortColumns = map[string]string{
 	// then bounced/removed sharing the last rank. The mapping is fixed
 	// here, never influenced by request input, so this is as safe to
 	// interpolate as any other allowlisted column.
-	"status": `CASE WHEN latest.class IS NULL THEN 0 WHEN latest.class = 'temporary' THEN 1 WHEN latest.class = 'delivered' THEN 2 ELSE 3 END`,
+	"status": `CASE WHEN m.last_class IS NULL THEN 0 WHEN m.last_class = 'temporary' THEN 1 WHEN m.last_class = 'delivered' THEN 2 ELSE 3 END`,
 }
 
 // statusClasses maps a display status onto the attempt classes that produce
@@ -175,7 +240,7 @@ type timeColumn string
 
 const (
 	byReceivedAt  timeColumn = "m.received_at"
-	byLastAttempt timeColumn = "agg.last_attempt"
+	byLastAttempt timeColumn = "m.last_attempt_at"
 )
 
 // commonFilters is the filtering MessageFilter and BounceFilter have in
@@ -207,81 +272,93 @@ func (f BounceFilter) common() commonFilters {
 	}
 }
 
+// builder accumulates a query and the values it binds as one thing.
+//
+// Every list query here is assembled by appending literal fragments and
+// appending bound values, and those used to be two statements per clause. A
+// fragment added without its value, or a value without its fragment, still
+// compiles and still runs -- it shifts every later value onto the wrong
+// placeholder, so a filter silently matches on the wrong column rather than
+// failing. Pairing them in one call is what makes that unwritable.
+//
+// Nothing that reaches sql is ever request input: the fragments are literals
+// in this file, the column lists are code-side constants, and every value
+// goes through args.
+type builder struct {
+	sql  strings.Builder
+	args []any
+}
+
+func newBuilder(head string) *builder {
+	b := &builder{}
+	b.sql.WriteString(head)
+	return b
+}
+
+// where appends one conjunct and the values its placeholders bind.
+func (b *builder) where(clause string, args ...any) {
+	b.sql.WriteString(" AND ")
+	b.sql.WriteString(clause)
+	b.args = append(b.args, args...)
+}
+
+// add appends a trailing fragment -- an ORDER BY, a LIMIT -- and its values.
+func (b *builder) add(fragment string, args ...any) {
+	b.sql.WriteString(fragment)
+	b.args = append(b.args, args...)
+}
+
+func (b *builder) query() (string, []any) { return b.sql.String(), b.args }
+
 // apply appends the shared clauses and the values they bind. The queue and
 // bounce views window on when a message arrived; the bounce summary windows
 // on when it last failed, which is why the column is a parameter.
-func (f commonFilters) apply(query string, args []interface{}, col timeColumn) (string, []interface{}) {
+func (f commonFilters) apply(b *builder, col timeColumn) {
 	if f.Since != nil {
-		query += " AND " + string(col) + " >= ?"
-		args = append(args, f.Since.UTC().Format(time.RFC3339))
+		b.where(string(col)+" >= ?", f.Since.UTC().Format(time.RFC3339))
 	}
 	if f.Until != nil {
-		query += " AND " + string(col) + " <= ?"
-		args = append(args, f.Until.UTC().Format(time.RFC3339))
+		b.where(string(col)+" <= ?", f.Until.UTC().Format(time.RFC3339))
 	}
 	if f.Client != "" {
-		query += " AND m.client = ?"
-		args = append(args, f.Client)
+		b.where("m.client = ?", f.Client)
 	}
 	if f.Route != "" {
-		query += " AND m.route = ?"
-		args = append(args, f.Route)
+		b.where("m.route = ?", f.Route)
 	}
 	if f.Sender != "" {
-		query += " AND m.envelope_from LIKE ?"
-		args = append(args, "%"+f.Sender+"%")
+		b.where("m.envelope_from LIKE ?", "%"+f.Sender+"%")
 	}
 	if f.Recipient != "" {
 		// Substring match via LIKE; the value is bound as a parameter, never
 		// interpolated, so characters meaningful to LIKE (% and _) only ever
 		// widen or narrow the match, they cannot change the query structure.
-		query += " AND m.recipients LIKE ?"
-		args = append(args, "%"+f.Recipient+"%")
+		b.where("m.recipients LIKE ?", "%"+f.Recipient+"%")
 	}
 	if f.Subject != "" {
-		query += " AND m.subject LIKE ?"
-		args = append(args, "%"+f.Subject+"%")
+		b.where("m.subject LIKE ?", "%"+f.Subject+"%")
 	}
-	return query, args
 }
 
 // FindMessageByID retrieves a single message with all its attempts.
 func (s *Store) FindMessageByID(queueID string) (*Message, error) {
-	var m Message
-	var recipientsJSON string
-	var tlsInt int
-	var receivedAtStr, expiresAtStr, createdAtStr string
-	var j journalScan
+	var sc messageScan
 
-	//#nosec G202 -- journalCols is a package constant column list, not input; the only bound value is queueID
+	//#nosec G202 -- messageColumns is a package constant column list, not input; the only bound value is queueID
 	row := s.db.QueryRow(`
-		SELECT queue_id, client, route, envelope_from, original_from, recipients, subject, listener, remote_addr, received_at, expires_at, tls_used, created_at,
-		       `+journalCols("")+`
+		SELECT `+messageColumns("")+`
 		FROM messages
 		WHERE queue_id = ?
 	`, queueID)
 
-	err := row.Scan(append([]interface{}{
-		&m.QueueID, &m.Client, &m.Route, &m.EnvelopeFrom, &m.OriginalFrom, &recipientsJSON, &m.Subject, &m.Listener, &m.RemoteAddr,
-		&receivedAtStr, &expiresAtStr, &tlsInt, &createdAtStr,
-	}, j.dest()...)...)
+	err := row.Scan(sc.dest()...)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, fmt.Errorf("store: find message: %w", err)
 	}
-
-	m.ReceivedAt, _ = time.Parse(time.RFC3339, receivedAtStr)
-	m.ExpiresAt, _ = time.Parse(time.RFC3339, expiresAtStr)
-	m.CreatedAt, _ = time.Parse(time.RFC3339, createdAtStr)
-	j.apply(&m)
-	m.Subject = s.redactSubject(m.Subject)
-
-	m.TLSUsed = tlsInt != 0
-	if err := json.Unmarshal([]byte(recipientsJSON), &m.Recipients); err != nil {
-		m.Recipients = []string{}
-	}
+	m := sc.message(s)
 
 	// Fetch all attempts for this message.
 	rows, err := s.db.Query(`
@@ -332,10 +409,10 @@ func (s *Store) FindMessageByID(queueID string) (*Message, error) {
 		m.LastCode, m.LastErr = last.SMTPCode, last.SMTPResp
 	}
 
-	return &m, nil
+	return m, nil
 }
 
-// maxOffset bounds how deep any list query may page. An offset past the end
+// MaxOffset bounds how deep any list query may page. An offset past the end
 // of the result set costs SQLite a walk of the whole set before it can return
 // nothing, so leaving it unbounded turns one crafted request into a full scan.
 // Measured on 20,000 messages: 7.5ms at offset 0 against 31ms past the end.
@@ -344,10 +421,12 @@ func (s *Store) FindMessageByID(queueID string) (*Message, error) {
 // relay's load, so no legitimate paging reaches it. Out of range resets to the
 // start, which is how an invalid cursor already behaves.
 //
-// It lives here rather than at the two callers because this is the choke point
-// both pass through. internal/api clamps its own cursor as well; the dashboard
-// had no clamp at all, which is the gap this closes.
-const maxOffset = 1_000_000
+// It lives here because this is the choke point every list query passes
+// through, and it is exported for the reason MaxPageLimit is: internal/api
+// clamps its own cursor too, so that the cursor it hands back names the page
+// it actually served. That clamp has to be this number, not a copy of it --
+// two spellings would go on being enforced separately after one moved.
+const MaxOffset = 1_000_000
 
 // MaxPageLimit is the largest page any list query will return, whatever the
 // caller asks for. It is exported because internal/web bounds one bulk action
@@ -368,7 +447,7 @@ func clampPaging(limit, offset int) (int, int) {
 	case limit > MaxPageLimit:
 		limit = MaxPageLimit
 	}
-	if offset < 0 || offset > maxOffset {
+	if offset < 0 || offset > MaxOffset {
 		offset = 0
 	}
 	return limit, offset
@@ -388,53 +467,39 @@ func splitPage[T any](rows []T, limit int) ([]T, bool) {
 }
 
 // FindMessages queries messages with filtering, sorting and pagination.
-// Status is derived from the most recent attempt, the same definition
-// CountQueue and deriveStatus use: no attempts is "queued", the latest
-// attempt's class otherwise.
+// Status comes from last_class, which RecordAttempt maintains on the message
+// row: no attempt yet is "queued", the latest attempt's class otherwise --
+// the same definition deriveStatus applies when it is given the full attempt
+// history instead.
 func (s *Store) FindMessages(filter MessageFilter) ([]*Message, bool, error) {
 	filter.Limit, filter.Offset = clampPaging(filter.Limit, filter.Offset)
 
-	//#nosec G202 -- every fragment appended below is a string literal and every value is bound; journalCols and messageSortColumns are fixed, code-side lists
-	query := `
-		SELECT m.queue_id, m.client, m.route, m.envelope_from, m.original_from, m.recipients, m.subject, m.listener, m.remote_addr, m.received_at, m.expires_at, m.tls_used, m.created_at,
-		       ` + journalCols("m.") + `, latest.class, latest.smtp_code, latest.smtp_response, agg.attempts
+	//#nosec G202 -- every fragment appended below is a string literal and every value is bound; messageColumns and messageSortColumns are fixed, code-side lists
+	b := newBuilder(`
+		SELECT ` + messageColumns("m.") + `, m.last_class, m.last_smtp_code, m.last_smtp_response, m.attempt_count
 		FROM messages m
-		LEFT JOIN (
-			-- The tiebreak is the autoincrement id, not MAX(at_time): at_time
-			-- has only second precision, so two attempts within the same
-			-- second would otherwise both match and fan this join out into
-			-- duplicate result rows.
-			SELECT queue_id, class, smtp_code, smtp_response FROM attempts
-			WHERE id IN (
-				SELECT MAX(id) FROM attempts GROUP BY queue_id
-			)
-		) latest ON m.queue_id = latest.queue_id
-		LEFT JOIN (
-			SELECT queue_id, COUNT(*) AS attempts FROM attempts GROUP BY queue_id
-		) agg ON m.queue_id = agg.queue_id
 		WHERE 1=1
-	`
-	args := []interface{}{}
+	`)
 
-	query, args = filter.common().apply(query, args, byReceivedAt)
+	filter.common().apply(b, byReceivedAt)
 	switch filter.Status {
 	case "":
 		// No filter.
 	case "queued":
-		query += " AND latest.class IS NULL"
+		b.where("m.last_class IS NULL")
 	case "active":
-		query += " AND (latest.class IS NULL OR latest.class = 'temporary')"
+		b.where("(m.last_class IS NULL OR m.last_class = 'temporary')")
 	default:
 		classes, ok := statusClasses[filter.Status]
 		if !ok {
 			return nil, false, fmt.Errorf("store: unknown status %q", filter.Status)
 		}
 		placeholders := make([]string, len(classes))
+		values := make([]any, len(classes))
 		for i, c := range classes {
-			placeholders[i] = "?"
-			args = append(args, c)
+			placeholders[i], values[i] = "?", c
 		}
-		query += " AND latest.class IN (" + strings.Join(placeholders, ",") + ")"
+		b.where("m.last_class IN ("+strings.Join(placeholders, ",")+")", values...)
 	}
 
 	col, ok := messageSortColumns[filter.Sort]
@@ -445,9 +510,10 @@ func (s *Store) FindMessages(filter MessageFilter) ([]*Message, bool, error) {
 	if filter.Order == "asc" {
 		order = "ASC"
 	}
-	query += fmt.Sprintf(" ORDER BY %s %s LIMIT ? OFFSET ?", col, order)
-	args = append(args, filter.Limit+1, filter.Offset) // +1 to detect "has more"
+	// +1 to detect "has more"
+	b.add(fmt.Sprintf(" ORDER BY %s %s LIMIT ? OFFSET ?", col, order), filter.Limit+1, filter.Offset)
 
+	query, args := b.query()
 	rows, err := s.db.Query(query, args...)
 	if err != nil {
 		return nil, false, fmt.Errorf("store: find messages: %w", err)
@@ -456,38 +522,21 @@ func (s *Store) FindMessages(filter MessageFilter) ([]*Message, bool, error) {
 
 	var messages []*Message
 	for rows.Next() {
-		var m Message
-		var recipientsJSON string
-		var tlsInt int
-		var receivedAtStr, expiresAtStr, createdAtStr string
+		var sc messageScan
 		var latestClass, latestResp sql.NullString
 		var latestCode, attemptCount sql.NullInt64
-		var j journalScan
 
-		dest := append([]interface{}{
-			&m.QueueID, &m.Client, &m.Route, &m.EnvelopeFrom, &m.OriginalFrom, &recipientsJSON, &m.Subject, &m.Listener, &m.RemoteAddr,
-			&receivedAtStr, &expiresAtStr, &tlsInt, &createdAtStr,
-		}, j.dest()...)
-		dest = append(dest, &latestClass, &latestCode, &latestResp, &attemptCount)
-		if err := rows.Scan(dest...); err != nil {
+		if err := rows.Scan(sc.dest(&latestClass, &latestCode, &latestResp, &attemptCount)...); err != nil {
 			return nil, false, fmt.Errorf("store: scan message: %w", err)
 		}
 
-		j.apply(&m)
-		m.Subject = s.redactSubject(m.Subject)
+		m := sc.message(s)
 		m.LastCode = int(latestCode.Int64)
 		m.LastErr = latestResp.String
 		m.AttemptCount = int(attemptCount.Int64)
-		m.TLSUsed = tlsInt != 0
-		m.ReceivedAt, _ = time.Parse(time.RFC3339, receivedAtStr)
-		m.ExpiresAt, _ = time.Parse(time.RFC3339, expiresAtStr)
-		m.CreatedAt, _ = time.Parse(time.RFC3339, createdAtStr)
-		if err := json.Unmarshal([]byte(recipientsJSON), &m.Recipients); err != nil {
-			m.Recipients = []string{}
-		}
 		m.Status = classToStatus(latestClass.String, latestClass.Valid)
 
-		messages = append(messages, &m)
+		messages = append(messages, m)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, false, fmt.Errorf("store: messages query error: %w", err)
@@ -522,41 +571,24 @@ func (s *Store) FindBounces(filter BounceFilter) ([]*Message, bool, error) {
 
 	// Find queue IDs that have a final attempt with class='permanent' or 'expired'.
 	//#nosec G202 -- as in FindMessages: literal fragments, bound values, code-side column list
-	query := `
-		SELECT DISTINCT m.queue_id, m.client, m.route, m.envelope_from, m.original_from, m.recipients, m.subject, m.listener, m.remote_addr, m.received_at, m.expires_at, m.tls_used, m.created_at,
-		       ` + journalCols("m.") + `, last.smtp_code, last.smtp_response, agg.attempts
+	b := newBuilder(`
+		SELECT ` + messageColumns("m.") + `, m.last_smtp_code, m.last_smtp_response, m.attempt_count
 		FROM messages m
-		INNER JOIN (
-			SELECT queue_id FROM attempts WHERE class IN ('permanent', 'expired')
-		) a ON m.queue_id = a.queue_id
-		INNER JOIN (
-			-- Tiebreak on id for the same reason as FindMessages: at_time
-			-- alone would duplicate a row whenever two attempts landed in
-			-- the same wall-clock second.
-			SELECT queue_id, class, smtp_code, smtp_response FROM attempts
-			WHERE id IN (SELECT MAX(id) FROM attempts GROUP BY queue_id)
-		) last ON m.queue_id = last.queue_id
-		INNER JOIN (
-			SELECT queue_id, COUNT(*) AS attempts FROM attempts GROUP BY queue_id
-		) agg ON m.queue_id = agg.queue_id
-		WHERE 1=1
-	`
-	args := []interface{}{}
+		WHERE m.has_bounced = 1
+	`)
 
-	query, args = filter.common().apply(query, args, byReceivedAt)
+	filter.common().apply(b, byReceivedAt)
 	if filter.Class != "" {
-		// On last.class, not on the a subquery: a selects queue_id alone, so
-		// "AND a.class = ?" was a guaranteed SQL error and the dashboard's
-		// failure-class filter had never returned anything but a 500. The
-		// final attempt's class is also the one the bounce view displays,
-		// which is what FindBounceSummaries already filters on.
-		query += " AND last.class = ?"
-		args = append(args, filter.Class)
+		// The filter is on the latest attempt's class, which is what the
+		// bounce view displays, and not on has_bounced: the two answer
+		// different questions, and a message that failed permanently and was
+		// then requeued and delivered is in this list with last_class
+		// "delivered". FindBounceSummaries filters the same way.
+		b.where("m.last_class = ?", filter.Class)
 	}
+	b.add(" ORDER BY m.received_at DESC LIMIT ? OFFSET ?", filter.Limit+1, filter.Offset)
 
-	query += " ORDER BY m.received_at DESC LIMIT ? OFFSET ?"
-	args = append(args, filter.Limit+1, filter.Offset)
-
+	query, args := b.query()
 	rows, err := s.db.Query(query, args...)
 	if err != nil {
 		return nil, false, fmt.Errorf("store: find bounces: %w", err)
@@ -565,38 +597,21 @@ func (s *Store) FindBounces(filter BounceFilter) ([]*Message, bool, error) {
 
 	var messages []*Message
 	for rows.Next() {
-		var m Message
-		var recipientsJSON string
-		var tlsInt int
-		var receivedAtStr, expiresAtStr, createdAtStr string
-		var j journalScan
+		var sc messageScan
 		var lastResp sql.NullString
 		var lastCode, attemptCount sql.NullInt64
 
-		dest := append([]interface{}{
-			&m.QueueID, &m.Client, &m.Route, &m.EnvelopeFrom, &m.OriginalFrom, &recipientsJSON, &m.Subject, &m.Listener, &m.RemoteAddr,
-			&receivedAtStr, &expiresAtStr, &tlsInt, &createdAtStr,
-		}, j.dest()...)
-		dest = append(dest, &lastCode, &lastResp, &attemptCount)
-		if err := rows.Scan(dest...); err != nil {
+		if err := rows.Scan(sc.dest(&lastCode, &lastResp, &attemptCount)...); err != nil {
 			return nil, false, fmt.Errorf("store: scan bounce: %w", err)
 		}
 
-		j.apply(&m)
-		m.Subject = s.redactSubject(m.Subject)
+		m := sc.message(s)
 		m.LastCode = int(lastCode.Int64)
 		m.LastErr = lastResp.String
 		m.AttemptCount = int(attemptCount.Int64)
-		m.TLSUsed = tlsInt != 0
-		m.ReceivedAt, _ = time.Parse(time.RFC3339, receivedAtStr)
-		m.ExpiresAt, _ = time.Parse(time.RFC3339, expiresAtStr)
-		m.CreatedAt, _ = time.Parse(time.RFC3339, createdAtStr)
-		if err := json.Unmarshal([]byte(recipientsJSON), &m.Recipients); err != nil {
-			m.Recipients = []string{}
-		}
-
 		m.Status = "bounced"
-		messages = append(messages, &m)
+
+		messages = append(messages, m)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, false, fmt.Errorf("store: bounces query error: %w", err)
@@ -630,36 +645,20 @@ type BounceSummary struct {
 func (s *Store) FindBounceSummaries(filter BounceFilter) ([]BounceSummary, bool, error) {
 	filter.Limit, filter.Offset = clampPaging(filter.Limit, filter.Offset)
 
-	query := `
+	b := newBuilder(`
 		SELECT m.queue_id, m.client, m.route, m.envelope_from, m.original_from, m.recipients, m.subject,
-		       agg.attempts, agg.first_attempt, agg.last_attempt,
-		       last.class, last.smtp_code, last.smtp_response
+		       m.attempt_count, m.first_attempt_at, m.last_attempt_at,
+		       m.last_class, m.last_smtp_code, m.last_smtp_response
 		FROM messages m
-		INNER JOIN (
-			SELECT queue_id FROM attempts WHERE class IN ('permanent', 'expired')
-		) bounced ON m.queue_id = bounced.queue_id
-		INNER JOIN (
-			SELECT queue_id, COUNT(*) AS attempts, MIN(at_time) AS first_attempt, MAX(at_time) AS last_attempt
-			FROM attempts GROUP BY queue_id
-		) agg ON m.queue_id = agg.queue_id
-		INNER JOIN (
-			-- Tiebreak on id, not MAX(at_time): see the comment in
-			-- FindMessages on why a same-second collision must not be
-			-- allowed to fan this join out into duplicate rows.
-			SELECT queue_id, class, smtp_code, smtp_response FROM attempts
-			WHERE id IN (SELECT MAX(id) FROM attempts GROUP BY queue_id)
-		) last ON m.queue_id = last.queue_id
-		WHERE 1=1
-	`
-	args := []interface{}{}
-	query, args = filter.common().apply(query, args, byLastAttempt)
+		WHERE m.has_bounced = 1
+	`)
+	filter.common().apply(b, byLastAttempt)
 	if filter.Class != "" {
-		query += " AND last.class = ?"
-		args = append(args, filter.Class)
+		b.where("m.last_class = ?", filter.Class)
 	}
-	query += " ORDER BY agg.last_attempt DESC LIMIT ? OFFSET ?"
-	args = append(args, filter.Limit+1, filter.Offset)
+	b.add(" ORDER BY m.last_attempt_at DESC LIMIT ? OFFSET ?", filter.Limit+1, filter.Offset)
 
+	query, args := b.query()
 	rows, err := s.db.Query(query, args...)
 	if err != nil {
 		return nil, false, fmt.Errorf("store: find bounce summaries: %w", err)
@@ -708,84 +707,4 @@ func deriveStatus(attempts []Attempt) string {
 		return classToStatus("", false)
 	}
 	return classToStatus(attempts[len(attempts)-1].Class, true)
-}
-
-// DeleteMessage hard-deletes a message (for admin action).
-func (s *Store) DeleteMessage(queueID string) error {
-	_, err := s.db.Exec("DELETE FROM messages WHERE queue_id = ?", queueID)
-	if err != nil {
-		return fmt.Errorf("store: delete message: %w", err)
-	}
-	return nil
-}
-
-// QueueStats is one route's queue depth, as CountQueue reports it to the
-// metrics endpoint.
-type QueueStats struct {
-	Route     string
-	Queued    int64
-	Deferred  int64
-	Delivered int64
-	Bounced   int64
-}
-
-// CountQueue returns queue statistics aggregated by route (for metrics).
-func (s *Store) CountQueue() ([]QueueStats, error) {
-	// A message is queued if it has no attempts or only temporary attempts.
-	// A message is delivered if its last attempt is delivered.
-	// A message is bounced if its last attempt is permanent or expired.
-	// A message is deferred if its last attempt is temporary.
-	// SQLite does not have user-defined functions easily, so we derive the status in Go.
-
-	rows, err := s.db.Query(`
-		SELECT m.route, COALESCE(a.class, 'queued') as latest_class
-		FROM messages m
-		LEFT JOIN (
-			-- Tiebreak on id, not MAX(at_time): see the comment in
-			-- FindMessages on why a same-second collision must not be
-			-- allowed to fan this join out into duplicate rows.
-			SELECT queue_id, class FROM attempts
-			WHERE id IN (
-				SELECT MAX(id) FROM attempts GROUP BY queue_id
-			)
-		) a ON m.queue_id = a.queue_id
-	`)
-	if err != nil {
-		return nil, fmt.Errorf("store: count queue: %w", err)
-	}
-	defer rows.Close()
-
-	stats := make(map[string]*QueueStats)
-	for rows.Next() {
-		var route string
-		var class string
-		if err := rows.Scan(&route, &class); err != nil {
-			return nil, fmt.Errorf("store: scan queue stat: %w", err)
-		}
-
-		if _, ok := stats[route]; !ok {
-			stats[route] = &QueueStats{Route: route}
-		}
-
-		st := stats[route]
-		switch class {
-		case "queued":
-			st.Queued++
-		case "temporary":
-			st.Deferred++
-		case "delivered":
-			st.Delivered++
-		case "permanent", "expired":
-			st.Bounced++
-		}
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("store: queue count query error: %w", err)
-	}
-
-	var result []QueueStats
-	for _, s := range stats {
-		result = append(result, *s)
-	}
-	return result, nil
 }

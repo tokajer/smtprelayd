@@ -19,7 +19,377 @@ fix below): the MSI installs without error, exactly one service registration
 remains (no duplicate), the on-disk binary is replaced, and the service keeps
 running afterwards. Uninstall remains unverified. Log rotation and Windows ACL
 verification at startup are complete.
-**Last session**: 2026-09-18 (forty-seventh session) — The review looked at
+**Last session**: 2026-09-21 (fifty-second session) — An architectural review
+of the whole tree, then every finding from it acted on. The review was about
+structure rather than behaviour, so most of it moved code without changing
+what it does; three findings turned out to be defects and are listed first.
+
+**A failed directory sync in `Commit` could deliver a message twice.** Both
+files are renamed into the queue directory before `syncDir`, and a failure
+there returned an error with the pair still on disk and nothing in the index:
+invisible to `ClaimBatch`, `QueueDepth` and the quota for the life of the
+process, then re-indexed by `recover()` at the next start and delivered —
+while `commitCopies`, told the commit failed, had already withdrawn the
+sibling copies and answered 4xx, so the client had retried. The pair is now
+unlinked before the error is returned. `syncDirFn` is the one seam added for
+it, because a filesystem that refuses fsync on demand is not otherwise
+reachable; the regression test fails without the fix, on both halves —
+leftover files and a restart re-indexing them.
+
+**`Fail` could lose the quota's record of a message it had moved aside.** A
+rename that lost the Windows sharing-violation race returned before the
+`failedIndex` entry was written, so whichever half had moved sat in
+`spool/failed` charged to nobody until a restart re-read the directory. The
+entry is now written for what is actually there and the error reported after.
+
+**`releaseRest` found its stop point by pointer identity** across the batch,
+which is correct only because `ClaimBatch` hands out fresh copies — true,
+stated nowhere, and wrong by one suffix if it stopped being true. `dispatch`
+already knew the index and threw it away; it passes it now.
+
+**The spool had one mutex over four sets of state.** The live queue, the
+mirror of `spool/failed` and the quota ledger share no invariant, and the
+single lock is why `QueueDepth` needed a cache and `Requeue` needed to hold a
+lease instead of the lock — two local workarounds for one cause. Three locks
+now, never held nested. The quota went from summing the whole index on every
+accepted message to reading running totals maintained by `putLocked` and
+`dropLocked`. `go test -race` is clean over spool, store, listener and
+delivery.
+
+**Message kind is a persisted value, not accumulating booleans.**
+`Envelope.Kind` is a string with three constants, and `Notification`/`Canary`
+stay written in lockstep by `normalizeKind` so a binary rolled back still
+reads a notification as one. A fourth kind is now one constant and one branch
+rather than a fourth boolean and a combination that cannot be expressed as an
+error.
+
+**Also**: the SMTP wire format (the line, header and DATA readers, 180 lines
+and every rule about CR, LF and NUL) moved out of `session.go` into
+`wire.go`; the history schema and its migrations moved out of `store.go` into
+`schema.go`; the dashboard's read-only pages became one table feeding both
+the template list and the route registrations, the shape the command set and
+the metric families already use; `queueaction` declares `Queue` and `Journal`
+on the consumer side, which is what makes its `Failed` outcome testable at
+all; the metrics registry holds an `ExpirySource` instead of the whole
+`*config.Config`, and `canary.New` takes the hostname and lifetime it
+actually uses; `internal/api` stopped keeping its own copies of the paging
+bounds and uses `store.MaxPageLimit` and `store.MaxOffset`; the store's
+record methods take their timestamps from an injectable clock; `parseOffset`
+grew a correctly named primitive for the bulk counts it was parsing; the
+`zz_*` load tests are named `load_*`; and `web/actions.go` dropped the alias
+vocabulary for `queueaction.Outcome`.
+
+**One duplicated privacy control turned out to be load-bearing in a test.**
+`bounce.send` re-applied subject redaction that the store already applies on
+every read. In the service the two always agree — both come from
+`cfg.History.RetainSubjects` — so removing it changed nothing there. The
+digest's redaction test, however, opened its store with `retainSubjects: true`
+hardcoded while flipping only the config field, so it had been checking the
+notifier's copy rather than the store's. The test now wires the store the way
+`cmd/smtprelayd` does, and checks the control that actually runs.
+
+**`internal/config` no longer claims to reload.** Nothing in the tree ever
+has; `MEMORY.md` section 3 carries the dated correction.
+
+**Session before that**: 2026-09-21 (fifty-first session) — Two reviews, both acting
+on what the load measurement had exposed, and both ending in things the
+measurement said rather than things the code looked like.
+
+**The dashboard stopped charging every page for the whole history.** The list
+queries derived "latest attempt" and "attempt count" by grouping the entire
+attempts table on every page load. Seven summary columns now live on the
+message row, maintained by `RecordAttempt` in one transaction with the insert,
+with a backfill for databases written before them. Measured at a million rows:
+first queue page 2.98s -> **392ms**, deep page 11.7s -> 3.99s, sender filter
+5.45s -> 443ms, bounce views 4.08s/4.72s -> **0ms**. The deep page's remaining
+4s is `OFFSET 100000` itself, which is a different problem.
+
+`has_bounced` is a column and not a test on `last_class`, because the two
+answer different questions: a message that failed permanently and was then
+requeued and delivered belongs in the bounce view, and its latest attempt says
+"delivered".
+
+**Queue depth is cached, because it cannot be counted.** Every dashboard page,
+every API health check and every metrics scrape walked the whole spool index
+while holding the mutex that `Commit`, `ClaimBatch`, `Remove` and `Defer` take
+-- 179ms at a million queued, per page view, so how often mail intake paused
+was set by how many people were watching. The review proposed incremental
+counters; that does not work here, and the reason is worth keeping: a message
+moves from deferred to queued when its `NextAttempt` passes, **with no code
+running**, so there is no mutation to hook. It is a cache instead, held for
+twenty times the scan's own duration, so scanning never costs more than a
+twentieth of wall time however deep the queue gets.
+
+**Restart reads the queue directory once.** `recover` used `os.ReadDir` (which
+sorts the whole listing) and then one `os.Stat` per message to ask whether the
+body existed -- something the listing already knew. Measured on 200 000
+messages: metadata reads 5.04s, stats 0.89s, sorted listing 0.19s against
+0.13s batched. Both cheap parts are gone; recovery at a million went **76.5s ->
+60.7s**, which is the 18% the microbenchmark predicted. The remaining 82% is
+one file open and parse per queued message, which is inherent to storing
+metadata as one JSON file each. That ceiling is named in the review and
+deliberately **not** acted on: it changes the on-disk format, and the last
+format proposal had to be withdrawn.
+
+**"Delete a message" was implemented twice.** The dashboard and the JSON API
+each decided the same five branches, and the API's own comment asked for what
+nothing enforced: *"the two entry points must not disagree about what delete
+means."* Both now call `internal/queueaction`, which owns the decisions and the
+audit row; each transport keeps only the mapping from outcome to response.
+
+**The command set was three lists** -- the usage text, an early switch in
+`main`, and the switch in `run`. One table now feeds all three, and the
+rendered help is byte-identical to the hand-written version (checked against
+`git show HEAD`). `run` had 0% coverage; a test now asserts every documented
+command reaches a handler and that an undocumented one is refused.
+
+**Also**: the Windows service start is bounded (`awaitReady`, 20s against the
+SCM's 30) so a large spool backlog no longer turns into a restart loop;
+retention moved out of `RecordAttempt` into the dispatcher's tick and deletes
+in chunks; `synchronous=NORMAL` lifted the journal from 133 to 2 829 writes a
+second on Linux and 119 to 2 346 on Windows -- the same factor on both, which
+retracted a "Windows is 92x slower" claim that had compared two measurements
+across a code change.
+
+**Four of my own tests passed for the wrong reason** and were caught by
+mutation, not by reading them: the depth cache test held `now` from before the
+second enqueue, so the added message counted as deferred and the queued figure
+stayed at 1 with or without a cache; the copy test touched only one of two
+`return cloneDepth` paths; the retention gate test asserted a second sweep
+deleted nothing, which an empty table satisfies with no gate at all; and the
+recovery test used four messages against a 4 096-entry batch, so a loop that
+stopped after the first batch survived. All four now fail when their guard
+does.
+
+**One mutation is left alive, knowingly**: `scanQueue` swallowing a `ReadDir`
+error. Provoking a mid-read directory error means contorting the code for the
+test, and a defensive branch that cannot be reached honestly is better left
+uncovered and written down than covered by a test that proves nothing.
+
+**Previous session**: 2026-09-19 (fiftieth session) — Load measurement up to a
+million messages, on Linux and Windows, then the review that came out of it.
+The largest single win was one line; the largest claimed finding was mine and
+turned out to be a measuring error.
+
+**`synchronous` was left at SQLite's default.** Under FULL every commit
+fsyncs the WAL, and `RecordMessage` and `RecordAttempt` are each their own
+implicit transaction. A/B on the same tree: **133 message+attempt pairs a
+second at FULL, 2 829 at NORMAL** -- 21x, one DSN parameter. NORMAL is right
+for what this file is: in WAL mode it still fsyncs at a checkpoint, so a
+crash, a kill, or a service stop lose nothing, and only a power cut can drop
+recent transactions -- journal rows, not mail. The mail is in the spool, which
+keeps its own fsyncs, and `recover()` reads the spool, never this database.
+
+**This also retracts the Windows/Linux gap reported the day before.** That
+comparison put 10 969/s on Linux against 119/s on Windows and called it a
+platform problem. The Linux figure came from the DSN *before* `cache=shared`
+was removed; measured on the same tree, Linux at FULL does 133/s. It was the
+pragma the whole time, on both platforms. Two measurements taken across a
+code change are not a comparison.
+
+**Retention moved out of the delivery path.** `RecordAttempt` now only
+inserts; `Store.RetentionSweep` runs from the dispatcher's tick beside
+`SweepFailed`, and deletes in chunks of 5 000 through a `WHERE queue_id IN
+(SELECT ... LIMIT ?)` subselect -- `DELETE ... LIMIT` needs
+SQLITE_ENABLE_UPDATE_DELETE_LIMIT, which this driver does not promise. At a
+million rows the delete took 15.6 seconds on both platforms, and SQLite has
+one writer: run from a delivery worker it stopped every other writer,
+including the listener journalling incoming mail. New index on
+`messages(created_at)`, without which each chunk rescans.
+
+**The Windows service could not start after a large outage.** `Start` blocked
+on the ready signal with no bound; the SCM allows 30 seconds
+(ServicesPipeTimeout) and kardianos/service offers no way to send
+SERVICE_START_PENDING. `spool.Open` measured 8.7 seconds for 100 000 queued
+messages on the VM and rises faster than linearly, so a few hundred thousand
+crossed the limit -- and `windowsServiceConfig` sets `OnFailureRestart`, which
+made it a restart loop caused by the outage itself. `Start` now waits
+`readyWait` (20s) through `awaitReady`, then reports running and hands over to
+a watchdog that ends the process if the startup later fails. A fast failure --
+bad configuration, bound port, rejected credential -- still reports a failed
+start, which was the half of blocking worth keeping.
+
+**Retracted: the spool does not slow down as it fills.** The day before this
+was reported as "intake collapses from 502 to 31 messages a second between an
+empty spool and 200 000 queued", with directory sharding proposed as the fix.
+Repeating the measurement gave a **non-monotonic** result -- 50 000 slower
+than 200 000, reproducibly -- which is not what directory size can do. Cause:
+the test's own pre-fill leaves dirty pages, and only the middle size stayed
+under the kernel's dirty-page threshold and was therefore still being written
+back while the load ran. With a `syscall.Sync()` and a settle before
+measuring, all three sizes give the same **~1 100 messages a second, 400 000
+files in the directory included**. The finding is gone, not deferred, and with
+it the only proposal that would have changed the on-disk format.
+
+**Measured after the changes**: sustained throughput 744 msg/s over 40 000
+messages with 0 failures (one million would take 22 minutes, against 2h39m
+before); a full dispatcher pass over a million queued messages 2m53s, against
+at least 22 hours before `ClaimBatch` -- that one was already in the tree,
+with a heap and a saturated-route skip, and is faster than the sorted
+prototype the review had costed.
+
+**Also measured, unchanged by this session**: 5 000 concurrent sessions
+accepted cleanly with nothing lost, duplicated or leaked; beyond that the
+kernel's accept queue refuses first -- **~4 096 on Linux, ~200 on Windows**,
+where it surfaces as "connection refused" rather than the relay's own 421.
+A million *simultaneous* sessions is not reachable on one host: 6.3 KB of heap
+each was measured, 15-20 KB all-in is 15-20 GB, and one source IP has ~64 000
+ephemeral ports.
+
+**The harness stays**, behind `//go:build loadtest`, so `make test` never runs
+it: `go test -tags loadtest -run TestLoad -v ./internal/...`.
+
+**Previous session**: 2026-09-18 (forty-ninth session) — A second architectural
+review on the state the forty-eighth left, and every finding implemented.
+All gates clean for linux and windows: build, vet (including `-tags
+loadtest`), gofmt, `go test -race`, staticcheck, gosec, govulncheck,
+banned-import scan.
+
+**The dispatcher was quadratic in queue depth.** `Run` called `Claim` once
+per due message and `Claim` scans the whole spool index, so a tick over n due
+messages cost n scans -- worst exactly when a smarthost hangs, since every
+message is held and re-found on the next tick. The tree's own load test had
+already measured the one-at-a-time drain at 22 hours for a million messages
+and carried a `claimBatch` prototype. `Spool.ClaimBatch(now, max, skip)` is
+that prototype shipped, with a bounded max-heap instead of sorting the whole
+due set: O(n log max) per scan, and `skip` lets the dispatcher exclude a
+route it has already found saturated so a tick ends after one scan per route
+rather than one per message. `Claim` remains, as `ClaimBatch` for one.
+
+**Quota was checked, not reserved.** Two concurrent `Commit` calls could each
+fit alone and overshoot together, by up to the concurrency times the largest
+message. `reserveQuota`/`releaseQuota` hold the admitted bytes until the copy
+is in the index; a test runs eight concurrent commits against room for four.
+
+**Three copies of the same thirteen-column scan** in `FindMessageByID`,
+`FindMessages` and `FindBounces` -- six places for one column list, where a
+column added to one pair and not the other compiles and scans the wrong value
+into the wrong field. `messageColumns` and `messageScan` are the one copy.
+
+**Three functions over a hundred lines** are gone: `serve` 200 → 110
+(`openLog`, `openSpool`, `startWorkers`, `startHTTP`, `verifyTokens`),
+`attempt` 117 → 14 (`send` decides what happened on the wire, `record` what
+it means, `deferRetry` schedules the retry), and `Registry.text` 136 lines of
+`Fprintf` → a table of `series`. Adding a metric is now one table entry plus
+one row in CHECKMK.md, and a test asserts every family declares HELP and TYPE
+and appears in that document. The rendered exposition is byte-identical.
+
+**`internal/web` split** into `pages.go` (the six read-only views) and
+`actions.go` (requeue and delete), 641 → 188 lines in `web.go`.
+
+**Tests no longer reach into unexported fields.** `testManager` and
+`managerAgainst` hand back the notifier and the registry instead of the tests
+type-asserting `m.fails` back to a `*bounce.Notifier`, and the spool's
+concurrency test drives eight real `Requeue` calls rather than poking
+`s.leased`.
+
+**A session whose replies cannot be written now ends.** `reply` records the
+failure and the command loop checks it; before, a peer that had gone away was
+read from until `read_timeout_sec` expired, holding a connection slot.
+`session.ctx` replaced the `ctx` parameter on `loop` and `doStartTLS`, which
+were a second spelling of the same value.
+
+**The history-store gap is visible on the dashboard.** Every listing is built
+from that store, so a failed journal write leaves a message in the spool and
+on no page; the layout now carries a banner counting them, from the
+`JournalWriteFailures` the forty-eighth session started recording. The queue
+view is still store-backed -- reading it from the spool index is a design
+change, not a fix -- but the discrepancy is no longer silent.
+
+**Also**: the notifier's pending map is bounded per client
+(`maxPendingPerClient`, overflow counted so the digest total stays true),
+`selfmail.Enqueue`'s six positional parameters became `selfmail.Mailer.Send`,
+`Manager.count` is `recordOutcome`, `Spool.Requeue` is split into
+`requeueLive`/`requeueFailed`, the systemd unit carries the
+`SystemCallFilter=~@privileged @resources` EXPLOIT-SURFACE §3 asks for,
+`retentionConfig.days` was dead and is gone, and certgen's doc comment no
+longer claims the expiry metric does not exist.
+
+**One more untagged load test**, `internal/spool/zz_recover_test.go`, filled
+`/tmp` and failed the suite; it now carries `//go:build loadtest` like the
+other four.
+
+**Previous session**: 2026-09-18 (forty-eighth session) — A full architectural,
+security and stability review of the tree, followed by implementing every
+finding. Build, vet, gofmt, `go test -race`, staticcheck, gosec and
+govulncheck are clean for linux and windows.
+
+**Startup no longer dies when Microsoft is unreachable.** `VerifyTokens`
+aborted `serve` on any error, so a token-endpoint outage at reboot left the
+listeners unbound and the devices -- which do not queue -- losing mail: a
+delivery outage turned into an acceptance outage. `authms365.CredentialError`
+now marks a 400/401 carrying an OAuth2 error code (wrong secret, unknown
+client or tenant, ungranted scope) and only that aborts; a timeout, a refused
+connection, a 5xx or a 429 is logged at Warn and the service starts, the
+token being fetched again at the first delivery. The 2026-08-21 decision in
+MEMORY.md is narrowed accordingly.
+
+**The load tests were about to break CI.** Four untracked `zz_*_test.go`
+files create up to a million messages; `go test ./...` ran them, the store
+one hung seven minutes in a transaction and the package hit the ten-minute
+timeout. They carry `//go:build loadtest` now and run only on purpose:
+`go test -tags loadtest -run TestLoad -v ./internal/...`.
+
+**Two mutexes were held across disk I/O.** `Spool.Requeue` held `s.mu` over
+`writeMeta`'s fsync and, for a failed message, a rename and two directory
+syncs, while `overQuota` (every listener commit), `Claim` and `QueueDepth`
+(every dashboard poll) waited; a bulk requeue of a thousand was a thousand
+fsyncs under the global lock. It now leases the message and does the I/O
+unlocked, with a test pinning that a second Requeue and a Discard answer
+`ErrBusy` meanwhile. `Store.RecordAttempt` held `s.mu` across its INSERT and,
+hourly, the retention DELETE, serialising every delivery worker; the mutex
+now guards only the timestamp (`claimCleanup`) and the DELETE runs outside.
+
+**`cache=shared` is gone from the SQLite DSN**, replaced by
+`_pragma=busy_timeout(5000)`. Shared cache is discouraged by SQLite and under
+a `database/sql` pool trades the file lock for table locks that report
+`SQLITE_LOCKED`, which no busy handler retries. A sixteen-writer test pins
+that the pool stays clean without it.
+
+**Accept loop backoff.** A failed `Accept` other than a closed socket --
+descriptor exhaustion -- retried at once and logged per iteration; it now
+backs off 5ms doubling to 1s, the way `net/http` does.
+
+**Composition moved to `serve`.** `delivery.New` built the metrics registry
+and the bounce notifier itself and `main` pulled them back out through
+getters. Both are built in `serve` and injected; `delivery` takes a
+`FailRecorder` interface instead of importing `internal/bounce`, and the
+registry is handed to the listener too. `metrics.RegisterTokenAger` is how
+the manager attaches its token sources afterwards.
+
+**One switch instead of three.** `spool.Envelope.Kind()` derives client /
+notification / canary from the two persisted flags (on-disk format unchanged)
+and `delivery.count` is the single place an outcome is routed to a counter.
+
+**Two counters for what was invisible**: `smtprelayd_session_panics_total`
+(EXPLOIT-SURFACE §6 asked for it) and
+`smtprelayd_journal_write_failures_total`; the listener and the delivery
+manager log a Warn instead of discarding the store error. Documented in
+CHECKMK.md.
+
+**Smaller**: web and metrics sockets are bound synchronously before the
+service reports ready (`web.Listen`/`metrics.Listen`), so a port in use fails
+startup instead of being a log line; the session re-checks the context after
+arming a read deadline, closing the window where the shutdown hook's expired
+deadline was overwritten and a stop waited out `data_timeout_sec`;
+`Spool.Open(id)` is `OpenBody`; the last `"none"` literals use
+`config.TLSNone`/`AuthNone`; `config.Normalize` is exported; `hold`'s
+duplicated doc comment is one; the dashboard's audit rows use
+`httpx.SourceAddr` like the API's; dead `CountQueue`/`DeleteMessage` are
+removed; spool.go is split into `failed.go` and `quota.go`, session.go's
+journaling into `journal.go`; the spool package doc carries the lifecycle
+diagram; two pre-existing gosec findings (G115, G306) are annotated.
+
+**Documented rather than changed**: the API's `read`/`admin` scopes bound a
+token, not a person -- the dashboard on the same listener needs no token --
+and SECURITY.md §7 and API.md now say so and what a proxy has to do about it.
+A dashboard-off switch would be a schema change and was not made.
+
+**Not done, deliberately**: listing the queue view from the spool index
+instead of the store (a design change), hot certificate reload, and trimming
+dated changelog prose out of comments.
+
+**Previous session**: 2026-09-18 (forty-seventh session) — The review looked at
 the notification chain, and the main finding is that it degrades in proportion
 to the outage it reports.
 
@@ -4462,8 +4832,8 @@ tracked in the phase 5 checklist rather than here.
 | 2026-08-10 | `metrics.Registry.Status()` is the single source both `/metrics` and the dashboard's route status page read from | The two must never disagree about whether a route has delivered, is deferred, or has a cached token; a second, independently-computed snapshot is how that drifts |
 | 2026-08-10 | `web.Serve` serves HTTPS with `cfg.TLS`'s certificate when `[web].address` is non-loopback, mirroring the existing listener's own certificate loading | `internal/config` already refuses to start a non-loopback `[web]` address without a certificate configured; a validation that guards a setting the server then ignores is worse than not validating it at all |
 | 2026-08-10 | `MessageFilter.Sort`'s `status` column sorts on a `CASE` expression over the derived attempt class, not a stored column | Status is derived, not stored, so "sortable by status" only has a real column to point at if one is synthesised; the mapping (queued, then deferred, then delivered, then bounced) is fixed by the allowlist, never influenced by request input |
-| 2026-08-10 | The "latest attempt" join in `FindMessages`, `CountQueue` and `FindBounceSummaries` tiebreaks on the attempts table's autoincrement `id`, not `MAX(at_time)` | `at_time` has only second precision; two attempts landing in the same wall-clock second both matched `MAX(at_time)` and fanned the join out into duplicate rows for one message. `id` is unique by construction, so it cannot tie |
-| 2026-08-10 | The dashboard's requeue and delete actions are separate handlers in `internal/web`, protected by a per-process HMAC CSRF token, not a second consumer of the bearer-token-protected `/api/v1/*` endpoints | The running process holds only a token's SHA-256 digest, never its plaintext, so the dashboard cannot construct an `Authorization: Bearer` header for itself even in principle. Both entry points still call the same `spool.Requeue`/`spool.Discard`/`store.RecordAudit` |
+| 2026-08-10, revised 2026-09-21 | "Latest attempt" is resolved by the attempts table's autoincrement `id`, never by `MAX(at_time)`. The join this was written for is gone -- the list queries read `last_class`/`last_smtp_code`/`last_smtp_response` from the message row since 2026-09-19 -- but the rule still binds the two places that still have to pick a latest attempt: `Store.backfillSummaries` (`ORDER BY a.id DESC LIMIT 1`) and anything that reconstructs a summary from history | `at_time` has only second precision; two attempts landing in the same wall-clock second both matched `MAX(at_time)`, which fanned the old join out into duplicate rows and would now write the wrong class onto the message row. `id` is unique by construction, so it cannot tie |
+| 2026-08-10, revised 2026-09-21 | The dashboard's requeue and delete actions are separate handlers in `internal/web`, protected by a per-process HMAC CSRF token, not a second consumer of the bearer-token-protected `/api/v1/*` endpoints. Since 2026-09-21 both handlers call `internal/queueaction`, which owns what requeue and delete mean and writes the audit row; each transport keeps only the mapping from outcome to response | The running process holds only a token's SHA-256 digest, never its plaintext, so the dashboard cannot construct an `Authorization: Bearer` header for itself even in principle. Calling the same primitives was not enough: both sides also decided the five outcomes themselves, and the API's own comment asked for an agreement nothing enforced |
 | 2026-08-10 | `spool.Requeue` and `spool.Discard` return `ErrBusy` for a leased message rather than acting on it | The delivery worker holding the lease will call `Release`, `Remove` or `Fail` on it when the attempt finishes; racing that could resurrect a message `Discard` just deleted, or overwrite a `Requeue`'s reset attempt counter |
 | 2026-08-10 | `smtprelayd_api_auth_failures_total` has no source-address label | Route names are a small, fixed, config-time set; a source address chosen by whoever is failing to authenticate is not, and labelling it would let an attacker grow the exposition without bound. The source address is still logged, per docs/guides/API.md, on the line itself rather than as a metric label |
 | 2026-08-10 | The API's per-source rate limiter tracks failures in memory with opportunistic eviction, not a fixed-size cache or an external store | The load profile (an internal API surface, loopback by default) does not justify a dependency; eviction on write bounds memory against the one attack this exists to slow down (many failed attempts from a small number of sources) without bounding it against an unrelated one (many distinct sources), which is a cost accepted rather than solved here |

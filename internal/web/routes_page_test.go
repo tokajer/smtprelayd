@@ -31,7 +31,7 @@ func TestRoutesPageShowsEveryRouteCounter(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	reg := metrics.New(cfg, sp, []string{"m365"}, nil, nil)
+	reg := metrics.New(metrics.ConfigExpiry(cfg), sp, []string{"m365"}, nil, nil)
 	reg.Delivered("m365")
 	reg.RecipientsRefused("m365", 7)
 

@@ -51,17 +51,36 @@ type Message struct {
 	Route    string
 	Listener string
 
-	// Notification keeps the delivery manager from treating this message's
-	// own failure as another bounce to report. Canary sets it false on
-	// purpose: a failing canary is exactly what should reach the digest.
-	Notification bool
-	Canary       bool
+	// Kind says who composed the message, and is what the delivery manager
+	// switches on. KindNotification keeps it from treating this message's
+	// own failure as another bounce to report; a canary is deliberately not
+	// that, because a failing canary is exactly what should reach the digest.
+	Kind spool.Kind
 }
 
-// Enqueue renders msg, spools it and records it in the journal. The journal
+// Mailer spools relay-composed mail. The spool, the store and the logger are
+// the same three for every message this process writes, so they are held
+// once here rather than passed at each of the three call sites alongside the
+// message itself.
+type Mailer struct {
+	spool *spool.Spool
+	store *store.Store
+	log   *slog.Logger
+}
+
+// New builds a Mailer.
+func New(sp *spool.Spool, st *store.Store, log *slog.Logger) *Mailer {
+	return &Mailer{spool: sp, store: st, log: log}
+}
+
+// Send renders msg, spools it and records it in the journal. The journal
 // write is best-effort: a message that is queued but unrecorded still gets
 // delivered, whereas failing here would lose it.
-func Enqueue(sp *spool.Spool, st *store.Store, log *slog.Logger, msg Message, lifetime time.Duration, now time.Time) (spool.ID, error) {
+func (m *Mailer) Send(msg Message, lifetime time.Duration, now time.Time) (spool.ID, error) {
+	return enqueue(m.spool, m.store, m.log, msg, lifetime, now)
+}
+
+func enqueue(sp *spool.Spool, st *store.Store, log *slog.Logger, msg Message, lifetime time.Duration, now time.Time) (spool.ID, error) {
 	var b strings.Builder
 	fmt.Fprintf(&b, "From: %s\r\n", msg.HeaderFrom)
 	fmt.Fprintf(&b, "To: %s\r\n", strings.Join(msg.To, ", "))
@@ -72,15 +91,14 @@ func Enqueue(sp *spool.Spool, st *store.Store, log *slog.Logger, msg Message, li
 	data := b.String()
 
 	env := spool.Envelope{
-		From:         msg.EnvelopeFrom,
-		To:           msg.To,
-		Client:       msg.Client,
-		Route:        msg.Route,
-		Listener:     msg.Listener,
-		RemoteAddr:   "internal",
-		Received:     now,
-		Notification: msg.Notification,
-		Canary:       msg.Canary,
+		From:       msg.EnvelopeFrom,
+		To:         msg.To,
+		Client:     msg.Client,
+		Route:      msg.Route,
+		Listener:   msg.Listener,
+		RemoteAddr: "internal",
+		Received:   now,
+		Kind:       msg.Kind,
 	}
 	// maxBytes 0 is "no limit": these are a few kilobytes the relay wrote
 	// itself, not client input to bound.

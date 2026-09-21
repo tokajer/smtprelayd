@@ -21,6 +21,7 @@ import (
 
 	"github.com/tokajer/smtprelayd/internal/certgen"
 	"github.com/tokajer/smtprelayd/internal/config"
+	"github.com/tokajer/smtprelayd/internal/metrics"
 	"github.com/tokajer/smtprelayd/internal/spool"
 	"github.com/tokajer/smtprelayd/internal/store"
 )
@@ -869,9 +870,13 @@ func TestServeIsPlainHTTPEvenWithATLSCertificateConfigured(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	ln, err := Listen(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
 	done := make(chan error, 1)
 	go func() {
-		done <- Serve(ctx, cfg, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		done <- Serve(ctx, ln, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			_, _ = io.WriteString(w, "dashboard")
 		}), discardLog())
 	}()
@@ -1013,5 +1018,44 @@ func TestBulkFlashReportsAnIncompleteRun(t *testing.T) {
 	}
 	if !strings.Contains(f.Text, "7 deleted") {
 		t.Errorf("banner does not report what was done: %q", f.Text)
+	}
+}
+
+// Every listing on the dashboard is built from the history store, so a
+// journal write that failed leaves a message in the spool and on no page
+// here. The banner is the only place somebody looking at the queue, rather
+// than at the log or at /metrics, learns that.
+func TestJournalFailuresAreStatedOnThePage(t *testing.T) {
+	cfg := testConfig(t, "")
+	st, err := store.Open(t.TempDir(), discardLog(), 90, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	sp, err := spool.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	reg := metrics.New(metrics.ConfigExpiry(cfg), sp, []string{"m365"}, nil, nil)
+	srv, err := New(cfg, st, sp, reg, "test", discardLog())
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := srv.Handler()
+
+	if body := get(t, h, "/queue").Body.String(); strings.Contains(body, "history write(s) have failed") {
+		t.Fatal("the banner is shown although no journal write has failed")
+	}
+
+	reg.JournalWriteFailure()
+	reg.JournalWriteFailure()
+	body := get(t, h, "/queue").Body.String()
+	if !strings.Contains(body, "2 history write(s) have failed") {
+		t.Fatalf("the queue page does not report the failed journal writes:\n%s", body)
+	}
+	// Every page is built from the same base data, so the warning has to
+	// follow the operator rather than sit on the one page they left.
+	if !strings.Contains(get(t, h, "/search").Body.String(), "history write(s) have failed") {
+		t.Error("the search page does not carry the warning")
 	}
 }

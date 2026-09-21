@@ -25,7 +25,7 @@ func testSet(t *testing.T, address string) *Set {
 		Listeners: []config.Listener{{Name: "test", Address: address, TLS: "none"}},
 		Limits:    config.Limits{MaxConnections: 10},
 	}
-	set, err := New(cfg, nil, discardLog(), nil)
+	set, err := New(cfg, nil, discardLog(), nil, nil)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -146,7 +146,7 @@ func TestShutdownDoesNotWaitForAnIdleSession(t *testing.T) {
 		Limits:  config.Limits{MaxConnections: 10, ReadTimeoutSec: 120, DataTimeoutSec: 300},
 		Service: config.Service{Hostname: "probe"},
 	}
-	set, err := New(cfg, nil, discardLog(), nil)
+	set, err := New(cfg, nil, discardLog(), nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

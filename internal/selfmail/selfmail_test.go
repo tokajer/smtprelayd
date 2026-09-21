@@ -35,7 +35,7 @@ func spooled(t *testing.T, sp *spool.Spool) (*spool.Meta, string) {
 	if !ok {
 		t.Fatal("nothing was spooled")
 	}
-	f, err := sp.Open(meta.ID)
+	f, err := sp.OpenBody(meta.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -53,7 +53,7 @@ func spooled(t *testing.T, sp *spool.Spool) (*spool.Meta, string) {
 // cannot produce another notification.
 func TestHeaderFromAndEnvelopeFromAreIndependent(t *testing.T) {
 	sp, st, log := testDeps(t)
-	_, err := Enqueue(sp, st, log, Message{
+	_, err := New(sp, st, log).Send(Message{
 		HeaderFrom:   "postmaster@example.at",
 		EnvelopeFrom: "",
 		To:           []string{"ops@example.at"},
@@ -62,7 +62,7 @@ func TestHeaderFromAndEnvelopeFromAreIndependent(t *testing.T) {
 		Client:       "expiry-watch",
 		Route:        "m365",
 		Listener:     "bounce-notifier",
-		Notification: true,
+		Kind:         spool.KindNotification,
 	}, time.Hour, time.Now())
 	if err != nil {
 		t.Fatal(err)
@@ -88,7 +88,7 @@ func TestHeaderFromAndEnvelopeFromAreIndependent(t *testing.T) {
 // bounce digest.
 func TestCanaryKeepsARealSenderAndIsNotANotification(t *testing.T) {
 	sp, st, log := testDeps(t)
-	_, err := Enqueue(sp, st, log, Message{
+	_, err := New(sp, st, log).Send(Message{
 		HeaderFrom:   "canary@example.at",
 		EnvelopeFrom: "canary@example.at",
 		To:           []string{"probe@example.at"},
@@ -97,7 +97,7 @@ func TestCanaryKeepsARealSenderAndIsNotANotification(t *testing.T) {
 		Client:       "m365-daily",
 		Route:        "m365",
 		Listener:     "canary",
-		Canary:       true,
+		Kind:         spool.KindCanary,
 	}, time.Hour, time.Now())
 	if err != nil {
 		t.Fatal(err)
@@ -123,7 +123,7 @@ func TestCanaryKeepsARealSenderAndIsNotANotification(t *testing.T) {
 func TestHeaderBlockIsTerminatedAndComplete(t *testing.T) {
 	sp, st, log := testDeps(t)
 	now := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
-	if _, err := Enqueue(sp, st, log, Message{
+	if _, err := New(sp, st, log).Send(Message{
 		HeaderFrom: "a@example.at", EnvelopeFrom: "a@example.at",
 		To: []string{"b@example.at", "c@example.at"}, Subject: "s", Body: "the body\r\n",
 		Client: "x", Route: "r", Listener: "l",
@@ -156,10 +156,10 @@ func TestHeaderBlockIsTerminatedAndComplete(t *testing.T) {
 // dashboard reads it rather than the message.
 func TestJournalRecordsWhatWasSpooled(t *testing.T) {
 	sp, st, log := testDeps(t)
-	id, err := Enqueue(sp, st, log, Message{
+	id, err := New(sp, st, log).Send(Message{
 		HeaderFrom: "a@example.at", EnvelopeFrom: "a@example.at",
 		To: []string{"b@example.at"}, Subject: "recorded", Body: "x\r\n",
-		Client: "canary-1", Route: "m365", Listener: "canary", Canary: true,
+		Client: "canary-1", Route: "m365", Listener: "canary", Kind: spool.KindCanary,
 	}, time.Hour, time.Now())
 	if err != nil {
 		t.Fatal(err)

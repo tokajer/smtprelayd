@@ -26,10 +26,26 @@ type Store struct {
 	retain       retentionConfig
 	mu           sync.Mutex
 	lastCleanup  time.Time
+
+	// now is where every timestamp this package writes comes from.
+	// RetentionSweep and ReconcileRemoved already take or derive their
+	// instant from the caller, while the three record methods reached for
+	// the wall clock themselves -- which is why two attempts cannot be
+	// placed in a known order by a test, and why backfillSummaries has to
+	// order on the row id rather than on at_time. Defaults to time.Now; only
+	// a test replaces it.
+	now func() time.Time
 }
 
+// setClock replaces the source of the timestamps this package writes. It
+// exists for tests that need two rows at known, distinct instants; nothing in
+// the service calls it.
+func (s *Store) setClock(f func() time.Time) { s.now = f }
+
+// retentionConfig is the history policy as configured. The retention period
+// itself lives in Store.retentionTTL, already converted to a duration; this
+// carries what is read back on the way out.
 type retentionConfig struct {
-	days           int
 	retainSubjects bool
 }
 
@@ -66,8 +82,35 @@ func Open(dataDir string, log *slog.Logger, retentionDays int, retainSubjects bo
 	// acceptable here and nowhere else in the tree: the spool is what holds
 	// mail the relay took responsibility for, and this database is a metadata
 	// journal about it.
-	connStr := "file:" + dbPath + "?cache=shared&mode=rwc" +
-		"&_pragma=foreign_keys(1)&_pragma=journal_mode(WAL)"
+	//
+	// No `cache=shared`, since 2026-09-18. SQLite discourages shared-cache
+	// mode, and under a database/sql pool it replaces the file lock with
+	// table locks that surface as SQLITE_LOCKED -- which no busy handler
+	// retries -- exactly where WAL's reader/writer independence was the
+	// point. A busy_timeout is set instead: with the file lock back in
+	// charge, a writer that meets another waits up to five seconds rather
+	// than failing at once, and the sixteen-writer test in store_test.go is
+	// what checks that this holds.
+	//
+	// synchronous=NORMAL (1), since 2026-09-19, rather than SQLite's default
+	// of FULL. Under FULL every commit fsyncs the WAL, and RecordMessage and
+	// RecordAttempt are each their own implicit transaction -- so an accepted
+	// message costs two fsyncs here, on top of the three the spool already
+	// pays for the message itself. Measured: this journal wrote 10 969
+	// message+attempt pairs a second on Linux and 119 on a Windows VM, where
+	// the relay's whole sustained throughput was 93 a second. The journal was
+	// the ceiling, not the spool.
+	//
+	// NORMAL is safe for what this file is. In WAL mode it still fsyncs at a
+	// checkpoint, so a process crash, a kill -9, or the service being stopped
+	// loses nothing; only a power cut or a kernel panic can drop the most
+	// recent transactions. What would be lost then is journal rows -- the
+	// record *about* mail. The mail is in the spool, which keeps every one of
+	// its own fsyncs, and a spooled message whose journal row is missing is
+	// still delivered: recover() reads the spool, never this database.
+	connStr := "file:" + dbPath + "?mode=rwc" +
+		"&_pragma=foreign_keys(1)&_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)" +
+		"&_pragma=synchronous(1)"
 	db, err := sql.Open("sqlite", connStr)
 	if err != nil {
 		return nil, fmt.Errorf("store: open database: %w", err)
@@ -85,11 +128,9 @@ func Open(dataDir string, log *slog.Logger, retentionDays int, retainSubjects bo
 		db:           db,
 		log:          log,
 		retentionTTL: time.Duration(retentionDays) * 24 * time.Hour,
-		retain: retentionConfig{
-			days:           retentionDays,
-			retainSubjects: retainSubjects,
-		},
-		lastCleanup: time.Now(),
+		retain:       retentionConfig{retainSubjects: retainSubjects},
+		lastCleanup:  time.Now(),
+		now:          time.Now,
 	}
 
 	// The driver creates the database 0644. It holds every sender, recipient
@@ -126,122 +167,6 @@ func (s *Store) Close() error {
 		return nil
 	}
 	return s.db.Close()
-}
-
-// createSchema creates tables if they do not exist.
-func (s *Store) createSchema() error {
-	tables := []string{
-		`CREATE TABLE IF NOT EXISTS messages (
-			queue_id TEXT PRIMARY KEY,
-			client TEXT NOT NULL,
-			route TEXT NOT NULL,
-			envelope_from TEXT NOT NULL,
-			original_from TEXT,
-			recipients TEXT NOT NULL,
-			subject TEXT,
-			listener TEXT NOT NULL,
-			remote_addr TEXT NOT NULL,
-			received_at TEXT NOT NULL,
-			expires_at TEXT NOT NULL,
-			tls_used INTEGER NOT NULL,
-			created_at TEXT NOT NULL,
-			message_id TEXT,
-			content_type TEXT,
-			size_bytes INTEGER,
-			header_count INTEGER,
-			helo TEXT
-		)`,
-		`CREATE TABLE IF NOT EXISTS attempts (
-			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			queue_id TEXT NOT NULL,
-			attempt_num INTEGER NOT NULL,
-			at_time TEXT NOT NULL,
-			smtp_code INTEGER,
-			smtp_response TEXT,
-			class TEXT NOT NULL,
-			next_attempt_at TEXT,
-			created_at TEXT NOT NULL,
-			FOREIGN KEY (queue_id) REFERENCES messages(queue_id) ON DELETE CASCADE
-		)`,
-		`CREATE TABLE IF NOT EXISTS audit (
-			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			at_time TEXT NOT NULL,
-			token_name TEXT NOT NULL,
-			source_addr TEXT NOT NULL,
-			action TEXT NOT NULL,
-			queue_id TEXT,
-			details TEXT,
-			created_at TEXT NOT NULL
-		)`,
-		`CREATE INDEX IF NOT EXISTS idx_messages_route_received ON messages(route, received_at)`,
-		`CREATE INDEX IF NOT EXISTS idx_messages_client_received ON messages(client, received_at)`,
-		`CREATE INDEX IF NOT EXISTS idx_messages_expires ON messages(expires_at)`,
-		`CREATE INDEX IF NOT EXISTS idx_attempts_queue_time ON attempts(queue_id, at_time)`,
-		`CREATE INDEX IF NOT EXISTS idx_attempts_time ON attempts(at_time)`,
-		`CREATE INDEX IF NOT EXISTS idx_audit_time ON audit(at_time)`,
-		`CREATE INDEX IF NOT EXISTS idx_audit_queue ON audit(queue_id)`,
-	}
-
-	for _, sql := range tables {
-		if _, err := s.db.Exec(sql); err != nil {
-			return fmt.Errorf("store: create schema: %w", err)
-		}
-	}
-
-	return s.migrate()
-}
-
-// journalColumns are the per-message metadata columns added after the first
-// released schema. `CREATE TABLE IF NOT EXISTS` never touches a table that
-// already exists, so a database written by an earlier version keeps the old
-// column set until it is migrated here.
-var journalColumns = []struct{ name, decl string }{
-	{"message_id", "message_id TEXT"},
-	{"content_type", "content_type TEXT"},
-	{"size_bytes", "size_bytes INTEGER"},
-	{"header_count", "header_count INTEGER"},
-	{"helo", "helo TEXT"},
-}
-
-// migrate adds columns missing from an existing database. Every added column
-// is nullable with no default, so rows written before the migration read back
-// as NULL — an unknown value, which is what they are — rather than as a
-// fabricated zero.
-func (s *Store) migrate() error {
-	rows, err := s.db.Query(`PRAGMA table_info(messages)`)
-	if err != nil {
-		return fmt.Errorf("store: inspect messages table: %w", err)
-	}
-	present := map[string]bool{}
-	for rows.Next() {
-		var cid int
-		var name, colType string
-		var notNull, pk int
-		var dflt sql.NullString
-		if err := rows.Scan(&cid, &name, &colType, &notNull, &dflt, &pk); err != nil {
-			rows.Close()
-			return fmt.Errorf("store: scan table info: %w", err)
-		}
-		present[name] = true
-	}
-	if err := rows.Err(); err != nil {
-		rows.Close()
-		return fmt.Errorf("store: table info query error: %w", err)
-	}
-	rows.Close()
-
-	for _, c := range journalColumns {
-		if present[c.name] {
-			continue
-		}
-		// The column name is a package constant, never request input.
-		if _, err := s.db.Exec(`ALTER TABLE messages ADD COLUMN ` + c.decl); err != nil {
-			return fmt.Errorf("store: add column %s: %w", c.name, err)
-		}
-		s.log.Info("store: schema migrated", "added_column", c.name)
-	}
-
-	return nil
 }
 
 // MessageRecord is one accepted message as it enters the history journal.
@@ -285,7 +210,7 @@ func (s *Store) RecordMessage(rec MessageRecord) error {
 		tlsInt = 1
 	}
 
-	now := time.Now().UTC()
+	now := s.now().UTC()
 	_, err := s.db.Exec(`
 		INSERT INTO messages (queue_id, client, route, envelope_from, original_from, recipients, subject, listener, remote_addr, received_at, expires_at, tls_used, created_at, message_id, content_type, size_bytes, header_count, helo)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -310,34 +235,93 @@ func (s *Store) RecordMessage(rec MessageRecord) error {
 // class is one of "delivered", "temporary", "permanent", "expired", or
 // "removed" (written by RecordRemoval, never by the delivery worker).
 func (s *Store) RecordAttempt(queueID string, attemptNum int, smtpCode int, smtpResponse, class string, nextAttemptAt *time.Time) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	now := time.Now().UTC()
+	now := s.now().UTC()
 	var nextStr *string
 	if nextAttemptAt != nil {
 		t := nextAttemptAt.UTC().Format(time.RFC3339)
 		nextStr = &t
 	}
 
-	_, err := s.db.Exec(`
-		INSERT INTO attempts (queue_id, attempt_num, at_time, smtp_code, smtp_response, class, next_attempt_at, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-	`,
-		queueID, attemptNum, now.Format(time.RFC3339), sql.NullInt64{Int64: int64(smtpCode), Valid: smtpCode > 0}, smtpResponse,
-		class, nextStr, now.Format(time.RFC3339),
-	)
+	at := now.Format(time.RFC3339)
+	code := sql.NullInt64{Int64: int64(smtpCode), Valid: smtpCode > 0}
+
+	// The insert and the summary update are one transaction. They describe
+	// the same event, and a crash between them would leave the message row
+	// claiming an attempt count the attempts table does not support -- which
+	// every list query would then report, since they read the summary and no
+	// longer count.
+	tx, err := s.db.Begin()
 	if err != nil {
 		return fmt.Errorf("store: record attempt: %w", err)
 	}
+	defer func() { _ = tx.Rollback() }()
 
-	// Retention cleanup — run periodically, not on every attempt.
-	if now.Sub(s.lastCleanup) > 1*time.Hour {
-		s.lastCleanup = now
-		s.retentionCleanup(now)
+	if _, err := tx.Exec(`
+		INSERT INTO attempts (queue_id, attempt_num, at_time, smtp_code, smtp_response, class, next_attempt_at, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+	`, queueID, attemptNum, at, code, smtpResponse, class, nextStr, at); err != nil {
+		return fmt.Errorf("store: record attempt: %w", err)
 	}
 
+	// has_bounced only ever goes up: a message that failed permanently and
+	// was then requeued and delivered still belongs in the bounce view, so
+	// the flag records that it happened, not what is true now.
+	bounced := 0
+	if class == "permanent" || class == "expired" {
+		bounced = 1
+	}
+	if _, err := tx.Exec(`
+		UPDATE messages SET
+			attempt_count = attempt_count + 1,
+			first_attempt_at = COALESCE(first_attempt_at, ?),
+			last_attempt_at = ?,
+			last_class = ?,
+			last_smtp_code = ?,
+			last_smtp_response = ?,
+			has_bounced = MAX(has_bounced, ?)
+		WHERE queue_id = ?
+	`, at, at, class, code, smtpResponse, bounced, queueID); err != nil {
+		return fmt.Errorf("store: record attempt summary: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("store: record attempt: %w", err)
+	}
 	return nil
+}
+
+// RetentionSweep deletes journal rows past the retention window, at most once
+// an hour however often it is called. It returns how many messages went.
+//
+// It is called from the delivery manager's own tick, next to SweepFailed,
+// rather than from RecordAttempt. Measured on a million rows the delete took
+// 15.6 seconds, and SQLite has one writer: run from a delivery worker it
+// stopped that worker and every other writer with it -- the listener
+// journalling incoming mail included -- for as long as it ran. The dispatcher
+// is already ticking and owns no message while it does, so the pause costs
+// nobody a transaction.
+func (s *Store) RetentionSweep(now time.Time) int64 {
+	if !s.claimCleanup(now) {
+		return 0
+	}
+	return s.retentionCleanup(now)
+}
+
+// claimCleanup reports whether the hourly retention slot is due and takes
+// it. The mutex covers this timestamp and nothing else: until 2026-09-18 it
+// was held across the INSERT above and, once an hour, across the retention
+// DELETE too, so every delivery worker's journal write queued behind one
+// mutex and all of them stalled for as long as the DELETE took. sql.DB is
+// safe for concurrent use; the only thing that ever needed serialising was
+// deciding who runs the cleanup.
+func (s *Store) claimCleanup(now time.Time) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if now.Sub(s.lastCleanup) <= time.Hour {
+		return false
+	}
+	s.lastCleanup = now
+	return true
 }
 
 // RecordRemoval records that an operator discarded a message from the spool
@@ -390,7 +374,7 @@ func (s *Store) ReconcileRemoved(queueID string) (bool, error) {
 
 // RecordAudit inserts an audit log entry.
 func (s *Store) RecordAudit(tokenName, sourceAddr, action, queueID, details string) error {
-	now := time.Now().UTC()
+	now := s.now().UTC()
 	_, err := s.db.Exec(`
 		INSERT INTO audit (at_time, token_name, source_addr, action, queue_id, details, created_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -442,6 +426,11 @@ type AuditEntry struct {
 	Details    string
 }
 
+// retentionChunk bounds one DELETE. The whole sweep still removes everything
+// past the window, but in transactions short enough that a writer meeting one
+// waits inside busy_timeout instead of queueing behind a multi-second lock.
+const retentionChunk = 5000
+
 // retentionCleanup deletes messages older than the retention TTL, and with
 // them their attempts, which cascade on the foreign key.
 //
@@ -455,16 +444,31 @@ type AuditEntry struct {
 //
 // The journal is best-effort: a failed cleanup must not take down delivery,
 // so it logs and returns rather than propagating the error.
-func (s *Store) retentionCleanup(now time.Time) {
+func (s *Store) retentionCleanup(now time.Time) int64 {
 	cutoff := now.Add(-s.retentionTTL).UTC().Format(time.RFC3339)
-	result, err := s.db.Exec(`DELETE FROM messages WHERE created_at < ?`, cutoff)
-	if err != nil {
-		s.log.Warn("store: retention cleanup failed", "error", err)
-		return
+	var total int64
+	for {
+		// A subselect rather than "DELETE ... LIMIT": the LIMIT form needs
+		// SQLITE_ENABLE_UPDATE_DELETE_LIMIT, which is not a guarantee this
+		// driver makes. Attempts follow through the ON DELETE CASCADE.
+		result, err := s.db.Exec(`DELETE FROM messages WHERE queue_id IN (
+			SELECT queue_id FROM messages WHERE created_at < ? LIMIT ?
+		)`, cutoff, retentionChunk)
+		if err != nil {
+			s.log.Warn("store: retention cleanup failed", "error", err, "deleted_so_far", total)
+			return total
+		}
+		affected, err := result.RowsAffected()
+		if err != nil || affected == 0 {
+			break
+		}
+		total += affected
+		if affected < retentionChunk {
+			break
+		}
 	}
-
-	affected, err := result.RowsAffected()
-	if err == nil && affected > 0 {
-		s.log.Info("store: retention cleanup", "deleted_rows", affected, "cutoff", cutoff)
+	if total > 0 {
+		s.log.Info("store: retention cleanup", "deleted_rows", total, "cutoff", cutoff)
 	}
+	return total
 }

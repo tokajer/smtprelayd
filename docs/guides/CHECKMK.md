@@ -23,6 +23,8 @@ text exposition format:
 | `smtprelayd_delivery_rate_per_minute` | gauge | `route` | `delivered_total` / process uptime, not a rolling window (see `internal/metrics/metrics.go`) |
 | `smtprelayd_api_auth_failures_total` | counter | — | Rejected bearer tokens on `/api/v1/*` and `/metrics` itself |
 | `smtprelayd_notification_failures_total` | counter | — | Bounce-digest notification messages that themselves failed to send |
+| `smtprelayd_session_panics_total` | counter | — | Inbound SMTP sessions that ended in a recovered panic. Any increase is a parser bug worth a ticket: the session was dropped, the process was not |
+| `smtprelayd_journal_write_failures_total` | counter | — | History-store writes the listener or the delivery manager could not complete. The message was still queued or delivered; what is missing is its row in the dashboard and the API. Any increase means the database is unwritable — disk full, file locked, permissions — and the log names the error |
 | `smtprelayd_canary_last_delivery_time` | gauge | `name` | Unix timestamp of that canary's last successful delivery; absent until its first one, or if no `[[canary]]` with that name is configured. Alert on this going stale, not on the counter below — a route can stop delivering silently while its canary keeps being queued |
 | `smtprelayd_canary_failures_total` | counter | `name` | That canary's delivery attempts that failed, permanently, by expiry, or deferred for retry |
 | `smtprelayd_expiry_seconds` | gauge | `item` | Seconds until the listener TLS certificate (`item="tls-certificate"`) or a Microsoft 365 client secret (`item="oauth2-secret:<route>"`) expires. **Negative once it has.** A secret only appears when `oauth2.secret_expires` is set for that route |

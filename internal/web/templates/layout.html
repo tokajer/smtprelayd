@@ -25,6 +25,14 @@
 <div class="layout">
 	<aside>{{template "sidebar" .}}</aside>
 	<main class="card">
+		{{if .JournalFailures}}
+		{{/* The listings on this dashboard come from the history store. A
+		     write that failed means a message is in the spool and on no page
+		     here, so the discrepancy is stated rather than left to look like
+		     an empty queue. */}}
+		<div class="notice notice-warn">{{.JournalFailures}} history write(s) have failed since this service started.
+		Some spooled messages may be missing from the pages below; the log names the error.</div>
+		{{end}}
 		{{if or (eq .Page "queue") (eq .Page "search") (eq .Page "bounces") (eq .Page "routes")}}
 		{{/* This region never contains a form field, on any of the four
 		     pages that render it, so a periodic refresh here never risks

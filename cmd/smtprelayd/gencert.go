@@ -99,6 +99,7 @@ func genCert(configPath string, force bool, days int, out io.Writer) error {
 	if err := fsmode.RestrictFile(keyFile); err != nil {
 		return fmt.Errorf("gen-cert: restricting the key: %w", err)
 	}
+	//#nosec G306 -- the certificate is public material every client is handed on connect; only the key above is restricted
 	if err := os.WriteFile(certFile, certPEM, 0o644); err != nil {
 		return fmt.Errorf("gen-cert: writing the certificate: %w", err)
 	}

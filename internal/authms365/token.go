@@ -221,6 +221,24 @@ func (s *TokenSource) fetch(ctx context.Context) (string, time.Time, error) {
 	return payload.AccessToken, time.Now().Add(time.Duration(payload.ExpiresIn) * time.Second), nil
 }
 
+// CredentialError marks a rejection the token endpoint itself issued: the
+// request reached Entra ID, which answered 400 or 401 with an OAuth2 error
+// code. A wrong secret, an unknown client, a tenant that does not exist and
+// a scope the application was never granted all arrive this way, and none
+// of them changes on retry.
+//
+// Everything else -- a timeout, a refused connection, a 5xx, a 429 -- is
+// deliberately not this type. Those are the endpoint being unreachable, not
+// the credential being wrong, and the caller must treat them differently:
+// serve() aborts startup on a CredentialError and only logs any other
+// failure, because refusing to bind the listeners while Microsoft is down
+// turns a delivery outage into an acceptance outage, and the devices this
+// relay exists for do not queue.
+type CredentialError struct{ Err error }
+
+func (e *CredentialError) Error() string { return e.Err.Error() }
+func (e *CredentialError) Unwrap() error { return e.Err }
+
 // responseError turns the Entra ID error document into one log line. The raw
 // body is not logged: it is long, it repeats the request, and it is the kind
 // of blob that ends up pasted into a ticket.
@@ -232,8 +250,16 @@ func responseError(status int, body []byte) error {
 	if err := json.Unmarshal(body, &e); err != nil || e.Code == "" {
 		return fmt.Errorf("authms365: token endpoint returned HTTP %d", status)
 	}
-	return fmt.Errorf("authms365: token endpoint returned HTTP %d: %s: %s",
+	err := fmt.Errorf("authms365: token endpoint returned HTTP %d: %s: %s",
 		status, e.Code, oneLine(e.Description, 200))
+	// RFC 6749 section 5.2 reserves temporarily_unavailable for the one 400
+	// that is not about the request; every other code on a 400 or 401 is the
+	// endpoint saying no to these credentials.
+	if (status == http.StatusBadRequest || status == http.StatusUnauthorized) &&
+		e.Code != "temporarily_unavailable" {
+		return &CredentialError{Err: err}
+	}
+	return err
 }
 
 // checkToken rejects anything that could not survive the SASL payload. The

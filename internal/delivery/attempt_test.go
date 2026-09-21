@@ -13,7 +13,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/tokajer/smtprelayd/internal/bounce"
 	"github.com/tokajer/smtprelayd/internal/config"
+	"github.com/tokajer/smtprelayd/internal/metrics"
 	"github.com/tokajer/smtprelayd/internal/spool"
 	"github.com/tokajer/smtprelayd/internal/store"
 )
@@ -149,7 +151,7 @@ func (f *fakeSmarthost) hostPort(t *testing.T) (string, int) {
 }
 
 // managerAgainst wires a Manager whose only route is the scripted server.
-func managerAgainst(t *testing.T, f *fakeSmarthost) (*Manager, *spool.Spool, *store.Store) {
+func managerAgainst(t *testing.T, f *fakeSmarthost) (*Manager, *spool.Spool, *store.Store, *bounce.Notifier, *metrics.Registry) {
 	t.Helper()
 	host, port := f.hostPort(t)
 	cfg := &config.Config{
@@ -174,11 +176,13 @@ func managerAgainst(t *testing.T, f *fakeSmarthost) (*Manager, *spool.Spool, *st
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = st.Close() })
-	m, err := New(cfg, sp, discardLog(), st)
+	reg := testRegistry(cfg, sp)
+	notifier := bounce.New(cfg, sp, st, discardLog())
+	m, err := New(cfg, sp, discardLog(), st, reg, notifier)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return m, sp, st
+	return m, sp, st, notifier, reg
 }
 
 // queueOne spools a message and journals it. The journal row has to exist
@@ -222,7 +226,7 @@ func statusOf(t *testing.T, st *store.Store, id spool.ID) string {
 
 func TestAttemptDeliveredRemovesTheMessage(t *testing.T) {
 	f := startFakeSmarthost(t, "250 2.0.0 accepted")
-	m, sp, st := managerAgainst(t, f)
+	m, sp, st, _, _ := managerAgainst(t, f)
 	id, meta := queueOne(t, sp, st, time.Hour)
 
 	m.attempt(context.Background(), meta)
@@ -239,7 +243,7 @@ func TestAttemptDeliveredRemovesTheMessage(t *testing.T) {
 // aside rather than retried.
 func TestAttemptPermanentFailureMovesTheMessageAside(t *testing.T) {
 	f := startFakeSmarthost(t, "550 5.1.1 unknown recipient")
-	m, sp, st := managerAgainst(t, f)
+	m, sp, st, notifier, _ := managerAgainst(t, f)
 	id, meta := queueOne(t, sp, st, time.Hour)
 
 	m.attempt(context.Background(), meta)
@@ -258,7 +262,7 @@ func TestAttemptPermanentFailureMovesTheMessageAside(t *testing.T) {
 		t.Errorf("journal status %q, want bounced", got)
 	}
 	// A real client failure is what the bounce digest exists to report.
-	if got := m.Notifier().Pending(); got != 1 {
+	if got := notifier.Pending(); got != 1 {
 		t.Errorf("pending bounce notifications = %d, want 1", got)
 	}
 }
@@ -268,7 +272,7 @@ func TestAttemptPermanentFailureMovesTheMessageAside(t *testing.T) {
 // schedule rather than immediately.
 func TestAttemptTemporaryFailureDefersWithBackoff(t *testing.T) {
 	f := startFakeSmarthost(t, "451 4.3.0 try again later")
-	m, sp, st := managerAgainst(t, f)
+	m, sp, st, _, _ := managerAgainst(t, f)
 	id, meta := queueOne(t, sp, st, time.Hour)
 
 	m.attempt(context.Background(), meta)
@@ -296,7 +300,7 @@ func TestAttemptTemporaryFailureDefersWithBackoff(t *testing.T) {
 // smarthost from holding mail forever.
 func TestAttemptPastExpiryIsGivenUpOn(t *testing.T) {
 	f := startFakeSmarthost(t, "451 4.3.0 try again later")
-	m, sp, st := managerAgainst(t, f)
+	m, sp, st, _, _ := managerAgainst(t, f)
 	id, meta := queueOne(t, sp, st, time.Hour)
 	meta.Expires = time.Now().Add(-time.Minute)
 

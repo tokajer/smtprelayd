@@ -140,7 +140,7 @@ type Message struct {
 // tokens may be nil for routes that do not use XOAUTH2.
 func Deliver(ctx context.Context, route config.Route, msg Message, timeout time.Duration, tokens TokenSource) error {
 	var tlsConf *tls.Config
-	if route.TLS != "none" {
+	if route.TLS != config.TLSNone {
 		minTLS, err := config.ParseTLSVersion(route.MinTLS)
 		if err != nil {
 			return perm("route %s: %w", route.Name, err)
@@ -221,7 +221,7 @@ func Deliver(ctx context.Context, route config.Route, msg Message, timeout time.
 		// The loader already rejects this combination; repeating it here
 		// keeps a hand-edited or future in-memory Route from putting
 		// credentials on an unprotected connection.
-		if route.TLS == "none" {
+		if route.TLS == config.TLSNone {
 			return perm("route %s: refusing to authenticate over a cleartext connection", route.Name)
 		}
 		if err := c.Auth(a); err != nil {
@@ -331,7 +331,7 @@ func isPermanentReply(err error) bool {
 
 func authFor(ctx context.Context, route config.Route, tokens TokenSource) (smtp.Auth, error) {
 	switch route.Auth {
-	case "none", "":
+	case config.AuthNone, "":
 		return nil, nil
 	case config.AuthPlain:
 		return smtp.PlainAuth("", route.Credentials.Username,

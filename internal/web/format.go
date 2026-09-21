@@ -18,17 +18,24 @@ import (
 // them touch the store, the spool or the request, which is why they live
 // apart from the handlers.
 
-// parseOffset reads a pagination offset from a query parameter. Anything
-// unparsable or negative is the first page rather than an error: an offset is
-// a position in a list, and refusing the request over one would be a worse
-// answer than showing the start.
-func parseOffset(s string) int {
+// parseNonNegative reads a whole number from a query parameter, answering
+// zero for anything unparsable or negative rather than failing. Both callers
+// want that: a pagination offset is a position in a list, and the bulk banner
+// below is rebuilt from counts this process itself put in the redirect, so
+// neither is worth refusing a request over.
+func parseNonNegative(s string) int {
 	n, err := strconv.Atoi(s)
 	if err != nil || n < 0 {
 		return 0
 	}
 	return n
 }
+
+// parseOffset reads a pagination offset. It is parseNonNegative under the
+// name the paging code reads by; the bulk flash counts use the primitive
+// directly, because calling something "offset" while parsing "how many
+// messages were deleted" made that code read as if it were paging.
+func parseOffset(s string) int { return parseNonNegative(s) }
 
 // filterQueryValues copies the named parameters out of q, dropping paging
 // and sort parameters, so a pagination link can carry the active filters
@@ -181,12 +188,20 @@ func formatRoutes(rs []config.Route) string {
 		fmt.Fprintf(&b, "[route %q]\ndefault            = %v\nhost               = %s\nport               = %d\ntls                = %s\nauth               = %s\ndomains            = %s\nsources            = %s\nmax_concurrent     = %d\nrate_limit_per_min = %d\n",
 			r.Name, r.Default, r.Host, r.Port, orNone(r.TLS), orNone(r.Auth),
 			strings.Join(r.Domains, ", "), strings.Join(r.Sources, ", "), r.MaxConcurrent, r.RateLimitPerMin)
+		// The secrets are printed through config.Secret, whose String
+		// returns "[redacted]", rather than as a literal here. Both produce
+		// the same page, but only one of them keeps producing it: were a
+		// secret field ever to become a plain string, a literal would go on
+		// printing "[redacted]" over a value that is no longer protected,
+		// and this page would be asserting something that had stopped being
+		// true.
 		switch r.Auth {
 		case config.AuthXOAUTH2:
-			fmt.Fprintf(&b, "oauth2.tenant_id     = %s\noauth2.client_id     = %s\noauth2.mailbox       = %s\noauth2.client_secret = [redacted]\n",
-				r.OAuth2.TenantID, r.OAuth2.ClientID, r.OAuth2.Mailbox)
+			fmt.Fprintf(&b, "oauth2.tenant_id     = %s\noauth2.client_id     = %s\noauth2.mailbox       = %s\noauth2.client_secret = %s\n",
+				r.OAuth2.TenantID, r.OAuth2.ClientID, r.OAuth2.Mailbox, r.OAuth2.ClientSecret)
 		case config.AuthPlain, config.AuthLogin:
-			fmt.Fprintf(&b, "credentials.username = %s\ncredentials.password = [redacted]\n", r.Credentials.Username)
+			fmt.Fprintf(&b, "credentials.username = %s\ncredentials.password = %s\n",
+				r.Credentials.Username, r.Credentials.Password)
 		}
 		b.WriteString("\n")
 	}

@@ -15,8 +15,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/tokajer/smtprelayd/internal/bounce"
 	"github.com/tokajer/smtprelayd/internal/config"
 	"github.com/tokajer/smtprelayd/internal/delivery/smarthost"
+	"github.com/tokajer/smtprelayd/internal/metrics"
 	"github.com/tokajer/smtprelayd/internal/spool"
 	"github.com/tokajer/smtprelayd/internal/store"
 )
@@ -25,7 +27,25 @@ func discardLog() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
 
-func testManager(t *testing.T) (*Manager, *spool.Spool) {
+// testRegistry seeds a registry with the routes and canaries of cfg, the way
+// serve() does.
+func testRegistry(cfg *config.Config, sp *spool.Spool) *metrics.Registry {
+	var routes, canaries []string
+	for _, r := range cfg.Routes {
+		routes = append(routes, r.Name)
+	}
+	for _, c := range cfg.Canaries {
+		canaries = append(canaries, c.Name)
+	}
+	return metrics.New(metrics.ConfigExpiry(cfg), sp, routes, canaries, nil)
+}
+
+// testManager builds a manager with the collaborators serve() would give
+// it, and hands back the ones a test asserts on. They are returned rather
+// than read off the manager afterwards: a test that reaches into m.fails and
+// type-asserts it back to a *bounce.Notifier is pinned to how the manager
+// stores its dependency, not to what it does with it.
+func testManager(t *testing.T) (*Manager, *spool.Spool, *bounce.Notifier, *metrics.Registry) {
 	t.Helper()
 	cfg := &config.Config{
 		Queue: config.Queue{MaxLifetimeHours: 96, RetryScheduleMin: []int{1}},
@@ -44,11 +64,13 @@ func testManager(t *testing.T) (*Manager, *spool.Spool) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = st.Close() })
-	m, err := New(cfg, sp, discardLog(), st)
+	reg := testRegistry(cfg, sp)
+	notifier := bounce.New(cfg, sp, st, discardLog())
+	m, err := New(cfg, sp, discardLog(), st, reg, notifier)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return m, sp
+	return m, sp, notifier, reg
 }
 
 // TestFailRecordsRealClientFailureButNotANotificationsOwn is the regression
@@ -58,7 +80,7 @@ func testManager(t *testing.T) (*Manager, *spool.Spool) {
 // notification message's own delivery failure, which is exactly how a
 // notification loop would start.
 func TestFailRecordsRealClientFailureButNotANotificationsOwn(t *testing.T) {
-	m, sp := testManager(t)
+	m, sp, notifier, _ := testManager(t)
 
 	env := spool.Envelope{From: "a@example.at", To: []string{"b@example.net"}, Route: "m365", Client: "printers", Received: time.Now()}
 	if _, err := sp.Enqueue(env, strings.NewReader("x"), 0, time.Hour); err != nil {
@@ -70,7 +92,7 @@ func TestFailRecordsRealClientFailureButNotANotificationsOwn(t *testing.T) {
 	}
 	m.fail(meta, "smarthost rejected it")
 
-	if got := m.Notifier().Pending(); got != 1 {
+	if got := notifier.Pending(); got != 1 {
 		t.Fatalf("pending = %d after a real client failure, want 1", got)
 	}
 
@@ -84,7 +106,7 @@ func TestFailRecordsRealClientFailureButNotANotificationsOwn(t *testing.T) {
 	}
 	m.fail(notifMeta, "notify route unreachable")
 
-	if got := m.Notifier().Pending(); got != 1 {
+	if got := notifier.Pending(); got != 1 {
 		t.Fatalf("pending = %d after a notification's own failure, want still 1 (no loop)", got)
 	}
 }
@@ -96,7 +118,7 @@ func TestFailRecordsRealClientFailureButNotANotificationsOwn(t *testing.T) {
 // route-level metrics attribution treats Canary like Notification; the
 // RecordFail gate in fail() checks Notification alone, deliberately.
 func TestFailRecordsACanarysOwnFailureUnlikeANotifications(t *testing.T) {
-	m, sp := testManager(t)
+	m, sp, notifier, _ := testManager(t)
 
 	env := spool.Envelope{From: "canary@example.at", To: []string{"ops@example.at"}, Route: "m365", Client: "smtprelayd-canary", Received: time.Now(), Canary: true}
 	if _, err := sp.Enqueue(env, strings.NewReader("x"), 0, time.Hour); err != nil {
@@ -108,7 +130,7 @@ func TestFailRecordsACanarysOwnFailureUnlikeANotifications(t *testing.T) {
 	}
 	m.fail(meta, "smarthost rejected the canary")
 
-	if got := m.Notifier().Pending(); got != 1 {
+	if got := notifier.Pending(); got != 1 {
 		t.Fatalf("pending = %d after a canary's own failure, want 1 (reported like a real failure)", got)
 	}
 }
@@ -128,14 +150,14 @@ func (f fakeTokenSource) Token(context.Context) (string, error) {
 func TestVerifyTokensSkipsRoutesWithNoCachedSource(t *testing.T) {
 	// testManager's one route has Auth: "none", so New never populated
 	// m.tokens for it; VerifyTokens must not treat that as a failure.
-	m, _ := testManager(t)
+	m, _, _, _ := testManager(t)
 	if err := m.VerifyTokens(context.Background()); err != nil {
 		t.Fatalf("VerifyTokens: %v", err)
 	}
 }
 
 func TestVerifyTokensPassesWhenEveryRouteTokenFetchSucceeds(t *testing.T) {
-	m, _ := testManager(t)
+	m, _, _, _ := testManager(t)
 	m.tokens["m365"] = fakeTokenSource{}
 	if err := m.VerifyTokens(context.Background()); err != nil {
 		t.Fatalf("VerifyTokens: %v", err)
@@ -143,7 +165,7 @@ func TestVerifyTokensPassesWhenEveryRouteTokenFetchSucceeds(t *testing.T) {
 }
 
 func TestVerifyTokensFailsStartupOnRejectedCredential(t *testing.T) {
-	m, _ := testManager(t)
+	m, _, _, _ := testManager(t)
 	m.tokens["m365"] = fakeTokenSource{err: errors.New("invalid_client")}
 
 	err := m.VerifyTokens(context.Background())
@@ -298,7 +320,7 @@ func TestExtractSMTPError(t *testing.T) {
 // lifetime. Break that and a paced message runs out of attempts, or expires,
 // for reasons that have nothing to do with the smarthost.
 func TestHoldDoesNotConsumeTheRetryBudget(t *testing.T) {
-	m, sp := testManager(t)
+	m, sp, _, _ := testManager(t)
 	env := spool.Envelope{From: "a@example.at", To: []string{"b@example.net"},
 		Route: "m365", Client: "printers", Received: time.Now()}
 	if _, err := sp.Enqueue(env, strings.NewReader("x"), 0, time.Hour); err != nil {
@@ -337,7 +359,7 @@ func TestHoldDoesNotConsumeTheRetryBudget(t *testing.T) {
 // would leave a message that can never be tried again yet is not expired
 // either, so nothing would ever clear it.
 func TestHoldNeverDefersPastExpiry(t *testing.T) {
-	m, sp := testManager(t)
+	m, sp, _, _ := testManager(t)
 	env := spool.Envelope{From: "a@example.at", To: []string{"b@example.net"},
 		Route: "m365", Client: "printers", Received: time.Now()}
 	if _, err := sp.Enqueue(env, strings.NewReader("x"), 0, 2*time.Minute); err != nil {

@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -21,7 +22,7 @@ import (
 )
 
 func TestNewSeedsZeroCountersForConfiguredRoutes(t *testing.T) {
-	r := New(&config.Config{}, nil, []string{"m365", "legacy"}, nil, nil)
+	r := New(nil, nil, []string{"m365", "legacy"}, nil, nil)
 	text := r.text()
 	for _, want := range []string{
 		`smtprelayd_delivered_total{route="legacy"} 0`,
@@ -37,7 +38,7 @@ func TestNewSeedsZeroCountersForConfiguredRoutes(t *testing.T) {
 }
 
 func TestCountersIncrementPerRoute(t *testing.T) {
-	r := New(&config.Config{}, nil, []string{"m365"}, nil, nil)
+	r := New(nil, nil, []string{"m365"}, nil, nil)
 	r.Delivered("m365")
 	r.Delivered("m365")
 	r.Bounced("m365")
@@ -61,7 +62,7 @@ func TestCountersIncrementPerRoute(t *testing.T) {
 }
 
 func TestLastDeliveryTimeAbsentBeforeFirstDelivery(t *testing.T) {
-	r := New(&config.Config{}, nil, []string{"m365"}, nil, nil)
+	r := New(nil, nil, []string{"m365"}, nil, nil)
 	text := r.text()
 	if strings.Contains(text, `smtprelayd_last_delivery_time{route="m365"}`) {
 		t.Error("last_delivery_time present before any delivery")
@@ -79,7 +80,7 @@ func TestQueueSizeReflectsSpool(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	r := New(&config.Config{}, sp, []string{"m365"}, nil, nil)
+	r := New(nil, sp, []string{"m365"}, nil, nil)
 	text := r.text()
 	if !strings.Contains(text, `smtprelayd_queue_size{route="m365",state="queued"} 1`) {
 		t.Errorf("queue size not reflected:\n%s", text)
@@ -87,7 +88,7 @@ func TestQueueSizeReflectsSpool(t *testing.T) {
 }
 
 func TestStatusSnapshotMatchesCounters(t *testing.T) {
-	r := New(&config.Config{}, nil, []string{"m365", "legacy"}, nil, nil)
+	r := New(nil, nil, []string{"m365", "legacy"}, nil, nil)
 	r.Delivered("m365")
 	r.Bounced("m365")
 	r.Deferred("legacy")
@@ -109,7 +110,7 @@ func TestStatusSnapshotMatchesCounters(t *testing.T) {
 }
 
 func TestRouteLabelIsEscaped(t *testing.T) {
-	r := New(&config.Config{}, nil, []string{`evil"route`}, nil, nil)
+	r := New(nil, nil, []string{`evil"route`}, nil, nil)
 	text := r.text()
 	if !strings.Contains(text, `smtprelayd_delivered_total{route="evil\"route"} 0`) {
 		t.Errorf("route label not escaped:\n%s", text)
@@ -117,7 +118,7 @@ func TestRouteLabelIsEscaped(t *testing.T) {
 }
 
 func TestServeHTTPRejectsNonGet(t *testing.T) {
-	r := New(&config.Config{}, nil, nil, nil, nil)
+	r := New(nil, nil, nil, nil, nil)
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/metrics", nil)
 	r.ServeHTTP(rec, req)
@@ -127,7 +128,7 @@ func TestServeHTTPRejectsNonGet(t *testing.T) {
 }
 
 func TestCanaryFailureIsLabeledByNameAndDoesNotTouchRouteMetrics(t *testing.T) {
-	r := New(&config.Config{}, nil, []string{"m365"}, []string{"m365-daily"}, nil)
+	r := New(nil, nil, []string{"m365"}, []string{"m365-daily"}, nil)
 	r.CanaryFailure("m365-daily")
 	r.CanaryFailure("m365-daily")
 
@@ -141,7 +142,7 @@ func TestCanaryFailureIsLabeledByNameAndDoesNotTouchRouteMetrics(t *testing.T) {
 }
 
 func TestCanaryFailureCountsAreIndependentPerName(t *testing.T) {
-	r := New(&config.Config{}, nil, nil, []string{"a", "b"}, nil)
+	r := New(nil, nil, nil, []string{"a", "b"}, nil)
 	r.CanaryFailure("a")
 	r.CanaryFailure("a")
 	r.CanaryFailure("b")
@@ -156,7 +157,7 @@ func TestCanaryFailureCountsAreIndependentPerName(t *testing.T) {
 }
 
 func TestCanaryDeliveredSetsLastDeliveryTimeNotRouteDelivered(t *testing.T) {
-	r := New(&config.Config{}, nil, []string{"m365"}, []string{"m365-daily"}, nil)
+	r := New(nil, nil, []string{"m365"}, []string{"m365-daily"}, nil)
 	text := r.text()
 	if strings.Contains(text, `smtprelayd_canary_last_delivery_time{name="m365-daily"}`) {
 		t.Error("canary_last_delivery_time present before any canary delivery")
@@ -173,7 +174,7 @@ func TestCanaryDeliveredSetsLastDeliveryTimeNotRouteDelivered(t *testing.T) {
 }
 
 func TestAPIAuthFailureIsUnlabeled(t *testing.T) {
-	r := New(&config.Config{}, nil, []string{"m365"}, nil, nil)
+	r := New(nil, nil, []string{"m365"}, nil, nil)
 	r.APIAuthFailure()
 	r.APIAuthFailure()
 	text := r.text()
@@ -183,7 +184,7 @@ func TestAPIAuthFailureIsUnlabeled(t *testing.T) {
 }
 
 func TestUptimeAdvances(t *testing.T) {
-	r := New(&config.Config{}, nil, nil, nil, nil)
+	r := New(nil, nil, nil, nil, nil)
 	if r.Uptime() < 0 {
 		t.Fatalf("Uptime is negative: %v", r.Uptime())
 	}
@@ -201,7 +202,7 @@ func TestStatusIncludesOldestQueued(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	r := New(&config.Config{}, sp, []string{"m365"}, nil, nil)
+	r := New(nil, sp, []string{"m365"}, nil, nil)
 	status := r.Status()
 	if len(status) != 1 || !status[0].OldestQueued.Equal(old) {
 		t.Fatalf("got %+v, want OldestQueued %v", status, old)
@@ -209,7 +210,7 @@ func TestStatusIncludesOldestQueued(t *testing.T) {
 }
 
 func TestServeHTTPServesText(t *testing.T) {
-	r := New(&config.Config{}, nil, []string{"m365"}, nil, nil)
+	r := New(nil, nil, []string{"m365"}, nil, nil)
 	r.Delivered("m365")
 
 	rec := httptest.NewRecorder()
@@ -317,7 +318,7 @@ func TestExpiryGaugeIsExposed(t *testing.T) {
 			TenantID: "t", SecretExpires: now.Add(10 * 24 * time.Hour).Format("2006-01-02"),
 		}},
 	}}
-	body := New(cfg, nil, []string{"m365"}, nil, nil).text()
+	body := New(ConfigExpiry(cfg), nil, []string{"m365"}, nil, nil).text()
 
 	if !strings.Contains(body, "# TYPE smtprelayd_expiry_seconds gauge") {
 		t.Fatalf("exposition is missing the gauge declaration:\n%s", body)
@@ -352,7 +353,7 @@ func TestExpiryGaugeGoesNegativeAfterTheDate(t *testing.T) {
 			TenantID: "t", SecretExpires: time.Now().Add(-5 * 24 * time.Hour).Format("2006-01-02"),
 		}},
 	}}
-	body := New(cfg, nil, []string{"m365"}, nil, nil).text()
+	body := New(ConfigExpiry(cfg), nil, []string{"m365"}, nil, nil).text()
 	for _, l := range strings.Split(body, "\n") {
 		if strings.HasPrefix(l, "smtprelayd_expiry_seconds{") {
 			if !strings.Contains(l, " -") {
@@ -368,7 +369,7 @@ func TestExpiryGaugeGoesNegativeAfterTheDate(t *testing.T) {
 // exposition: a vanished gauge looks the same as a stopped scrape.
 func TestUnreadableCertificateIsExposedAsAnError(t *testing.T) {
 	cfg := &config.Config{TLS: config.TLS{CertFile: filepath.Join(t.TempDir(), "absent.crt")}}
-	body := New(cfg, nil, nil, nil, nil).text()
+	body := New(ConfigExpiry(cfg), nil, nil, nil, nil).text()
 	if !strings.Contains(body, "smtprelayd_expiry_read_errors 1") {
 		t.Errorf("exposition does not report the unreadable certificate:\n%s", body)
 	}
@@ -379,7 +380,7 @@ func TestUnreadableCertificateIsExposedAsAnError(t *testing.T) {
 // delivered_total, so an operator watching /metrics saw an unbroken success
 // rate while addresses were being refused permanently.
 func TestRecipientsRefusedIsCountedPerRoute(t *testing.T) {
-	r := New(&config.Config{}, nil, []string{"m365", "legacy"}, nil, nil)
+	r := New(nil, nil, []string{"m365", "legacy"}, nil, nil)
 
 	// Seeded at zero like every other route counter, so a route that has
 	// never hit one is present in the exposition rather than absent.
@@ -407,7 +408,7 @@ func TestRecipientsRefusedIsCountedPerRoute(t *testing.T) {
 // Status backs the dashboard's route page, so it has to carry the same
 // number the exposition does or the two disagree about a route's state.
 func TestStatusCarriesRecipientsRefused(t *testing.T) {
-	r := New(&config.Config{}, nil, []string{"m365"}, nil, nil)
+	r := New(nil, nil, []string{"m365"}, nil, nil)
 	r.RecipientsRefused("m365", 4)
 	st := r.Status()
 	if len(st) != 1 {
@@ -415,5 +416,98 @@ func TestStatusCarriesRecipientsRefused(t *testing.T) {
 	}
 	if st[0].RecipientsRefused != 4 {
 		t.Errorf("Status reports %d refused, want 4", st[0].RecipientsRefused)
+	}
+}
+
+// The two counters added 2026-09-18 for what used to be invisible: a
+// recovered session panic, and a history-store write that failed.
+func TestSessionPanicAndJournalFailureCounters(t *testing.T) {
+	r := New(nil, nil, nil, nil, nil)
+	text := r.text()
+	for _, want := range []string{
+		"smtprelayd_session_panics_total 0",
+		"smtprelayd_journal_write_failures_total 0",
+	} {
+		if !strings.Contains(text, want) {
+			t.Errorf("exposition lacks %q before any event", want)
+		}
+	}
+	r.SessionPanic()
+	r.JournalWriteFailure()
+	r.JournalWriteFailure()
+	text = r.text()
+	for _, want := range []string{
+		"smtprelayd_session_panics_total 1",
+		"smtprelayd_journal_write_failures_total 2",
+	} {
+		if !strings.Contains(text, want) {
+			t.Errorf("exposition lacks %q after the events", want)
+		}
+	}
+}
+
+type fixedAge time.Duration
+
+func (a fixedAge) TokenAge() (time.Duration, bool) { return time.Duration(a), true }
+
+// RegisterTokenAger is how the delivery manager attaches its token sources
+// to a registry that was built before it existed; the gauge must appear
+// once it has.
+func TestRegisterTokenAgerFeedsTheGauge(t *testing.T) {
+	r := New(nil, nil, []string{"m365"}, nil, nil)
+	if strings.Contains(r.text(), `smtprelayd_oauth_token_age_seconds{route="m365"}`) {
+		t.Fatal("token age present before any source was registered")
+	}
+	r.RegisterTokenAger("m365", fixedAge(90*time.Second))
+	if !strings.Contains(r.text(), `smtprelayd_oauth_token_age_seconds{route="m365"} 90`) {
+		t.Fatalf("token age missing after registration:\n%s", r.text())
+	}
+}
+
+// The exposition is a table now (expositionSeries), so the thing worth
+// pinning is that every family declares itself properly and that the two
+// expiry families stay mutually exclusive: a scraper reads HELP and TYPE, and
+// a family that lost one of them, or a gauge that appeared alongside its own
+// error gauge, would be a silent misread rather than a failure.
+func TestEveryFamilyDeclaresItself(t *testing.T) {
+	r := New(nil, nil, []string{"m365"}, []string{"daily"}, nil)
+	text := r.text()
+	for _, se := range expositionSeries {
+		if se.when != nil {
+			continue // conditional: covered below
+		}
+		if !strings.Contains(text, "# HELP "+se.name+" ") {
+			t.Errorf("%s has no HELP line", se.name)
+		}
+		if !strings.Contains(text, "# TYPE "+se.name+" "+se.kind) {
+			t.Errorf("%s has no TYPE line", se.name)
+		}
+		if se.value == nil && se.rows == nil {
+			t.Errorf("%s renders no samples at all", se.name)
+		}
+		if se.value != nil && se.rows != nil {
+			t.Errorf("%s sets both value and rows; exactly one is the contract", se.name)
+		}
+		if se.kind != "counter" && se.kind != "gauge" {
+			t.Errorf("%s has type %q", se.name, se.kind)
+		}
+	}
+	if strings.Contains(text, "smtprelayd_expiry_read_errors") {
+		t.Error("the read-error gauge is present although the deadlines were readable")
+	}
+}
+
+// A metric family's name must appear in the Checkmk guide, which is what an
+// operator builds alerts from. The table and the document drifted apart once
+// already, in the other direction: a documented metric that did not exist.
+func TestEveryFamilyIsDocumented(t *testing.T) {
+	doc, err := os.ReadFile(filepath.Join("..", "..", "docs", "guides", "CHECKMK.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, se := range expositionSeries {
+		if !strings.Contains(string(doc), se.name) {
+			t.Errorf("%s is exposed but absent from docs/guides/CHECKMK.md", se.name)
+		}
 	}
 }

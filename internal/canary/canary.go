@@ -28,19 +28,27 @@ import (
 // existing RecordFail path without this package needing to know that
 // happened.
 type Runner struct {
-	cfg    *config.Config
-	canary config.Canary
-	spool  *spool.Spool
-	store  *store.Store
-	log    *slog.Logger
+	canary   config.Canary
+	hostname string
+	lifetime time.Duration
+	mailer   *selfmail.Mailer
+	log      *slog.Logger
 }
 
 // New builds a runner for one [[canary]] entry. It does nothing until Run is
-// started. cfg is carried alongside the entry for Service.Hostname and
-// Queue.MaxLifetimeHours, which are shared across every canary rather than
-// per-entry settings.
-func New(cfg *config.Config, c config.Canary, sp *spool.Spool, st *store.Store, log *slog.Logger) *Runner {
-	return &Runner{cfg: cfg, canary: c, spool: sp, store: st, log: log.With("component", "canary", "name", c.Name)}
+// started.
+//
+// hostname and lifetime are service.hostname and queue.max_lifetime_hours,
+// which are shared across every canary rather than per-entry settings. They
+// are passed as the two values they are: carrying the whole *config.Config
+// for them put every field of the configuration within reach of a probe that
+// needs a name and a duration.
+func New(c config.Canary, hostname string, lifetime time.Duration, sp *spool.Spool, st *store.Store, log *slog.Logger) *Runner {
+	log = log.With("component", "canary", "name", c.Name)
+	return &Runner{
+		canary: c, hostname: hostname, lifetime: lifetime,
+		mailer: selfmail.New(sp, st, log), log: log,
+	}
 }
 
 // maxDailyWait bounds one step of the wait for a fixed-time schedule. See
@@ -158,7 +166,7 @@ func (r *Runner) send(now time.Time) error {
 
 	var body strings.Builder
 	fmt.Fprintf(&body, "This is an automated canary message (%q) from smtprelayd on %s, sent through route %q.\r\n",
-		r.canary.Name, r.cfg.Service.Hostname, r.canary.Route)
+		r.canary.Name, r.hostname, r.canary.Route)
 	body.WriteString("If it stops arriving on schedule, delivery through that route may be failing silently.\r\n")
 
 	// Notification stays false on purpose, so that a permanent failure
@@ -167,7 +175,7 @@ func (r *Runner) send(now time.Time) error {
 	// than building a second one. Client is the canary's own Name, because
 	// internal/bounce groups digest entries by it and config.Validate has
 	// already guaranteed the name collides with no client.
-	queueID, err := selfmail.Enqueue(r.spool, r.store, r.log, selfmail.Message{
+	queueID, err := r.mailer.Send(selfmail.Message{
 		HeaderFrom:   r.canary.Sender,
 		EnvelopeFrom: r.canary.Sender,
 		To:           []string{r.canary.Recipient},
@@ -176,8 +184,8 @@ func (r *Runner) send(now time.Time) error {
 		Client:       r.canary.Name,
 		Route:        r.canary.Route,
 		Listener:     "canary",
-		Canary:       true,
-	}, time.Duration(r.cfg.Queue.MaxLifetimeHours)*time.Hour, now)
+		Kind:         spool.KindCanary,
+	}, r.lifetime, now)
 	if err != nil {
 		return fmt.Errorf("canary %q: %w", r.canary.Name, err)
 	}

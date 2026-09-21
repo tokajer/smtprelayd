@@ -58,9 +58,18 @@ libraries that do not exist understated it in the one direction that matters.
 
 ## 3. Component layout
 
+**Corrected 2026-09-21.** The `internal/config` row said "TOML load,
+validation, reload". Nothing in the tree reloads a configuration and nothing
+ever has: the loaded `*Config` is handed to the listener set, the delivery
+manager, the dashboard, the API and the metrics registry, each of which holds
+it for the life of the process, so there is no snapshot boundary a new one
+could be swapped in at. Changing the configuration means restarting the
+service. The row now describes the code; adding reload later is a design
+decision that starts with those consumers, not with the loader.
+
 ```
 cmd/smtprelayd/        service wrapper, CLI (run, install, uninstall, queue)
-internal/config       TOML load, validation, reload
+internal/config       TOML load and validation
 internal/listener     ports 25 / 587 / 465, STARTTLS, SASL, client matching
 internal/spool        durable on-disk queue
 internal/rewrite      per-client sender rewriting
@@ -147,16 +156,34 @@ Client credentials flow, no user interaction, no password.
 - SASL payload: `user=<mailbox>\x01auth=Bearer <token>\x01\x01`, base64 encoded.
 - Cache the token in memory and refresh roughly 5 minutes before expiry. Never
   persist it to disk. Expose token age as a metric.
-- **Decided 2026-08-21**: a token is also fetched eagerly for every xoauth2
-  route at startup (`delivery.Manager.VerifyTokens`, called from `serve()`
-  right after `delivery.New`), and a failure aborts startup rather than only
-  being logged. Before this, no token was fetched before the first delivery
-  attempt, so a rejected credential or an unreachable tenant at boot was
-  silent until mail was already queued behind it. Accepted cost: an outage
-  or rejected secret that outlasts the restart-on-failure burst window
-  (Linux: `StartLimitBurst=5` within `StartLimitIntervalSec=60`) leaves the
-  service down until an operator intervenes — the literal request, not a
-  side effect.
+- **Decided 2026-08-21, narrowed 2026-09-18**: a token is also fetched
+  eagerly for every xoauth2 route at startup (`delivery.Manager.VerifyTokens`,
+  called from `serve()` right after `delivery.New`). A rejection the token
+  endpoint itself issued (`authms365.CredentialError`: HTTP 400 or 401 with
+  an OAuth2 error code, so a wrong secret, an unknown client or tenant, a
+  scope never granted) aborts startup rather than only being logged, because
+  no retry changes it. Any other failure -- a timeout, a refused connection,
+  a 5xx, a 429 -- is logged at Warn and the service starts: the listeners
+  bind, devices hand their mail to the spool, and the token is fetched again
+  at the first delivery attempt. Before 2026-09-18 every failure aborted,
+  which meant a Microsoft outage at reboot time left the listeners unbound
+  and the devices, which do not queue, losing mail -- a delivery outage
+  turned into an acceptance outage. Accepted cost of the remaining abort: a
+  rejected secret that outlasts the restart-on-failure burst window (Linux:
+  `StartLimitBurst=5` within `StartLimitIntervalSec=60`) leaves the service
+  down until an operator intervenes — the literal request, not a side
+  effect.
+
+- **Decided 2026-09-18**: the dispatcher claims in batches
+  (`spool.ClaimBatch(now, max, skip)`, 1 000 per scan) rather than one
+  message per scan of the index, and excludes routes it has already found
+  saturated for the rest of the tick. One scan per message made a tick
+  quadratic in queue depth, which is worst precisely when a smarthost hangs
+  and the queue behind it is deepest; the load test had measured the
+  one-at-a-time drain at 22 hours for a million messages. The batch is
+  selected with a bounded max-heap, so the oldest mail is still what goes
+  out first -- a bounded scan that kept the wrong end of a map's random
+  iteration order would starve it.
 
 **Throttling**: Microsoft 365 permits on the order of 10 concurrent connections
 and roughly 30 messages per minute per connection, with a daily recipient cap.

@@ -16,7 +16,7 @@ prioritises those three.
 | Entra ID client secret leaked | Attacker sends as the organisation | Secret never on disk in plaintext, env or OS keystore only, no logging, rotation alert |
 | Header injection via rewriting | Hidden recipients, spoofed headers | Strict CRLF rejection, structural header rebuild, never string concatenation |
 | Compromised internal device | Mass sending under a valid client identity | Per-client rate and size limits, recipient caps, anomaly metrics |
-| API token theft | Read of message metadata, or requeue and delete | Hashed tokens at rest, scopes, localhost binding, audit log, attempt rate limiting |
+| API token theft | Read of message metadata, or requeue and delete | Hashed tokens at rest, localhost binding, audit log, attempt rate limiting. Scopes limit what a token can do through the API, not what its holder can do: the dashboard on the same listener needs no token at all, see section 7 |
 | Spool read by another local user | Full message content disclosure | 0600 files, 0700 directories, restrictive Windows ACLs, dedicated service account |
 | Resource exhaustion | Service outage, disk full | Connection caps, timeouts, streaming size enforcement, disk watermarks |
 | Dependency compromise | Arbitrary code in the binary | Minimal dependency set, pinned modules, `govulncheck` in CI, reproducible builds |
@@ -235,6 +235,18 @@ attacker-influenced values and writes them into a message.
   certificate and no credential. Remote access goes through an SSH tunnel or
   an authenticating reverse proxy. A login that verifies a pasted token
   against the stored digests is possible and is recorded as future work.
+- **The API's `read` and `admin` scopes are not a boundary on this listener.**
+  The dashboard and the JSON API share `[web].address`, and the dashboard's
+  requeue and delete forms need no bearer token -- only a CSRF token, which
+  any `GET /queue` hands out. So anyone who can reach the listener, a
+  `read`-scope token holder included, can do everything an `admin` token can,
+  through the dashboard. The scopes limit what a *token* can do, which
+  matters where the token travels further than the listener does: a
+  monitoring system holding a `read` token cannot requeue or delete through
+  the API, and a leaked `read` token grants no destructive action to someone
+  who has the token but not loopback. For the scopes to bound what a
+  *person* can do, the reverse proxy in front of the listener has to expose
+  `/api/` alone and refuse every other path.
 - **A loopback bind is not by itself the boundary; the `Host` header completes
   it.** A browser sits inside the loopback boundary and resolves names on
   someone else's behalf, so a page the operator visits can point a name it

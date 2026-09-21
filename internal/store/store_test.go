@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -237,67 +238,10 @@ func TestFindBounces(t *testing.T) {
 	}
 }
 
-func TestDeleteMessage(t *testing.T) {
-	s := testStore(t)
-
-	now := time.Now()
-	expires := now.Add(96 * time.Hour)
-
-	_ = s.RecordMessage(testRecord("TO-DELETE", now, expires))
-
-	err := s.DeleteMessage("TO-DELETE")
-	if err != nil {
-		t.Fatalf("DeleteMessage failed: %v", err)
-	}
-
-	m, err := s.FindMessageByID("TO-DELETE")
-	if err != nil {
-		t.Fatalf("FindMessageByID after delete failed: %v", err)
-	}
-	if m != nil {
-		t.Fatal("Message still exists after delete")
-	}
-}
-
-func TestRecordAudit(t *testing.T) {
-	s := testStore(t)
-
-	err := s.RecordAudit("admin-token", "192.168.1.1", "delete", "QUEUE-123", `{"reason":"test"}`)
-	if err != nil {
-		t.Fatalf("RecordAudit failed: %v", err)
-	}
-}
-
-func TestFindAuditByQueueID(t *testing.T) {
-	s := testStore(t)
-
-	if err := s.RecordAudit("ops", "192.168.1.1", "requeue", "QUEUE-1", ""); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.RecordAudit("ops", "192.168.1.1", "delete", "QUEUE-1", ""); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.RecordAudit("ops", "192.168.1.1", "delete", "QUEUE-OTHER", ""); err != nil {
-		t.Fatal(err)
-	}
-
-	entries, err := s.FindAuditByQueueID("QUEUE-1")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(entries) != 2 {
-		t.Fatalf("got %d entries, want 2", len(entries))
-	}
-	if entries[0].Action != "delete" || entries[1].Action != "requeue" {
-		t.Fatalf("unexpected order: %+v", entries)
-	}
-}
-
-// TestDeleteMessageCascadesAttempts guards against a regression to the bug
-// where CREATE TABLE declared ON DELETE CASCADE but foreign key enforcement
-// was never turned on for the connection, so SQLite silently ignored it and
-// deleted messages left their attempts behind forever, defeating retention.
-func TestDeleteMessageCascadesAttempts(t *testing.T) {
+// TestRetentionCleanupCascadesAttempts pins the foreign key the retention
+// job relies on: deleting a message row must take its attempts with it, or
+// the attempts table grows forever while messages are pruned.
+func TestRetentionCleanupCascadesAttempts(t *testing.T) {
 	s := testStore(t)
 
 	now := time.Now()
@@ -306,8 +250,15 @@ func TestDeleteMessageCascadesAttempts(t *testing.T) {
 		t.Fatalf("RecordAttempt failed: %v", err)
 	}
 
-	if err := s.DeleteMessage("CASCADE-TEST"); err != nil {
-		t.Fatalf("DeleteMessage failed: %v", err)
+	// A cutoff a day past the retention window, so the row just written is
+	// older than it.
+	s.retentionCleanup(now.Add(s.retentionTTL + 24*time.Hour))
+	m, err := s.FindMessageByID("CASCADE-TEST")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m != nil {
+		t.Fatal("message row survived the retention cleanup")
 	}
 
 	var count int
@@ -532,11 +483,11 @@ func TestFindMessagesActiveStatusIsQueuedOrDeferred(t *testing.T) {
 	}
 }
 
-// TestFindMessagesStatusStableAcrossRapidAttempts guards the same
-// same-second collision for FindMessages and CountQueue's "latest attempt"
-// join: two attempts recorded back to back can land in the same
-// second-precision at_time, and the join used to fan out into duplicate
-// rows for one message instead of picking the actual most recent attempt.
+// TestFindMessagesStatusStableAcrossRapidAttempts guards the same-second
+// collision in FindMessages' "latest attempt" join: two attempts recorded
+// back to back can land in the same second-precision at_time, and the join
+// used to fan out into duplicate rows for one message instead of picking the
+// actual most recent attempt.
 func TestFindMessagesStatusStableAcrossRapidAttempts(t *testing.T) {
 	s := testStore(t)
 	now := time.Now()
@@ -553,18 +504,6 @@ func TestFindMessagesStatusStableAcrossRapidAttempts(t *testing.T) {
 	}
 	if got[0].Status != "delivered" {
 		t.Fatalf("status = %q, want delivered (the actual latest attempt)", got[0].Status)
-	}
-
-	stats, err := s.CountQueue()
-	if err != nil {
-		t.Fatal(err)
-	}
-	var total int64
-	for _, st := range stats {
-		total += st.Queued + st.Deferred + st.Delivered + st.Bounced
-	}
-	if total != 1 {
-		t.Fatalf("CountQueue totals %d rows for one message, want 1", total)
 	}
 }
 
@@ -1021,4 +960,456 @@ func TestEveryFilterFieldBinds(t *testing.T) {
 			t.Errorf("until in the past matched %d rows (err %v), want 0", len(got), err)
 		}
 	})
+}
+
+// TestConcurrentWritersNeverSeeBusy is what the DSN's busy_timeout is
+// checked against. Sixteen writers, each recording a message and its attempt
+// in a tight loop, ran clean under `cache=shared` (measured 2026-09-18, 1 280
+// operations, 0 errors) and have to stay clean without it: with the file
+// lock back in charge of the pool, a writer meeting another must wait, not
+// fail.
+func TestConcurrentWritersNeverSeeBusy(t *testing.T) {
+	s := testStore(t)
+	const writers, perWriter = 16, 40
+	errs := make(chan error, writers*perWriter*2)
+	var wg sync.WaitGroup
+	for w := 0; w < writers; w++ {
+		wg.Add(1)
+		go func(w int) {
+			defer wg.Done()
+			now := time.Now()
+			for i := 0; i < perWriter; i++ {
+				id := fmt.Sprintf("W%02dN%021d", w, i)
+				if err := s.RecordMessage(testRecord(id, now, now.Add(time.Hour))); err != nil {
+					errs <- err
+					continue
+				}
+				if err := s.RecordAttempt(id, 1, 250, "ok", "delivered", nil); err != nil {
+					errs <- err
+				}
+			}
+		}(w)
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Errorf("concurrent write failed: %v", err)
+	}
+	var n int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM messages`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != writers*perWriter {
+		t.Fatalf("%d messages recorded, want %d", n, writers*perWriter)
+	}
+}
+
+// claimCleanup is the only thing the store's mutex still guards: exactly one
+// caller per hour wins the slot, and the DELETE itself runs outside the lock.
+func TestClaimCleanupHandsOutOneSlotPerHour(t *testing.T) {
+	s := testStore(t)
+	base := s.lastCleanup
+	if s.claimCleanup(base.Add(30 * time.Minute)) {
+		t.Fatal("cleanup claimed inside the hour")
+	}
+	if !s.claimCleanup(base.Add(61 * time.Minute)) {
+		t.Fatal("cleanup not claimed after the hour")
+	}
+	if s.claimCleanup(base.Add(62 * time.Minute)) {
+		t.Fatal("cleanup claimed twice for the same hour")
+	}
+}
+
+// synchronous is the setting that decides what an accepted message costs in
+// this file: under FULL each of the two implicit transactions per message
+// fsyncs the WAL, which measured 119 message+attempt pairs a second on a
+// Windows VM against 10 969 on Linux -- and 93 a second was the relay's whole
+// sustained throughput there. Like journal_mode and foreign_keys it only
+// takes effect because it is spelled as a `_pragma=` in the DSN; written any
+// other way the driver ignores it and the default silently returns.
+func TestSynchronousIsNormal(t *testing.T) {
+	s := testStore(t)
+	var mode int
+	if err := s.db.QueryRow(`PRAGMA synchronous`).Scan(&mode); err != nil {
+		t.Fatalf("reading synchronous: %v", err)
+	}
+	// 1 is NORMAL. 2 is FULL, the default, and is what this returns to if the
+	// pragma stops being applied.
+	if mode != 1 {
+		t.Errorf("synchronous is %d, want 1 (NORMAL); every commit is paying for an fsync", mode)
+	}
+}
+
+// The retention delete used to run inside RecordAttempt. Measured at a
+// million rows it took 15.6 seconds, and SQLite has one writer: a delivery
+// worker that ran it stopped every other writer -- the listener journalling
+// incoming mail included -- for that whole time. RecordAttempt must now do
+// nothing but insert.
+func TestRecordAttemptDoesNotSweep(t *testing.T) {
+	s := testStore(t)
+	// Old enough to be past any retention window, so a sweep would take it.
+	old := time.Now().UTC().Add(-365 * 24 * time.Hour)
+	if err := s.RecordMessage(MessageRecord{
+		QueueID: "QSWEEPAAAAAAAAAA", Client: "c", Route: "r",
+		EnvelopeFrom: "a@b.at", Recipients: `["x@y.at"]`, Listener: "l",
+		RemoteAddr: "127.0.0.1", ReceivedAt: old, ExpiresAt: old,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec(`UPDATE messages SET created_at = ?`, old.Format(time.RFC3339)); err != nil {
+		t.Fatal(err)
+	}
+	// The store was opened more than an hour ago as far as the gate is
+	// concerned only if we say so; force the slot open either way.
+	s.mu.Lock()
+	s.lastCleanup = old
+	s.mu.Unlock()
+
+	if err := s.RecordAttempt("QSWEEPAAAAAAAAAA", 1, 550, "no", "permanent", nil); err != nil {
+		t.Fatal(err)
+	}
+	var n int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM messages`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Errorf("RecordAttempt swept %d row(s); the sweep belongs to the dispatcher's tick", 1-n)
+	}
+}
+
+// And the sweep itself still removes everything past the window, in chunks:
+// more rows than one chunk holds, so the loop has to run more than once.
+func TestRetentionSweepRemovesEverythingPastTheWindow(t *testing.T) {
+	s := testStore(t)
+	old := time.Now().UTC().Add(-365 * 24 * time.Hour)
+	const rows = retentionChunk + 250
+	tx, err := s.db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stmt, err := tx.Prepare(`INSERT INTO messages (queue_id, client, route, envelope_from,
+		recipients, listener, remote_addr, received_at, expires_at, tls_used, created_at)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < rows; i++ {
+		id := fmt.Sprintf("QCHUNK%010d", i)
+		if _, err := stmt.Exec(id, "c", "r", "a@b.at", `["x@y.at"]`, "l", "127.0.0.1",
+			old.Format(time.RFC3339), old.Format(time.RFC3339), 0, old.Format(time.RFC3339)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+
+	s.mu.Lock()
+	s.lastCleanup = old
+	s.mu.Unlock()
+
+	deleted := s.RetentionSweep(time.Now())
+	if deleted != rows {
+		t.Errorf("sweep deleted %d rows, want all %d: the chunk loop stopped early", deleted, rows)
+	}
+	var left int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM messages`).Scan(&left); err != nil {
+		t.Fatal(err)
+	}
+	if left != 0 {
+		t.Errorf("%d row(s) survived the sweep", left)
+	}
+	// The hourly gate still holds. Asserting that a second call deletes
+	// nothing is not enough on its own -- with the table already empty that
+	// passes with no gate at all -- so a fresh expired row goes in first. It
+	// has to survive, because the slot for this hour is spent.
+	if _, err := s.db.Exec(`INSERT INTO messages (queue_id, client, route, envelope_from,
+		recipients, listener, remote_addr, received_at, expires_at, tls_used, created_at)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+		"QGATEAAAAAAAAAAA", "c", "r", "a@b.at", `["x@y.at"]`, "l", "127.0.0.1",
+		old.Format(time.RFC3339), old.Format(time.RFC3339), 0, old.Format(time.RFC3339)); err != nil {
+		t.Fatal(err)
+	}
+	if again := s.RetentionSweep(time.Now()); again != 0 {
+		t.Errorf("a second sweep within the hour deleted %d rows; the gate is not holding", again)
+	}
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM messages`).Scan(&left); err != nil {
+		t.Fatal(err)
+	}
+	if left != 1 {
+		t.Errorf("the row inserted after the sweep is gone; the hourly gate did not hold")
+	}
+}
+
+// The summary columns replace what the list queries used to derive by
+// grouping the whole attempts table, so they have to agree with that table
+// exactly -- a drift here is invisible, because nothing counts any more.
+func TestAttemptSummaryMatchesTheAttemptsTable(t *testing.T) {
+	s := testStore(t)
+	now := time.Now().UTC()
+	const id = "QSUMMARYAAAAAAAA"
+	if err := s.RecordMessage(MessageRecord{
+		QueueID: id, Client: "c", Route: "r", EnvelopeFrom: "a@b.at",
+		Recipients: `["x@y.at"]`, Listener: "l", RemoteAddr: "127.0.0.1",
+		ReceivedAt: now, ExpiresAt: now.Add(time.Hour),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for i, a := range []struct {
+		code  int
+		resp  string
+		class string
+	}{
+		{451, "4.3.0 try later", "temporary"},
+		{451, "4.3.0 try later", "temporary"},
+		{250, "2.0.0 OK", "delivered"},
+	} {
+		if err := s.RecordAttempt(id, i+1, a.code, a.resp, a.class, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	var count int
+	var lastClass, lastResp string
+	var lastCode int
+	var first, last string
+	if err := s.db.QueryRow(`SELECT attempt_count, last_class, last_smtp_code,
+		last_smtp_response, first_attempt_at, last_attempt_at FROM messages WHERE queue_id = ?`, id).
+		Scan(&count, &lastClass, &lastCode, &lastResp, &first, &last); err != nil {
+		t.Fatal(err)
+	}
+
+	var wantCount int
+	var wantClass, wantResp, wantFirst, wantLast string
+	var wantCode int
+	if err := s.db.QueryRow(`SELECT COUNT(*), MIN(at_time), MAX(at_time) FROM attempts WHERE queue_id = ?`, id).
+		Scan(&wantCount, &wantFirst, &wantLast); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.db.QueryRow(`SELECT class, smtp_code, smtp_response FROM attempts
+		WHERE queue_id = ? ORDER BY id DESC LIMIT 1`, id).Scan(&wantClass, &wantCode, &wantResp); err != nil {
+		t.Fatal(err)
+	}
+
+	if count != wantCount {
+		t.Errorf("attempt_count = %d, the attempts table holds %d", count, wantCount)
+	}
+	if lastClass != wantClass || lastCode != wantCode || lastResp != wantResp {
+		t.Errorf("last attempt summarised as (%s, %d, %q), the table says (%s, %d, %q)",
+			lastClass, lastCode, lastResp, wantClass, wantCode, wantResp)
+	}
+	if first != wantFirst || last != wantLast {
+		t.Errorf("attempt window %s..%s, the table says %s..%s", first, last, wantFirst, wantLast)
+	}
+}
+
+// has_bounced exists as its own column rather than as a test on last_class
+// because the two are different questions. A message that failed permanently
+// and was then requeued and delivered belongs in the bounce view -- that
+// failure happened -- while its latest attempt says "delivered".
+func TestABounceStaysABounceAfterARequeueAndDelivery(t *testing.T) {
+	s := testStore(t)
+	now := time.Now().UTC()
+	const id = "QREBOUNDAAAAAAAA"
+	if err := s.RecordMessage(MessageRecord{
+		QueueID: id, Client: "c", Route: "r", EnvelopeFrom: "a@b.at",
+		Recipients: `["x@y.at"]`, Listener: "l", RemoteAddr: "127.0.0.1",
+		ReceivedAt: now, ExpiresAt: now.Add(time.Hour),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.RecordAttempt(id, 1, 550, "5.1.1 unknown", "permanent", nil); err != nil {
+		t.Fatal(err)
+	}
+	if got, _, err := s.FindBounces(BounceFilter{Limit: 10}); err != nil || len(got) != 1 {
+		t.Fatalf("after the permanent failure: %d bounces, err %v", len(got), err)
+	}
+
+	// Requeued by an operator, and this time it goes out.
+	if err := s.RecordAttempt(id, 2, 250, "2.0.0 OK", "delivered", nil); err != nil {
+		t.Fatal(err)
+	}
+	got, _, err := s.FindBounces(BounceFilter{Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("the message left the bounce view after a later delivery: %d rows", len(got))
+	}
+	if got[0].LastCode != 250 {
+		t.Errorf("the bounce row shows code %d, want the latest attempt's 250", got[0].LastCode)
+	}
+	// And the class filter still selects on the latest attempt.
+	if rows, _, err := s.FindBounces(BounceFilter{Class: "permanent", Limit: 10}); err != nil || len(rows) != 0 {
+		t.Errorf("filtering on class permanent matched %d rows; the latest attempt is delivered", len(rows))
+	}
+}
+
+// The list queries no longer count attempts; they read the summary columns.
+// A database written before those columns existed therefore has to be
+// backfilled on the next Open, or every old message reads as "never
+// attempted" -- which for an old bounce is not stale but wrong, and would
+// empty the bounce view of everything that happened before the upgrade.
+func TestMigrationBackfillsAttemptSummaries(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "spool"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	dbPath := filepath.Join(dir, "spool", "history.db")
+
+	db, err := sql.Open("sqlite", "file:"+dbPath+"?mode=rwc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The schema as it stood with the journal columns but before the
+	// summaries, which is what an installed relay upgrading to this version
+	// actually has on disk.
+	if _, err := db.Exec(`CREATE TABLE messages (
+		queue_id TEXT PRIMARY KEY, client TEXT NOT NULL, route TEXT NOT NULL,
+		envelope_from TEXT NOT NULL, original_from TEXT, recipients TEXT NOT NULL,
+		subject TEXT, listener TEXT NOT NULL, remote_addr TEXT NOT NULL,
+		received_at TEXT NOT NULL, expires_at TEXT NOT NULL, tls_used INTEGER NOT NULL,
+		created_at TEXT NOT NULL, message_id TEXT, content_type TEXT,
+		size_bytes INTEGER, header_count INTEGER, helo TEXT)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`CREATE TABLE attempts (
+		id INTEGER PRIMARY KEY AUTOINCREMENT, queue_id TEXT NOT NULL,
+		attempt_num INTEGER NOT NULL, at_time TEXT NOT NULL, smtp_code INTEGER,
+		smtp_response TEXT, class TEXT NOT NULL, next_attempt_at TEXT,
+		created_at TEXT NOT NULL)`); err != nil {
+		t.Fatal(err)
+	}
+
+	base := time.Now().UTC().Add(-time.Hour)
+	ts := func(d time.Duration) string { return base.Add(d).Format(time.RFC3339) }
+	for _, m := range []string{"OLD-BOUNCE", "OLD-DELIVERED"} {
+		if _, err := db.Exec(`INSERT INTO messages
+			(queue_id, client, route, envelope_from, original_from, recipients, subject,
+			 listener, remote_addr, received_at, expires_at, tls_used, created_at)
+			VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+			m, "client", "route", "from@example.com", "", `["user@example.com"]`, "Subject",
+			"smtp", "10.0.0.1", ts(0), ts(time.Hour), 0, ts(0)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, a := range []struct {
+		id    string
+		num   int
+		at    time.Duration
+		code  int
+		class string
+	}{
+		{"OLD-BOUNCE", 1, time.Minute, 451, "temporary"},
+		{"OLD-BOUNCE", 2, 2 * time.Minute, 550, "permanent"},
+		{"OLD-DELIVERED", 1, time.Minute, 250, "delivered"},
+	} {
+		if _, err := db.Exec(`INSERT INTO attempts
+			(queue_id, attempt_num, at_time, smtp_code, smtp_response, class, created_at)
+			VALUES (?,?,?,?,?,?,?)`,
+			a.id, a.num, ts(a.at), a.code, "response", a.class, ts(a.at)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	s, err := Open(dir, slog.New(slog.NewTextHandler(io.Discard, nil)), 90, true)
+	if err != nil {
+		t.Fatalf("Open on a pre-summary database failed: %v", err)
+	}
+	defer s.Close()
+
+	// The bounce survives the upgrade and knows what happened to it.
+	bounces, _, err := s.FindBounces(BounceFilter{Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bounces) != 1 || bounces[0].QueueID != "OLD-BOUNCE" {
+		t.Fatalf("after the upgrade the bounce view holds %d rows, want the one old bounce", len(bounces))
+	}
+	if bounces[0].AttemptCount != 2 {
+		t.Errorf("the backfilled attempt count is %d, want 2", bounces[0].AttemptCount)
+	}
+	if bounces[0].LastCode != 550 {
+		t.Errorf("the backfilled last code is %d, want the permanent failure's 550", bounces[0].LastCode)
+	}
+
+	// And the delivered message is not in it, nor counted as never attempted.
+	all, _, err := s.FindMessages(MessageFilter{Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, m := range all {
+		if m.QueueID == "OLD-DELIVERED" {
+			if m.Status != "delivered" {
+				t.Errorf("the delivered message reads as %q after the upgrade", m.Status)
+			}
+			if m.AttemptCount != 1 {
+				t.Errorf("its backfilled attempt count is %d, want 1", m.AttemptCount)
+			}
+		}
+	}
+}
+
+// An index the planner never chooses is pure write cost, and on the journal
+// path that cost is measured: the summary columns and their indexes took it
+// from 2 829 message+attempt pairs a second to 1 096. idx_messages_lastattempt
+// was one of those indexes and earned nothing -- EXPLAIN QUERY PLAN takes
+// idx_messages_bounced for the filter and sorts in a temp b-tree regardless.
+// A database that already has it must lose it, or it keeps paying.
+func TestAnIndexThatEarnedNothingIsDropped(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "spool"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	dbPath := filepath.Join(dir, "spool", "history.db")
+
+	// A database from the version that created it.
+	db, err := sql.Open("sqlite", "file:"+dbPath+"?mode=rwc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`CREATE TABLE messages (
+		queue_id TEXT PRIMARY KEY, client TEXT NOT NULL, route TEXT NOT NULL,
+		envelope_from TEXT NOT NULL, original_from TEXT, recipients TEXT NOT NULL,
+		subject TEXT, listener TEXT NOT NULL, remote_addr TEXT NOT NULL,
+		received_at TEXT NOT NULL, expires_at TEXT NOT NULL, tls_used INTEGER NOT NULL,
+		created_at TEXT NOT NULL, last_attempt_at TEXT)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`CREATE INDEX idx_messages_lastattempt ON messages(last_attempt_at)`); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	s, err := Open(dir, slog.New(slog.NewTextHandler(io.Discard, nil)), 90, true)
+	if err != nil {
+		t.Fatalf("Open on a database carrying the dropped index failed: %v", err)
+	}
+	defer s.Close()
+
+	var n int
+	if err := s.db.QueryRow(
+		`SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = ?`,
+		"idx_messages_lastattempt").Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Error("the unused index survived the upgrade; every write still pays for it")
+	}
+
+	// The two that do earn their keep are there.
+	for _, want := range []string{"idx_messages_bounced", "idx_messages_lastclass"} {
+		if err := s.db.QueryRow(
+			`SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = ?`, want).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		if n != 1 {
+			t.Errorf("%s is missing; the queries that need it fall back to a scan", want)
+		}
+	}
 }

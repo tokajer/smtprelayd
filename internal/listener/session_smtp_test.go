@@ -7,6 +7,7 @@ import (
 	"bufio"
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -96,7 +97,7 @@ func serveTest(t *testing.T, cfg *config.Config) *smtpConn {
 	if cfg.Limits.MaxConnections == 0 {
 		cfg.Limits.MaxConnections = 10
 	}
-	set, err := New(cfg, nil, discardLog(), nil)
+	set, err := New(cfg, nil, discardLog(), nil, nil)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -230,7 +231,7 @@ func serveQueued(t *testing.T, cfg *config.Config) *smtpConn {
 	t.Cleanup(func() { _ = st.Close() })
 
 	cfg.Listeners[0].Address = "127.0.0.1:0"
-	set, err := New(cfg, sp, discardLog(), st)
+	set, err := New(cfg, sp, discardLog(), st, nil)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -339,5 +340,51 @@ func TestSmuggledEndOfDataClosesTheSession(t *testing.T) {
 	}
 	if ne, ok := err.(net.Error); ok && ne.Timeout() {
 		t.Fatal("the session neither answered nor closed after a smuggled end of data")
+	}
+}
+
+// deadConn accepts commands forever and fails every write, which is what a
+// peer that has gone away looks like from the server's side once its own
+// socket buffer has drained.
+type deadConn struct{ net.Conn }
+
+func (deadConn) Read(p []byte) (int, error)         { return copy(p, "NOOP\r\n"), nil }
+func (deadConn) Write([]byte) (int, error)          { return 0, errors.New("connection reset by peer") }
+func (deadConn) SetDeadline(time.Time) error        { return nil }
+func (deadConn) SetReadDeadline(t time.Time) error  { return nil }
+func (deadConn) SetWriteDeadline(t time.Time) error { return nil }
+func (deadConn) Close() error                       { return nil }
+
+// A session whose replies cannot be written must end rather than keep
+// reading. It used to run until the read deadline expired -- a full
+// read_timeout_sec, sixty seconds by default -- holding a connection slot
+// against a peer that was already gone, and a client that hangs up after
+// every command could hold every slot that way.
+func TestSessionEndsWhenItsRepliesCannotBeWritten(t *testing.T) {
+	cfg := &config.Config{
+		Service: config.Service{Hostname: "relay.test"},
+		Limits:  config.Limits{ReadTimeoutSec: 60, WriteTimeoutSec: 60, MaxMessageMB: 10},
+	}
+	srv := &Server{cfg: cfg, lc: config.Listener{Name: "smtp", TLS: config.TLSNone}, log: discardLog()}
+	conn := deadConn{}
+	s := &session{
+		srv: srv, ctx: context.Background(), conn: conn,
+		br: bufio.NewReader(conn), bw: bufio.NewWriter(conn),
+		clientBits: -1, log: discardLog(),
+	}
+
+	done := make(chan struct{})
+	go func() {
+		s.reply(220, "relay.test ESMTP smtprelayd")
+		s.loop()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the session is still reading from a connection it cannot answer")
+	}
+	if !s.writeFailed {
+		t.Error("the failed write was not recorded")
 	}
 }

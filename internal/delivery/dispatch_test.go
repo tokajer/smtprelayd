@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/tokajer/smtprelayd/internal/bounce"
 	"github.com/tokajer/smtprelayd/internal/config"
 	"github.com/tokajer/smtprelayd/internal/spool"
 	"github.com/tokajer/smtprelayd/internal/store"
@@ -24,7 +25,7 @@ import (
 // duplicate they cannot explain from the log.
 func TestAttemptTreatsAnUncleanCloseAfterAcceptanceAsDelivered(t *testing.T) {
 	f := startDroppingSmarthost(t)
-	m, sp, st := managerAgainst(t, f)
+	m, sp, st, _, _ := managerAgainst(t, f)
 	id, meta := queueOne(t, sp, st, time.Hour)
 
 	m.attempt(context.Background(), meta)
@@ -129,7 +130,7 @@ func TestASaturatedRouteDoesNotStallTheOtherRoutes(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = st.Close() })
-	m, err := New(cfg, sp, discardLog(), st)
+	m, err := New(cfg, sp, discardLog(), st, testRegistry(cfg, sp), bounce.New(cfg, sp, st, discardLog()))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -164,4 +165,66 @@ func TestASaturatedRouteDoesNotStallTheOtherRoutes(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 	}
 	t.Fatal("the healthy route's message was never dispatched: a saturated route held the dispatcher")
+}
+
+// A route whose worker slots are all taken must be held once and then left
+// alone for the rest of the tick. Before ClaimBatch's skip existed, the
+// dispatcher scanned the whole spool index again for every further message
+// on that route, which is what made a deep queue behind a hanging smarthost
+// quadratic in its depth.
+func TestDispatchHoldsASaturatedRouteAndMovesOn(t *testing.T) {
+	cfg := &config.Config{
+		Service: config.Service{Hostname: "relay.test"},
+		Queue:   config.Queue{MaxLifetimeHours: 96, RetryScheduleMin: []int{1}},
+		Limits:  config.Limits{DeliveryTimeoutSec: 30},
+		Bounce:  config.Bounce{DigestMinutes: 15, MaxPerHour: 10},
+		// No slots at all: every message finds the budget full, which is the
+		// saturated case without needing a hanging server to produce it.
+		Routes: []config.Route{{Name: "full", Host: "127.0.0.1", Port: 1, TLS: "none", Auth: "none", MaxConcurrent: 0}},
+	}
+	sp, err := spool.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, err := store.Open(t.TempDir(), discardLog(), 90, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	m, err := New(cfg, sp, discardLog(), st, testRegistry(cfg, sp), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// MaxConcurrent 0 would be normalised to a default by config.Validate;
+	// this config never goes through it, so the budget is genuinely empty.
+	m.routes["full"] = make(chan struct{})
+
+	base := time.Now().UTC().Add(-time.Hour)
+	for i := 0; i < 20; i++ {
+		env := spool.Envelope{From: "a@example.at", To: []string{"b@example.net"},
+			Route: "full", Client: "printers", Received: base.Add(time.Duration(i) * time.Second)}
+		if _, err := sp.Enqueue(env, strings.NewReader("x"), 0, time.Hour); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	done := make(chan bool, 1)
+	go func() { done <- m.dispatch(context.Background()) }()
+	select {
+	case ok := <-done:
+		if !ok {
+			t.Fatal("dispatch reported cancellation on a live context")
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("dispatch did not finish: a saturated route is being rescanned")
+	}
+
+	// Every message is still queued, held for the next tick rather than
+	// consumed, and none of them has spent a retry on having found no slot.
+	if _, ok := sp.Claim(time.Now()); ok {
+		t.Fatal("a message on the saturated route is still due; it was not held")
+	}
+	if n := sp.Len(); n != 20 {
+		t.Fatalf("the spool holds %d messages, want all 20 kept", n)
+	}
 }

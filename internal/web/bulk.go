@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/tokajer/smtprelayd/internal/queueaction"
 	"github.com/tokajer/smtprelayd/internal/spool"
 	"github.com/tokajer/smtprelayd/internal/store"
 )
@@ -18,8 +19,8 @@ import (
 // The queue page's bulk actions: applying one action to a set of messages,
 // bounding how much irreversible work one request may do, and reporting how
 // far it got. The per-message primitives they drive (requeueMessage,
-// deleteMessage) stay in web.go, where the single-message endpoints use them
-// too.
+// deleteMessage) live in actions.go, where the single-message endpoints use
+// them too.
 
 // bulkMax bounds one bulk action. It is store.MaxPageLimit rather than a
 // number of its own: FindMessages caps its own result there whatever it is
@@ -138,20 +139,20 @@ func (s *Server) handleQueueBulk(w http.ResponseWriter, r *http.Request, action 
 			res.Truncated = true
 			break
 		}
-		var outcome actionOutcome
+		var outcome queueaction.Outcome
 		if action == "requeue" {
 			outcome = s.requeueMessage(r, id, details)
 		} else {
 			outcome = s.deleteMessage(r, id, details)
 		}
 		switch outcome {
-		case outcomeDone:
+		case queueaction.Done:
 			res.OK++
-		case outcomeCleared:
+		case queueaction.Cleared:
 			res.Cleared++
-		case outcomeBusy:
+		case queueaction.Busy:
 			res.Busy++
-		case outcomeMissing:
+		case queueaction.Missing:
 			res.Missing++
 		default:
 			res.Failed++
@@ -229,11 +230,11 @@ func bulkFlash(q url.Values) *flash {
 	}
 
 	c := bulkCounts{
-		OK:        parseOffset(q.Get("ok")),
-		Cleared:   parseOffset(q.Get("cleared")),
-		Busy:      parseOffset(q.Get("busy")),
-		Missing:   parseOffset(q.Get("missing")),
-		Failed:    parseOffset(q.Get("failed")),
+		OK:        parseNonNegative(q.Get("ok")),
+		Cleared:   parseNonNegative(q.Get("cleared")),
+		Busy:      parseNonNegative(q.Get("busy")),
+		Missing:   parseNonNegative(q.Get("missing")),
+		Failed:    parseNonNegative(q.Get("failed")),
 		Truncated: q.Get("more") == "1",
 	}
 

@@ -1,7 +1,16 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Tokajer
 
-// Package config loads, validates and reloads the TOML configuration.
+// Package config loads and validates the TOML configuration.
+//
+// It does not reload it, and said it did until 2026-09-21. There is no reload
+// anywhere in the tree and no seam for one: the loaded *Config is handed to
+// the listener set, the delivery manager, the dashboard, the API and the
+// metrics registry, each of which holds it for the life of the process, so
+// there is no point at which a new one could be swapped in safely. Changing
+// the configuration means restarting the service, which is what the guides
+// document. Adding reload would start with giving those consumers a snapshot
+// boundary, not with a function here.
 package config
 
 import (

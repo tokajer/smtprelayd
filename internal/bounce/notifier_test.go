@@ -31,7 +31,13 @@ func testNotifier(t *testing.T, cfg *config.Config) (*Notifier, *spool.Spool, *s
 	if err != nil {
 		t.Fatal(err)
 	}
-	st, err := store.Open(t.TempDir(), discardLog(), 90, true)
+	// The store is opened with the same retain_subjects the configuration
+	// carries, which is how cmd/smtprelayd wires the two. Hardcoding true
+	// here while a test flipped only the config field meant the two halves
+	// disagreed in a way the service cannot reach -- and the digest's
+	// redaction test was then checking a second copy of the policy in this
+	// package rather than the store's own, which is the one that runs.
+	st, err := store.Open(t.TempDir(), discardLog(), 90, cfg.History.RetainSubjects)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -122,7 +128,7 @@ func TestDispatchComposesDigestWithLoopPreventionProperties(t *testing.T) {
 		t.Errorf("route = %q, want the configured notify_route", meta.Envelope.Route)
 	}
 
-	f, err := sp.Open(meta.ID)
+	f, err := sp.OpenBody(meta.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -156,7 +162,7 @@ func TestDispatchRedactsSubjectWhenRetentionDisabled(t *testing.T) {
 	if !ok {
 		t.Fatal("digest not claimable")
 	}
-	f, err := sp.Open(meta.ID)
+	f, err := sp.OpenBody(meta.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -281,7 +287,7 @@ func TestNotifyEnqueuesWithLoopPrevention(t *testing.T) {
 		t.Errorf("recipients = %v, want the global bounce.notify", meta.Envelope.To)
 	}
 
-	f, err := sp.Open(meta.ID)
+	f, err := sp.OpenBody(meta.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -331,7 +337,7 @@ func TestDigestStillRendersItsHeaderBlock(t *testing.T) {
 	if !ok {
 		t.Fatal("dispatch queued nothing")
 	}
-	f, err := sp.Open(meta.ID)
+	f, err := sp.OpenBody(meta.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -452,4 +458,33 @@ func tail(s string) string {
 		return "..." + s[len(s)-400:]
 	}
 	return s
+}
+
+// bounce.max_per_hour suppresses sending, not recording, so nothing drains
+// the pending map while the cap holds. The IDs past maxPendingPerClient are
+// therefore counted rather than kept: the digest lists at most
+// maxDigestEntries of them anyway, and every failure is a history row.
+func TestPendingIsBoundedPerClient(t *testing.T) {
+	n := New(&config.Config{}, nil, nil, discardLog())
+	const recorded = maxPendingPerClient + 500
+	for i := 0; i < recorded; i++ {
+		n.RecordFail("printers", fmt.Sprintf("Q%015d", i))
+	}
+
+	n.mu.Lock()
+	kept := len(n.pending["printers"])
+	overflow := n.overflow["printers"]
+	n.mu.Unlock()
+
+	if kept != maxPendingPerClient {
+		t.Fatalf("kept %d queue IDs, want the cap of %d", kept, maxPendingPerClient)
+	}
+	if overflow != recorded-maxPendingPerClient {
+		t.Fatalf("overflow counted %d, want %d", overflow, recorded-maxPendingPerClient)
+	}
+	// The reported total is still the true one: a digest that undercounts
+	// what failed is worse than one that lists fewer of them.
+	if got := n.Pending(); got != recorded {
+		t.Fatalf("Pending() = %d, want %d", got, recorded)
+	}
 }

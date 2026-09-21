@@ -31,7 +31,7 @@ func testRunner(t *testing.T, cfg *config.Config, c config.Canary) (*Runner, *sp
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = st.Close() })
-	return New(cfg, c, sp, st, discardLog()), sp, st
+	return New(c, cfg.Service.Hostname, time.Duration(cfg.Queue.MaxLifetimeHours)*time.Hour, sp, st, discardLog()), sp, st
 }
 
 func baseCfg() *config.Config {
@@ -87,7 +87,7 @@ func TestSendEnqueuesAnOrdinaryNonNotificationCanaryMessage(t *testing.T) {
 		t.Errorf("Route = %q, want the configured route", meta.Envelope.Route)
 	}
 
-	f, err := sp.Open(meta.ID)
+	f, err := sp.OpenBody(meta.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -141,8 +141,8 @@ func TestSendDistinguishesTwoCanariesByName(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = st.Close() })
 
-	a := New(cfg, config.Canary{Name: "m365-daily", Sender: "canary@example.at", Recipient: "ops@example.at", Route: "m365", IntervalMinutes: 1440}, sp, st, discardLog())
-	b := New(cfg, config.Canary{Name: "legacy-daily", Sender: "canary@example.at", Recipient: "ops@example.at", Route: "legacy", IntervalMinutes: 1440}, sp, st, discardLog())
+	a := New(config.Canary{Name: "m365-daily", Sender: "canary@example.at", Recipient: "ops@example.at", Route: "m365", IntervalMinutes: 1440}, cfg.Service.Hostname, time.Hour, sp, st, discardLog())
+	b := New(config.Canary{Name: "legacy-daily", Sender: "canary@example.at", Recipient: "ops@example.at", Route: "legacy", IntervalMinutes: 1440}, cfg.Service.Hostname, time.Hour, sp, st, discardLog())
 
 	if err := a.send(time.Now()); err != nil {
 		t.Fatal(err)
