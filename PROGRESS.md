@@ -4599,14 +4599,17 @@ Unchanged, plus:
       per-machine product — decided client-side before the package is even
       opened, so nothing in `smtprelayd.wxs` can affect it. See that
       session's entry above for the verbose-log evidence
-- [ ] Linux `.deb` install → configure → start → stop cycle on Debian/Ubuntu
-      (the `.rpm` path is fully verified on Fedora; the `.deb` has a smoke
-      test only, 2026-08-21, run inside WSL on the MSI test VM `ATAXVM-STSC`
-      rather than a standalone Debian/Ubuntu host or VM — three
-      deployment-config faults found and fixed with no code change (config
-      file mode, `data_dir` pointed at `/etc/smtprelayd` instead of
-      `/var/lib/smtprelayd`, missing client CIDR), see the twenty-fifth
-      session above; still not the verification this item asks for)
+- [x] Linux `.deb` install → configure → start → stop cycle on Debian/Ubuntu
+      — **accepted 2026-09-21** on the evidence there is: ".deb passt." The
+      `.rpm` path is fully verified on Fedora and the two share
+      `postinstall.sh`; the `.deb` itself has a smoke test from 2026-08-21,
+      run inside WSL on the MSI test VM `ATAXVM-STSC` rather than a
+      standalone Debian/Ubuntu host, which found and fixed three
+      deployment-config faults with no code change (config file mode,
+      `data_dir` pointed at `/etc/smtprelayd` instead of
+      `/var/lib/smtprelayd`, missing client CIDR) — see the twenty-fifth
+      session above. Closed on judgement, not on a standalone-host run;
+      reopen if a Debian/Ubuntu deployment ever misbehaves.
 - [ ] Windows service start failure actually reported to the SCM — added
       2026-08-21, reasoned from the kardianos/service contract and verified
       by unit/race tests only, never against a real Windows service: break
@@ -4649,10 +4652,26 @@ Unchanged, plus:
       nothing. **Confirmed on hardware same session**: install, and an
       interactive Apps & Features uninstall showing the Modify page's
       `CLEANDATA` checkbox, both checked and unchecked, "beide fälle
-      funktionieren." Not yet confirmed: the existing hardware-verified MSI
-      upgrade cycle surviving the wrap, and SmartScreen friction on the new
-      unsigned `.exe` (flagged as a possible regression versus today's
-      unsigned `.msi`, not yet observed either way).
+      funktionieren."
+
+      **Upgrade through the wrapper verified on hardware 2026-09-21**:
+      `setup.exe` version B over an installation made by `setup.exe` version
+      A upgrades cleanly — one Apps & Features entry, one service
+      registration, binary replaced, service still running. That was the open
+      half of this item, and it is the path an operator using the `.exe`
+      actually takes.
+
+      **But the mixed path is broken, found the same day.** Installing from
+      the raw `.msi` and later upgrading with `setup.exe` leaves **two
+      entries in the Control Panel**. It is reachable because `release.yml`
+      ships both artifacts, so an existing `.msi`-based installation upgraded
+      with the `.exe` hits it. Tracked as its own open defect below; the
+      cause is not yet identified and must not be guessed at, since the two
+      plausible ones need different fixes.
+
+      Still not confirmed: SmartScreen friction on the unsigned `.exe`
+      (flagged as a possible regression versus today's unsigned `.msi`, not
+      yet observed either way).
 - [x] CI workflow that runs on every push/PR (`.github/workflows/ci.yml`):
       gofmt, vet, `go test -race`, the banned-import check and govulncheck,
       plus a cross-compile job for all three targets
@@ -4821,6 +4840,63 @@ here rather than only in that file:
   set `Host` to the configured address.
 
 ## Open defects
+
+### Two Control Panel entries after `.msi` → `setup.exe` upgrade (2026-09-21)
+
+Found on hardware. Installing version A from the raw
+`smtprelayd-<version>-amd64.msi` and then upgrading with
+`smtprelayd-<version>-amd64-setup.exe` leaves two entries in Apps & Features
+instead of one. `setup.exe` over `setup.exe` is clean (verified the same day),
+and so was `.msi` over `.msi` back on 2026-08-18; it is only the crossing
+that breaks.
+
+Why it is reachable at all: `release.yml` ships both artifacts, the `.msi`
+"for scripted/enterprise deployment". Any installation made before the
+bundle existed — which is every Windows installation so far — is an
+`.msi`-based one, so the first upgrade with the `.exe` takes exactly this
+path.
+
+**The cause is not yet identified, and there are two candidates that need
+different fixes.** Both fit "two entries"; which one it is decides the
+change, so it must not be guessed:
+
+1. **The bundle and its own chained MSI are both registered.** Burn
+   registers the bundle in ARP; the wrapped MSI registers itself too unless
+   it is told not to. `ARPSYSTEMCOMPONENT` appears nowhere in this tree, so
+   it has never been set. Signature: two entries, **same version** (B), one
+   of them the bundle. Fix: `<MsiProperty Name="ARPSYSTEMCOMPONENT"
+   Value="1" />` on the chained `MsiPackage`, so only the bundle is visible.
+   This would also mean `setup.exe` → `setup.exe` has been showing two
+   entries all along and the check on 2026-09-21 counted them as one.
+2. **The chained MSI did not major-upgrade the pre-existing product.**
+   `smtprelayd.wxs` has `<MajorUpgrade Schedule="afterInstallInitialize">`
+   and its own `UpgradeCode`; the bundle has a second, independent
+   `UpgradeCode` and its own related-bundle logic. If the inner upgrade did
+   not fire, A stays registered and the bundle adds B. Signature: two
+   entries with **different versions** (A and B). Fix is in the MSI's
+   upgrade detection, not in the bundle.
+
+**The one check that decides it**, on the machine in that state:
+
+```powershell
+Get-ItemProperty HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*,
+                 HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\* |
+  Where-Object DisplayName -like '*smtprelayd*' |
+  Select-Object DisplayName, DisplayVersion, Publisher, BundleVersion, UninstallString,
+                SystemComponent, PSChildName | Format-List
+```
+
+A `PSChildName` that is a GUID in braces is the MSI's ProductCode; one that
+is the bundle's id with `BundleVersion` set is Burn's. Two different
+`DisplayVersion` values point at candidate 2, two identical ones at
+candidate 1.
+
+**Also worth deciding rather than fixing:** the mixed path exists only
+because two artifacts ship. `setup.exe /uninstall /quiet CLEANDATA=1`
+already covers the scripted case the raw `.msi` was kept for, so shipping the
+`.exe` alone would remove this defect class outright instead of making two
+upgrade layers agree across an artifact boundary. That is a packaging
+decision, not a bug fix.
 
 ### Deferred findings from the seventh review (2026-09-17) — all resolved
 
@@ -5113,7 +5189,12 @@ move, no symbol renamed.
 
 ## Open questions
 
-- Tenant, mailbox and sending domain for the Microsoft 365 route.
+- ~~Tenant, mailbox and sending domain for the Microsoft 365 route.~~
+  **Answered 2026-09-21**: "MS365 passt und funktioniert." The route is
+  configured and delivering in the live deployment, so the values exist where
+  they need to; they are deliberately not written down here, since a tenant id
+  and a sending domain in the handover document is operational detail this
+  file has no reason to carry.
 - ~~Should a failed token acquisition at startup abort, or only be logged?~~
   **Answered 2026-08-21**: abort, and log. `delivery.Manager.VerifyTokens`
   eagerly fetches a token for every xoauth2 route right after `delivery.New`,

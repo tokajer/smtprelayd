@@ -60,7 +60,7 @@
 
   <Bundle Name="smtprelayd"
           Version="$(var.Version)"
-          Manufacturer="Tokajer"
+          Manufacturer="smtprelayd community"
           UpgradeCode="2ab0d134-9ff4-49c4-bf86-1c63c7f27540">
 
     <BootstrapperApplicationRef Id="WixStandardBootstrapperApplication.HyperlinkLicense">
