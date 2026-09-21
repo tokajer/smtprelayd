@@ -251,12 +251,25 @@ attacker-influenced values and writes them into a message.
   it.** A browser sits inside the loopback boundary and resolves names on
   someone else's behalf, so a page the operator visits can point a name it
   controls at 127.0.0.1 and then talk to the dashboard same-origin — DNS
-  rebinding. Both the dashboard and a loopback metrics listener therefore
-  refuse any request whose `Host` is not `127.0.0.1`, `[::1]` or `localhost`,
-  with or without the configured port, answering `421 Misdirected Request`. A
-  reverse proxy placed in front must set `Host` to the configured address.
-  The `/api/v1/*` endpoints need no such check: they want a bearer token,
-  which a rebound page cannot obtain.
+  rebinding. The dashboard's listener and a loopback metrics listener
+  therefore refuse any request whose `Host` is not `127.0.0.1`, `[::1]` or
+  `localhost`, with or without the configured port, answering
+  `421 Misdirected Request`. A reverse proxy placed in front must set `Host`
+  to the configured address. The check is one implementation,
+  `httpx.RequireLoopbackHost`, applied to the **listener** — not to a handler
+  mounted on it.
+
+  **Corrected 2026-09-21.** This bullet used to read "The `/api/v1/*`
+  endpoints need no such check: they want a bearer token, which a rebound
+  page cannot obtain", and the code matched it: the check lived inside
+  `web.Server.Handler()`, so the API mounted beside the dashboard on the same
+  socket was never covered. That reasoning holds for every API endpoint but
+  one. `GET /api/v1/health` deliberately needs no bearer token, and it
+  reports the version, the uptime, every route name, each route's auth
+  mechanism and whether it currently holds a valid token — all of which a
+  rebound page could read. The check now wraps the combined mux in
+  `cmd/smtprelayd.loopbackHandler`, so it covers `/api/v1/*` and whatever is
+  mounted there next.
 - **The metrics endpoint may bind beyond loopback, but only authenticated and
   only over TLS.** Unlike the dashboard, a monitoring system can present a
   credential, so this is a token check rather than a refusal: a read-scope

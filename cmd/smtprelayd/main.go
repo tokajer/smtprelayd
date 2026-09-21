@@ -35,10 +35,10 @@ import (
 	"github.com/tokajer/smtprelayd/internal/canary"
 	"github.com/tokajer/smtprelayd/internal/config"
 	"github.com/tokajer/smtprelayd/internal/delivery"
+	"github.com/tokajer/smtprelayd/internal/httpx"
 	"github.com/tokajer/smtprelayd/internal/listener"
 	"github.com/tokajer/smtprelayd/internal/logging"
 	"github.com/tokajer/smtprelayd/internal/metrics"
-	"github.com/tokajer/smtprelayd/internal/selftest"
 	"github.com/tokajer/smtprelayd/internal/spool"
 	"github.com/tokajer/smtprelayd/internal/store"
 	"github.com/tokajer/smtprelayd/internal/web"
@@ -82,15 +82,6 @@ func main() {
 		cmd = fs.Arg(0)
 	}
 
-	if earlyCommands()[cmd] {
-		if err := controlService(cmd, *configPath); err != nil {
-			fmt.Fprintln(os.Stderr, "smtprelayd:", err)
-			os.Exit(1)
-		}
-		fmt.Printf("smtprelayd: %s ok\n", cmd)
-		return
-	}
-
 	// A service started by the Windows SCM has no console and must go through
 	// kardianos/service so Stop() is reachable; svc.IsWindowsService() is what
 	// isWindowsService() reports on Windows and is always false elsewhere.
@@ -123,81 +114,24 @@ func main() {
 		}
 	}
 
-	if err := run(cmd, *configPath, *console, *outPath, *force, *days, *scope); err != nil {
+	if err := run(cmd, cmdOptions{
+		configPath: *configPath, console: *console, outPath: *outPath,
+		force: *force, days: *days, scope: *scope,
+	}); err != nil {
 		fmt.Fprintln(os.Stderr, "smtprelayd:", err)
 		os.Exit(1)
 	}
 }
 
-func run(cmd, configPath string, console bool, outPath string, force bool, days int, scope string) error {
-	switch cmd {
-	case "version":
-		fmt.Println("smtprelayd", version)
-		return nil
-
-	case "secure-datadir":
-		return secureDataDir(configPath)
-
-	case "purge-datadir":
-		return purgeDataDir(configPath)
-
-	case "protect-secret":
-		return protectSecret(outPath)
-
-	case "token":
-		return newToken(scope, os.Stdout)
-
-	case "gen-cert":
-		return genCert(configPath, force, days, os.Stdout)
-
-	case "check":
-		cfg, err := config.Load(configPath)
-		if err != nil {
-			return err
-		}
-		if err := checkBind(cfg, os.Stdout); err != nil {
-			return err
-		}
-		fmt.Printf("configuration OK: %d listener(s), %d client(s), %d route(s)\n",
-			len(cfg.Listeners), len(cfg.Clients), len(cfg.Routes))
-		return nil
-
-	case "selftest":
-		cfg, err := config.Load(configPath)
-		if err != nil {
-			return err
-		}
-		notes, err := selftest.Run(cfg, 10*time.Second)
-		for _, n := range notes {
-			fmt.Println("note:", n)
-		}
-		if err != nil {
-			return err
-		}
-		// A note means the probe never reached the relay decision on that
-		// listener, so an unqualified pass would overstate what just
-		// happened -- which is precisely what selftest.Run's contract says
-		// the caller must not do.
-		if len(notes) > 0 {
-			fmt.Printf("open relay self-test found no open relay, but %d listener(s) were not exercised; see the note(s) above\n",
-				len(notes))
-			return nil
-		}
-		fmt.Println("open relay self-test passed")
-		return nil
-
-	case "run":
-		return serve(context.Background(), configPath, console, nil)
-
-	default:
-		// knownCommand rather than a bare error: a command that is in the
-		// table but not in this switch is a wiring mistake, and saying so is
-		// more use than "unknown command" for something the help lists.
-		if knownCommand(cmd) {
-			return fmt.Errorf("command %q is documented but not wired up; this is a bug", cmd)
-		}
+// run dispatches one command through the table in commands.go. There is no
+// switch here any more and no "documented but not wired up" branch: the table
+// carries the handler, so a command that exists is a command that runs.
+func run(cmd string, o cmdOptions) error {
+	c, ok := lookupCommand(cmd)
+	if !ok {
 		return fmt.Errorf("unknown command %q, see -h", cmd)
 	}
+	return c.handler(o)
 }
 
 // serve runs the relay until ctx is cancelled. The foreground and systemd
@@ -519,25 +453,42 @@ func startHTTP(ctx context.Context, bg *sync.WaitGroup, cfg *config.Config,
 	}
 	as := api.New(cfg, st, sp, reg, version, log)
 
-	// The dashboard and the JSON API share one listener, per
-	// docs/dev/PHASE4-PLAN.md: the api handler is mounted under /api/v1/
-	// with that prefix stripped, so its own routes are registered without
-	// it, and everything else falls through to the dashboard.
-	mux := http.NewServeMux()
-	mux.Handle("/api/v1/", http.StripPrefix("/api/v1", as.Handler()))
-	mux.Handle("/", ws.Handler())
-
 	ln, err := web.Listen(cfg)
 	if err != nil {
 		log.Error("web: failed to bind", "error", err)
 		return err
 	}
 	bg.Go(func() {
-		if err := web.Serve(ctx, ln, mux, log); err != nil {
+		if err := web.Serve(ctx, ln, loopbackHandler(ws, as, log), log); err != nil {
 			log.Error("web listener stopped", "error", err)
 		}
 	})
 	return nil
+}
+
+// loopbackHandler assembles what the dashboard's listener serves.
+//
+// The dashboard and the JSON API share one socket, per
+// docs/dev/PHASE4-PLAN.md: the api handler is mounted under /api/v1/ with
+// that prefix stripped, so its own routes are registered without it, and
+// everything else falls through to the dashboard.
+//
+// The Host-header check wraps both, which is the point of this function
+// existing rather than the mux being built inline. config.Validate refuses a
+// non-loopback web.address, so loopback is this listener's whole
+// authentication -- and a browser sits inside that boundary. The check used
+// to live inside web.Server.Handler(), which covered /queue, /search and
+// /config but not the API mounted beside it: every API endpoint but one wants
+// a bearer token a rebound page cannot obtain, and GET /api/v1/health
+// deliberately wants none while reporting the version, the uptime, every
+// route name and whether each route holds a valid token. Guarding the
+// listener instead of one handler on it is what makes that hold for whatever
+// is mounted here next.
+func loopbackHandler(ws *web.Server, as *api.Server, log *slog.Logger) http.Handler {
+	mux := http.NewServeMux()
+	mux.Handle("/api/v1/", http.StripPrefix("/api/v1", as.Handler()))
+	mux.Handle("/", ws.Handler())
+	return httpx.RequireLoopbackHost(mux, log.With("component", "web"))
 }
 
 // routeNames and canaryNames are what the metrics registry is seeded with,

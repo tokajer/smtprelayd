@@ -828,6 +828,143 @@ func TestFailRetriesTheRenameItCannotCompleteAtOnce(t *testing.T) {
 	}
 }
 
+// The three tests below cover the give-up branches the retry tests above stop
+// short of. Every one of them is an obstruction that is never cleared, which
+// is the case where the accounting has to survive: a file that could not be
+// unlinked or moved is still occupying the filesystem the quota exists to
+// protect, so forgetting it loses those bytes until a restart re-reads the
+// directory. All three failures were reachable before these tests existed.
+
+// A Discard whose unlink never succeeds must leave the message accounted for.
+// Dropping the index entries first and then failing to remove the files left
+// them on disk charged to nobody -- invisible to the quota, to QueueDepth and
+// to Len for the life of the process.
+func TestDiscardKeepsWhatItCouldNotRemove(t *testing.T) {
+	dir := t.TempDir()
+	s, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, err := s.Enqueue(Envelope{Route: "r"}, strings.NewReader("body"), 0, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := s.spoolSize()
+	obstruct(t, filepath.Join(dir, "spool", "queue", id.String()+".eml"))
+
+	if err := s.Discard(id); err == nil {
+		t.Fatal("Discard reported success while the body was still on the disk")
+	}
+	if got := s.spoolSize(); got != before {
+		t.Errorf("the quota forgot %d bytes that are still on the disk (was %d, now %d)",
+			before-got, before, got)
+	}
+	if n := s.Len(); n != 1 {
+		t.Errorf("the live index holds %d messages, want 1: the files are still there", n)
+	}
+	if !s.Has(id) {
+		t.Error("Has reports the message is gone while its body is still on the disk")
+	}
+}
+
+// Fail's counterpart: a rename that never succeeds still has to charge the
+// message to the failed index, because whichever half did move is sitting in
+// spool/failed and the live index has already let it go.
+func TestFailChargesWhatItCouldNotMove(t *testing.T) {
+	dir := t.TempDir()
+	s, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, err := s.Enqueue(Envelope{Route: "r"}, strings.NewReader("body"), 0, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	meta, ok := s.Claim(time.Now().Add(time.Minute))
+	if !ok {
+		t.Fatal("nothing to claim")
+	}
+	before := s.spoolSize()
+	// The metadata's destination, so the body still moves: that is the split
+	// state the failed index has to describe.
+	obstruct(t, filepath.Join(dir, "spool", "failed", id.String()+".json"))
+
+	if err := s.Fail(meta, "permanent"); err == nil {
+		t.Fatal("Fail reported success while a half of the message had not moved")
+	}
+	if got := s.spoolSize(); got != before {
+		t.Errorf("the quota forgot %d bytes that are still on the disk (was %d, now %d)",
+			before-got, before, got)
+	}
+	if !s.Has(id) {
+		t.Error("Has reports the message is gone while its body is in spool/failed")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "spool", "failed", id.String()+".eml")); err != nil {
+		t.Errorf("the body did not arrive in spool/failed: %v", err)
+	}
+}
+
+// Requeue out of spool/failed writes the metadata after moving the body. A
+// failure there used to unlink the body it had just moved, which destroyed the
+// only copy of the message while leaving its metadata in spool/failed -- so
+// the dashboard went on listing it as requeueable and the quota went on
+// charging for a body that no longer existed. The body belongs back where it
+// came from.
+func TestRequeueFromFailedPutsTheBodyBackWhenTheMetadataWriteFails(t *testing.T) {
+	dir := t.TempDir()
+	s, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, err := s.Enqueue(Envelope{Route: "r"}, strings.NewReader("body"), 0, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	meta, ok := s.Claim(time.Now().Add(time.Minute))
+	if !ok {
+		t.Fatal("nothing to claim")
+	}
+	if err := s.Fail(meta, "permanent"); err != nil {
+		t.Fatal(err)
+	}
+	before := s.spoolSize()
+
+	// writeMeta opens its temporary file with O_CREATE|O_EXCL, so an
+	// obstruction at that path fails the write itself -- the one step between
+	// the body's two renames.
+	obstruct(t, filepath.Join(dir, "spool", "tmp", id.String()+".json"))
+
+	if err := s.Requeue(id); err == nil {
+		t.Fatal("Requeue reported success without writing the metadata")
+	}
+	failedBody := filepath.Join(dir, "spool", "failed", id.String()+".eml")
+	if _, err := os.Stat(failedBody); err != nil {
+		t.Fatalf("the body was not put back in spool/failed, so the message is lost: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "spool", "failed", id.String()+".json")); err != nil {
+		t.Errorf("the metadata left spool/failed although the requeue failed: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "spool", "queue", id.String()+".eml")); !os.IsNotExist(err) {
+		t.Error("a copy of the body was left in the queue directory with no metadata beside it")
+	}
+	if got := s.spoolSize(); got != before {
+		t.Errorf("the quota moved by %d bytes for a requeue that did not happen (was %d, now %d)",
+			got-before, before, got)
+	}
+
+	// And the message is still requeueable once the obstruction is gone,
+	// which is the whole point of putting the body back.
+	if err := os.RemoveAll(filepath.Join(dir, "spool", "tmp", id.String()+".json")); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Requeue(id); err != nil {
+		t.Fatalf("the message could not be requeued after the obstruction went: %v", err)
+	}
+	if !s.Has(id) {
+		t.Error("the requeued message is not in the spool")
+	}
+}
+
 // Claim promises the oldest due message, and the dispatcher relies on it:
 // that ordering is the only thing keeping a message from starving behind
 // younger ones on a busy route. Nothing tested it until Claim stopped

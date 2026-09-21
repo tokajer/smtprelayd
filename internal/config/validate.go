@@ -171,6 +171,19 @@ func newValidator(c *Config) *validator {
 
 // Validate enforces every rule from docs/guides/SECURITY.md that can be decided
 // without touching the network. Ambiguity is an error, never a warning.
+//
+// The order below is a contract, not a reading order. Three of the section
+// methods leave state on the validator that later ones read, so reordering
+// two lines produces errors about values the operator never wrote:
+//
+//   - listeners() sets needsCert and anyPublic, which tls() and clients() read
+//   - clients() fills clientNames, which canaries() checks against
+//   - routes() fills routeNames and counts the defaults, which clientRoutes(),
+//     bounce() and canaries() all check against
+//
+// Everything else is independent. The fields carry the same note at their
+// declaration; it is repeated here because this is where the order is
+// actually written down.
 func (c *Config) Validate() error {
 	v := newValidator(c)
 	v.service()

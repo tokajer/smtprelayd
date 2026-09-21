@@ -98,13 +98,29 @@ func (r *rateLimiter) allow(name string, limit int, now time.Time) bool {
 	return true
 }
 
-// connCounter enforces concurrent connection caps. Keys are client names for
-// allowlisted sources and the remote address for unmatched ones, so a key is
-// attacker-influenced and an exhausted entry must not be left behind.
+// connCounter enforces concurrent connection caps. Keys are built by
+// connKeyClient and connKeyUnmatched below, so a key is attacker-influenced
+// and an exhausted entry must not be left behind.
 type connCounter struct {
 	mu sync.Mutex
 	n  map[string]int
 }
+
+// connCounter holds two key spaces, and a prefix on each is what keeps them
+// apart. Without one, a client named "unmatched:10.0.0.5" -- which
+// config.ValidName permits, since it is printable ASCII with no quote or
+// backslash -- would share its connection budget with the unmatched source at
+// that address, a budget of two. config.reservedNames refuses exactly this
+// kind of collision in the bounce-grouping key space; this one had no such
+// defence, and a prefix on both sides is cheaper than a second reserved-name
+// list.
+
+// connKeyClient is the counter key for an allowlisted client's connections.
+func connKeyClient(name string) string { return "client:" + name }
+
+// connKeyUnmatched is the counter key for an unauthorised source's
+// connections, which is its remote address.
+func connKeyUnmatched(addr string) string { return "unmatched:" + addr }
 
 func newConnCounter() *connCounter { return &connCounter{n: map[string]int{}} }
 

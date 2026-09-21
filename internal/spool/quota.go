@@ -17,14 +17,24 @@ import (
 // client that produced nothing but permanent failures fill the disk without
 // the quota ever seeing it.
 //
+// All three totals mean message bodies: the live index sums Envelope.Size and
+// the failed index the body's own size on disk, which differ only by the
+// per-copy Received header Commit prepends. The metadata file is in neither,
+// so the total understates the directories by one small JSON file per
+// message -- uniform, a few hundred bytes, and against a ceiling in
+// gigabytes. It used to be counted on the failed side only, which made a
+// message grow as it moved from queued to failed.
+//
 // The three totals are read under their own locks, one after another, never
 // nested. A message moving from the live index to spool/failed between two of
 // those reads is therefore counted twice or not at all, for as long as the
-// next lock acquisition takes. That is deliberate: the alternative is one
-// lock over the queue, the failed mirror and the ledger, which is what made a
-// retention sweep stop mail intake. The error it admits is one message's size
-// against a ceiling measured in gigabytes, and it cannot accumulate -- every
-// call recomputes from the three running totals.
+// next lock acquisition takes; requeueFailed admits the same skew in the other
+// direction, entering the live index before it leaves the failed one. That is
+// deliberate: the alternative is one lock over the queue, the failed mirror
+// and the ledger, which is what made a retention sweep stop mail intake. The
+// error it admits is one message's size against a ceiling measured in
+// gigabytes, and it cannot accumulate -- every call recomputes from the three
+// running totals.
 func (s *Spool) usedBytes() int64 {
 	s.mu.Lock()
 	live := s.indexBytes

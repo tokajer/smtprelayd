@@ -148,27 +148,58 @@ func (n *Notifier) dispatch(now time.Time) {
 
 		n.mu.Lock()
 		capped := n.sentThisHour >= n.cfg.Bounce.MaxPerHour
-		if capped {
-			// Recorded for the next hour rather than dropped, per the
-			// volume cap's design: exceeding it suppresses sending, not
-			// the underlying record of what failed.
-			n.pending[client] = append(n.pending[client], ids...)
-			n.overflow[client] += overflow[client]
-		} else {
+		if !capped {
 			n.sentThisHour++
 		}
 		n.mu.Unlock()
 
 		if capped {
+			// Recorded for the next hour rather than dropped, per the
+			// volume cap's design: exceeding it suppresses sending, not
+			// the underlying record of what failed.
+			n.requeuePending(client, ids, overflow[client])
 			n.log.Warn("bounce notification suppressed: hourly volume cap reached",
 				"client", client, "queued_failures", len(ids)+overflow[client])
 			continue
 		}
 
 		if err := n.send(client, recipients, ids, overflow[client], now); err != nil {
+			// Put back, for the same reason the volume cap puts its own back:
+			// no mail went out, so the record of what failed must not go with
+			// it. A spool full enough to reject a digest, or a store that
+			// stopped answering, is exactly when the operator needs the next
+			// one -- and until this existed those failures were logged once
+			// and then existed only as history rows nobody was pointed at.
+			//
+			// The hourly budget is handed back too. It counts digests that
+			// actually went out, and charging one that produced no mail would
+			// suppress a different client's digest for it.
+			n.mu.Lock()
+			if n.sentThisHour > 0 {
+				n.sentThisHour--
+			}
+			n.mu.Unlock()
+			n.requeuePending(client, ids, overflow[client])
 			n.log.Error("sending bounce digest failed", "client", client, "error", err)
 		}
 	}
+}
+
+// requeuePending returns a client's failures to the next digest, bounded the
+// way RecordFail bounds them: ids past maxPendingPerClient are counted as
+// overflow instead of kept, so the digest's total stays honest and a client
+// whose digests keep being suppressed or keep failing cannot grow this
+// without limit.
+func (n *Notifier) requeuePending(client string, ids []string, overflow int) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	room := max(maxPendingPerClient-len(n.pending[client]), 0)
+	if len(ids) > room {
+		overflow += len(ids) - room
+		ids = ids[:room]
+	}
+	n.pending[client] = append(n.pending[client], ids...)
+	n.overflow[client] += overflow
 }
 
 // maxDigestEntries bounds how many failures one digest lists in full.

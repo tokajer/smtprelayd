@@ -224,6 +224,67 @@ func TestVolumeCapSuppressesAndCarriesOver(t *testing.T) {
 	}
 }
 
+// A digest that could not be enqueued must be retried, not logged once and
+// forgotten. The volume cap already carries its own suppressed failures over;
+// until this existed, a spool that refused the message dropped them instead --
+// and a spool refusing a write is exactly the situation the operator needs to
+// hear about.
+func TestDispatchCarriesOverFailuresWhenSendingFails(t *testing.T) {
+	cfg := baseCfg()
+	dataDir := t.TempDir()
+	sp, err := spool.Open(dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, err := store.Open(t.TempDir(), discardLog(), 90, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	n := New(cfg, sp, st, discardLog())
+
+	recordFailed(t, st, "SENDFAILMSGAAAA1", "printers")
+	n.RecordFail("printers", "SENDFAILMSGAAAA1")
+
+	// Removing the spool's temporary directory fails Stage for every message,
+	// which is the cheapest way to reach the error return of send: the quota
+	// is configured in whole gigabytes and cannot be made small enough.
+	if err := os.RemoveAll(filepath.Join(dataDir, "spool", "tmp")); err != nil {
+		t.Fatal(err)
+	}
+
+	now := time.Now()
+	n.dispatch(now)
+
+	if sp.Len() != 0 {
+		t.Fatalf("spool has %d messages, want 0: the enqueue was supposed to fail", sp.Len())
+	}
+	if got := n.Pending(); got != 1 {
+		t.Fatalf("Pending() = %d after a failed send, want 1: the failure was dropped", got)
+	}
+
+	// The hourly budget was handed back, so the retry is not charged for a
+	// digest that produced no mail.
+	n.mu.Lock()
+	sent := n.sentThisHour
+	n.mu.Unlock()
+	if sent != 0 {
+		t.Errorf("sentThisHour = %d after a digest that never went out, want 0", sent)
+	}
+
+	// Put the directory back: the next tick sends what was carried over.
+	if err := os.MkdirAll(filepath.Join(dataDir, "spool", "tmp"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	n.dispatch(now.Add(time.Minute))
+	if sp.Len() != 1 {
+		t.Fatalf("spool has %d messages after the retry, want 1", sp.Len())
+	}
+	if got := n.Pending(); got != 0 {
+		t.Errorf("Pending() = %d after a successful retry, want 0", got)
+	}
+}
+
 func TestRunReturnsImmediatelyWhenDigestMinutesIsZero(t *testing.T) {
 	cfg := baseCfg()
 	cfg.Bounce.DigestMinutes = 0

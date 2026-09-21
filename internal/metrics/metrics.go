@@ -44,6 +44,21 @@ func ConfigExpiry(cfg *config.Config) ExpirySource {
 // in-memory only and resets on restart: Checkmk polls continuously, so no
 // history is needed, and persisting counters would outlive the retry state
 // they describe.
+//
+// Despite the package name it is not only the exposition's backing store.
+// Status() is the read model the dashboard's route page and sidebar and the
+// JSON API's /queue endpoint all render from, which is why those two import
+// this package.
+//
+// **A nil *Registry is for tests, not for a running service.** The listener,
+// the dashboard and the API each guard their uses with a nil check, and
+// several of their doc comments used to describe the result as what happens
+// "if metrics are disabled". That was never reachable: cmd/smtprelayd builds
+// a registry unconditionally and hands the same one to everything, because
+// the listener's session-panic and journal-failure counters and the
+// dashboard's route page need it whether or not a metrics listener is bound.
+// metrics.enabled governs the HTTP endpoint alone. The nil case exists so a
+// test can construct a listener or a server without caring about counters.
 type Registry struct {
 	// expiry is read at scrape time for the expiry gauges; see ExpirySource.
 	expiry      ExpirySource

@@ -97,43 +97,12 @@ func get(t *testing.T, h http.Handler, target string) *httptest.ResponseRecorder
 	return rec
 }
 
-// A page the operator visits can point a name it controls at 127.0.0.1 and
-// then talk to the dashboard same-origin, which is the whole loopback-is-the-
-// authentication decision undone. The Host header is the only part of such a
-// request that still carries the attacker's name.
-func TestNonLoopbackHostHeaderIsRefused(t *testing.T) {
-	cfg := testConfig(t, "")
-	srv, _, _ := testServer(t, cfg)
-	h := srv.Handler()
-
-	for _, host := range []string{
-		"rebind.attacker.example",
-		"rebind.attacker.example:8080",
-		"127.0.0.1.attacker.example",
-		"example.com",
-	} {
-		rec := httptest.NewRecorder()
-		r := httptest.NewRequest(http.MethodGet, "/config", nil)
-		r.Host = host
-		h.ServeHTTP(rec, r)
-		if rec.Code != http.StatusMisdirectedRequest {
-			t.Errorf("Host %q: status %d, want %d", host, rec.Code, http.StatusMisdirectedRequest)
-		}
-		if strings.Contains(rec.Body.String(), "oauth2") {
-			t.Errorf("Host %q: the config page was rendered anyway", host)
-		}
-	}
-
-	for _, host := range []string{"127.0.0.1", "127.0.0.1:8080", "localhost", "localhost:8080", "[::1]", "[::1]:8080"} {
-		rec := httptest.NewRecorder()
-		r := httptest.NewRequest(http.MethodGet, "/config", nil)
-		r.Host = host
-		h.ServeHTTP(rec, r)
-		if rec.Code != http.StatusOK {
-			t.Errorf("Host %q: status %d, want 200", host, rec.Code)
-		}
-	}
-}
+// The loopback Host-header check is not tested here any more, because it is
+// no longer this package's: it guards the listener, which this dashboard
+// shares with the JSON API, so wrapping only Handler() left /api/v1/
+// uncovered. The middleware is httpx.RequireLoopbackHost
+// (TestRequireLoopbackHost) and its application to both handlers is
+// TestLoopbackHandlerGuardsBothTheDashboardAndTheAPI in cmd/smtprelayd.
 
 func TestSecurityHeadersOnEveryPage(t *testing.T) {
 	cfg := testConfig(t, "")

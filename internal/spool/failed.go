@@ -54,7 +54,15 @@ func (s *Spool) indexFailed() error {
 		// The body's own size, not Envelope.Size: what the quota is about is
 		// what the filesystem is holding, and the two differ by the per-copy
 		// Received header Commit prepends.
-		s.putFailed(id, failedEntry{size: size + info.Size(), at: info.ModTime()})
+		//
+		// The body alone, not the body plus info.Size(): the live index counts
+		// Envelope.Size, which is the body and nothing else, so counting the
+		// metadata file here made a message grow by a few hundred bytes as it
+		// moved from queued to failed and left usedBytes summing two different
+		// definitions of what the spool occupies. Both now mean "the bodies",
+		// which understates the total by one metadata file per message -- a
+		// known, uniform few hundred bytes against a ceiling in gigabytes.
+		s.putFailed(id, failedEntry{size: size, at: info.ModTime()})
 	}
 	return nil
 }
@@ -94,8 +102,12 @@ func (s *Spool) Fail(m *Meta, reason string) error {
 	for _, ext := range []string{".json", ".eml"} {
 		src := filepath.Join(s.queue, m.ID.String()+ext)
 		dst := filepath.Join(s.failed, m.ID.String()+ext)
-		if fi, err := os.Stat(src); err == nil {
-			onDisk += fi.Size()
+		// The body only, matching both the live index and indexFailed; see
+		// the note there on why the metadata file is left out of all three.
+		if ext == ".eml" {
+			if fi, err := os.Stat(src); err == nil {
+				onDisk = fi.Size()
+			}
 		}
 		if err := renameRetry(src, dst); err != nil && !os.IsNotExist(err) {
 			// Recorded, not returned: the message has already left the live

@@ -37,8 +37,9 @@ type Server struct {
 	actions *queueaction.Actor
 }
 
-// New builds an API server. reg may be nil if metrics are disabled, in
-// which case uptime reports zero and route health omits token age.
+// New builds an API server. reg may be nil, in which case uptime reports
+// zero and route health omits token age -- that is for tests, not a mode the
+// service runs in; see the note on metrics.Registry.
 func New(cfg *config.Config, st *store.Store, sp *spool.Spool, reg *metrics.Registry, version string, log *slog.Logger) *Server {
 	return &Server{
 		cfg: cfg, store: st, spool: sp, metrics: reg, version: version,

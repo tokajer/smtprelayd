@@ -947,11 +947,31 @@ func (s *Spool) requeueFailed(id ID) error {
 	m.Envelope.normalizeKind()
 	m.Attempts, m.NextAttempt, m.LastError = 0, time.Now(), ""
 
-	if err := os.Rename(filepath.Join(s.failed, id.String()+".eml"), s.dataPath(id)); err != nil {
+	// Through renameRetry for the reason Fail uses it: on Windows a handle
+	// held by a scanner makes this fail with a sharing violation rather than
+	// with a missing file, and losing that race here refuses an operator's
+	// requeue for a message that is perfectly intact.
+	failedBody := filepath.Join(s.failed, id.String()+".eml")
+	if err := renameRetry(failedBody, s.dataPath(id)); err != nil {
 		return err
 	}
 	if err := s.writeMeta(&m); err != nil {
-		_ = removeRetry(s.dataPath(id))
+		// The body goes back where it came from rather than being unlinked.
+		// Its metadata is still in spool/failed, so unlinking here destroyed
+		// the only copy of the message while leaving the dashboard listing it
+		// as requeueable and the quota charging for it -- the one path in this
+		// package that could lose a body outright. Remove's "a stranded body
+		// is inert" reasoning does not apply: that is about the queue
+		// directory, which recover() sweeps, and the surviving metadata here
+		// is in spool/failed, which nothing sweeps.
+		//
+		// If the rollback itself fails the body is left in the queue
+		// directory, where recover() drops a body without metadata at the
+		// next start. Both errors are reported: the second one is why the
+		// message is now only in the journal.
+		if rerr := renameRetry(s.dataPath(id), failedBody); rerr != nil {
+			return errors.Join(err, rerr)
+		}
 		return err
 	}
 	if err := os.Remove(failedMeta); err != nil && !os.IsNotExist(err) {
@@ -978,14 +998,27 @@ func (s *Spool) Discard(id ID) error {
 	if !id.valid() {
 		return ErrInvalidID
 	}
+	// Leased for the duration, the way Requeue takes one, rather than dropped
+	// from the index up front. The lease is what keeps ClaimBatch and a
+	// concurrent Requeue or Discard away while the files go, so the unlinks
+	// can happen before the accounting changes -- and that order is the whole
+	// point: dropping both index entries first and then failing to unlink left
+	// the files on disk charged to nobody, invisible to the quota and to
+	// QueueDepth until a restart re-read the directories. It is the invariant
+	// Fail and SweepFailed already hold, and this was the last place that did
+	// not.
 	s.mu.Lock()
 	if s.leased[id] {
 		s.mu.Unlock()
 		return ErrBusy
 	}
-	s.dropLocked(id)
+	s.leased[id] = true
 	s.mu.Unlock()
-	s.dropFailed(id)
+	defer func() {
+		s.mu.Lock()
+		delete(s.leased, id)
+		s.mu.Unlock()
+	}()
 
 	removed := false
 	// Body before metadata, through removeRetry, for the reason Remove gives:
@@ -1006,8 +1039,23 @@ func (s *Spool) Discard(id ID) error {
 		}
 	}
 	if failure != nil {
+		// Whatever could not be unlinked is still occupying the filesystem the
+		// quota exists to protect, so it stays accounted for: both index
+		// entries are left exactly as they were, and the next Discard or the
+		// next restart tries again against state that still describes the
+		// disk.
 		return failure
 	}
+
+	// The files are gone, so the accounting follows. Dropping the live entry
+	// even when nothing was removed is deliberate: that is a message history
+	// still calls queued while its spool files have already vanished, and the
+	// index was the thing that was wrong.
+	s.mu.Lock()
+	s.dropLocked(id)
+	s.mu.Unlock()
+	s.dropFailed(id)
+
 	if !removed {
 		return ErrNotFound
 	}

@@ -32,7 +32,8 @@ type Server struct {
 
 	// metrics may be nil: the counters it feeds (session panics, journal
 	// write failures) are then simply not kept, which is what a test that
-	// does not care about them wants.
+	// does not care about them wants. cmd/smtprelayd always passes one; see
+	// the note on metrics.Registry.
 	metrics *metrics.Registry
 
 	tlsConf *tls.Config

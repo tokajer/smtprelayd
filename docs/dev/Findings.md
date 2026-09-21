@@ -94,15 +94,32 @@ approach, which removes the injection without dropping those devices.
 
 ## 2 — Medium: the dashboard does not check the Host header
 
-**Fixed 2026-08-12.** `config.IsLoopbackHostHeader` reduces a `Host` value to
-a bare host — with or without a port, IPv6 literal in brackets or not — and
-runs it through the same loopback test the validator uses, rather than a
-second spelling of it. `web.Server.requireLoopbackHost` wraps the dashboard
-mux; the loopback metrics listener got the same treatment, since the finding
-noted it is readable the same way and a loopback listener has no credential to
-check either. A metrics listener that binds beyond loopback is left alone: it
-is reached by its real name, so requiring loopback there would refuse every
+**Fixed 2026-08-12, placement corrected 2026-09-21.**
+`config.IsLoopbackHostHeader` reduces a `Host` value to a bare host — with or
+without a port, IPv6 literal in brackets or not — and runs it through the same
+loopback test the validator uses, rather than a second spelling of it. The
+loopback metrics listener got the same treatment, since the finding noted it
+is readable the same way and a loopback listener has no credential to check
+either. A metrics listener that binds beyond loopback is left alone: it is
+reached by its real name, so requiring loopback there would refuse every
 legitimate scrape.
+
+The original fix wrapped the dashboard **mux** — `web.Server.requireLoopbackHost`
+inside `web.Handler()` — and that was the wrong layer. The dashboard shares
+its listener with the JSON API, mounted under `/api/v1/` in
+`cmd/smtprelayd`, so the API inherited no check at all. `SECURITY.md` recorded
+that as intentional ("they want a bearer token, which a rebound page cannot
+obtain"), which is true of every API endpoint except the one that matters:
+`GET /api/v1/health` needs no token and reports the version, the uptime,
+every route name, each route's auth mechanism and whether it holds a valid
+token. The check is now `httpx.RequireLoopbackHost`, applied once to the
+combined mux in `cmd/smtprelayd.loopbackHandler`, so it covers both surfaces
+and anything mounted there later.
+
+This also reverses the 2026-09-18 decision to leave the two copies of the
+middleware alone as "indirection without a defect fixed". The defect was not
+in either body — it was that having two of them made the placement of each a
+local question, and one of the two answered it wrongly.
 
 The refusal is `421 Misdirected Request` with a message naming the remedy,
 not a bare 404, because the deployment `config.Validate` points operators at —

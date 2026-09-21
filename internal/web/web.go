@@ -76,8 +76,9 @@ type Server struct {
 }
 
 // New parses the embedded templates and builds a dashboard server. cfg, st,
-// sp and reg must outlive the server; nothing here mutates them, and reg may
-// be nil if metrics are disabled, in which case the route sidebar is empty.
+// sp and reg must outlive the server; nothing here mutates them. reg may be
+// nil, in which case the route sidebar is empty -- that is for tests, not a
+// mode the service runs in; see the note on metrics.Registry.
 func New(cfg *config.Config, st *store.Store, sp *spool.Spool, reg *metrics.Registry, version string, log *slog.Logger) (*Server, error) {
 	tmpl := make(map[string]*template.Template, len(dashboardPages))
 	// Load already validated service.timezone; a nil Location here just

@@ -4,18 +4,28 @@
 // Package httpx holds the request-parsing primitives the dashboard, the JSON
 // API and the metrics endpoint all need.
 //
-// They live here rather than in each of those packages because two of them
-// are security controls: BearerToken parses a credential, and SourceAddr
-// decides what a rate limiter counts and what the audit log blames. Three
-// copies of a control are three places to fix it and two places to forget.
+// They live here rather than in each of those packages because three of them
+// are security controls: BearerToken parses a credential, SourceAddr decides
+// what a rate limiter counts and what the audit log blames, and
+// RequireLoopbackHost is what completes the loopback trust boundary. Three
+// copies of a control are three places to fix it and two places to forget --
+// which is not hypothetical: RequireLoopbackHost was written out once in
+// internal/web and once in internal/metrics, the two copies had drifted to
+// different log fields and different remedies in their refusal text, and
+// because the dashboard's copy was applied inside its own handler rather
+// than to the listener, the JSON API mounted beside it on the same socket
+// was never covered at all.
 package httpx
 
 import (
+	"log/slog"
 	"net"
 	"net/http"
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/tokajer/smtprelayd/internal/config"
 )
 
 // BearerToken returns the credential from an Authorization header, or "" when
@@ -44,6 +54,44 @@ func SourceAddr(r *http.Request) string {
 		return r.RemoteAddr
 	}
 	return host
+}
+
+// RequireLoopbackHost refuses a request whose Host header names anything but
+// the local machine, answering 421 Misdirected Request.
+//
+// A loopback bind is not by itself the trust boundary for an endpoint with no
+// authentication: a browser sits inside that boundary and resolves names on
+// someone else's behalf, so a page the operator visits can point a name it
+// controls at 127.0.0.1 and then talk to the endpoint same-origin -- DNS
+// rebinding. The bind address is the server's own; the Host header is the
+// client's claim, and only a request that addressed loopback by name or
+// literal is served, which a rebound name cannot do.
+//
+// Apply it to the listener, not to one handler mounted on it. That is the
+// mistake this consolidates: the dashboard wrapped its own handler, so
+// /api/v1/ mounted beside it on the same socket inherited nothing -- and
+// while every other API endpoint wants a bearer token a rebound page cannot
+// obtain, GET /api/v1/health deliberately wants none, and it reports the
+// version, the uptime, every route name and whether each route holds a valid
+// token.
+//
+// The refusal names its own remedy rather than returning a bare 404, because
+// the deployment config.Validate points operators at -- a reverse proxy that
+// authenticates -- forwards the original Host by default and would otherwise
+// fail here with nothing to go on. log should already carry the component it
+// is guarding, since that is the only thing the two call sites differ in.
+func RequireLoopbackHost(next http.Handler, log *slog.Logger) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !config.IsLoopbackHostHeader(r.Host) {
+			log.Warn("request with a non-loopback Host header rejected",
+				"host", r.Host, "source", SourceAddr(r), "path", r.URL.Path)
+			http.Error(w, "this endpoint only answers requests addressed to loopback; "+
+				"a reverse proxy in front of it must set the Host header to the "+
+				"configured address", http.StatusMisdirectedRequest)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 // ParseTimeRange reads the since and until query parameters into the pointers

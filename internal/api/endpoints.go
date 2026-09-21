@@ -67,8 +67,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleBounces(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
-	c := decodeCursor(q.Get("cursor"))
-	c.Limit = limitFromQuery(q, c.Limit)
+	c := pageFromQuery(q)
 
 	class := q.Get("class")
 	if class != "" && class != "permanent" && class != "expired" {
@@ -92,15 +91,10 @@ func (s *Server) handleBounces(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	resp := struct {
+	writeJSON(w, http.StatusOK, struct {
 		Bounces    []store.BounceSummary `json:"bounces"`
 		NextCursor *string               `json:"next_cursor"`
-	}{Bounces: rows}
-	if hasMore {
-		next := encodeCursor(pageCursor{Offset: c.Offset + c.Limit, Limit: c.Limit})
-		resp.NextCursor = &next
-	}
-	writeJSON(w, http.StatusOK, resp)
+	}{Bounces: rows, NextCursor: nextCursor(c, hasMore)})
 }
 
 // validMessageStatus allowlists the status values docs/guides/API.md documents for
@@ -118,8 +112,7 @@ func validMessageStatus(s string) bool {
 
 func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
-	c := decodeCursor(q.Get("cursor"))
-	c.Limit = limitFromQuery(q, c.Limit)
+	c := pageFromQuery(q)
 
 	status := q.Get("status")
 	if !validMessageStatus(status) {
@@ -143,15 +136,10 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	resp := struct {
+	writeJSON(w, http.StatusOK, struct {
 		Messages   []*store.Message `json:"messages"`
 		NextCursor *string          `json:"next_cursor"`
-	}{Messages: rows}
-	if hasMore {
-		next := encodeCursor(pageCursor{Offset: c.Offset + c.Limit, Limit: c.Limit})
-		resp.NextCursor = &next
-	}
-	writeJSON(w, http.StatusOK, resp)
+	}{Messages: rows, NextCursor: nextCursor(c, hasMore)})
 }
 
 func (s *Server) handleMessage(w http.ResponseWriter, r *http.Request) {

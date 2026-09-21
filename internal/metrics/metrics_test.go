@@ -4,10 +4,12 @@
 package metrics
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -281,31 +283,53 @@ func TestRequireTokenGuardsTheExposition(t *testing.T) {
 
 // A loopback listener has no credential to check, so the Host header is the
 // only thing separating a local scrape from a browser that was told a name
-// resolving to 127.0.0.1.
-func TestRequireLoopbackHostGuardsTheExposition(t *testing.T) {
-	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	reached := false
-	h := requireLoopbackHost(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { reached = true }), log)
+// resolving to 127.0.0.1. The middleware itself is
+// httpx.RequireLoopbackHost, tested there; what is tested here is that Serve
+// actually reaches for it when the configured address is a loopback one,
+// which is this package's own decision and is what a public listener must
+// not get.
+func TestLoopbackServeGuardsTheExpositionWithTheHostHeader(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Defaults()
+	cfg.Metrics.Address = ln.Addr().String()
+	cfg.Metrics.Path = "/metrics"
 
-	cases := map[string]int{
-		"127.0.0.1:9100":          http.StatusOK,
-		"localhost:9100":          http.StatusOK,
-		"[::1]:9100":              http.StatusOK,
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	done := make(chan error, 1)
+	go func() { done <- Serve(ctx, cfg, ln, New(nil, nil, []string{"m365"}, nil, nil), log) }()
+
+	url := "http://" + ln.Addr().String() + "/metrics"
+	for host, want := range map[string]int{
+		"":                        http.StatusOK, // the address itself
+		"localhost":               http.StatusOK,
 		"rebind.attacker.example": http.StatusMisdirectedRequest,
 		"metrics.internal:9100":   http.StatusMisdirectedRequest,
+	} {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if host != "" {
+			req.Host = host
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("Host %q: %v", host, err)
+		}
+		_ = resp.Body.Close()
+		if resp.StatusCode != want {
+			t.Errorf("Host %q: status %d, want %d", host, resp.StatusCode, want)
+		}
 	}
-	for host, want := range cases {
-		reached = false
-		req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
-		req.Host = host
-		rec := httptest.NewRecorder()
-		h.ServeHTTP(rec, req)
-		if want == http.StatusOK && !reached {
-			t.Errorf("Host %q was refused with %d", host, rec.Code)
-		}
-		if want != http.StatusOK && (reached || rec.Code != want) {
-			t.Errorf("Host %q: reached=%v status=%d, want %d", host, reached, rec.Code, want)
-		}
+
+	cancel()
+	if err := <-done; err != nil {
+		t.Errorf("Serve returned %v", err)
 	}
 }
 

@@ -77,10 +77,6 @@ func New(sp *spool.Spool, st *store.Store, log *slog.Logger) *Mailer {
 // write is best-effort: a message that is queued but unrecorded still gets
 // delivered, whereas failing here would lose it.
 func (m *Mailer) Send(msg Message, lifetime time.Duration, now time.Time) (spool.ID, error) {
-	return enqueue(m.spool, m.store, m.log, msg, lifetime, now)
-}
-
-func enqueue(sp *spool.Spool, st *store.Store, log *slog.Logger, msg Message, lifetime time.Duration, now time.Time) (spool.ID, error) {
 	var b strings.Builder
 	fmt.Fprintf(&b, "From: %s\r\n", msg.HeaderFrom)
 	fmt.Fprintf(&b, "To: %s\r\n", strings.Join(msg.To, ", "))
@@ -102,13 +98,13 @@ func enqueue(sp *spool.Spool, st *store.Store, log *slog.Logger, msg Message, li
 	}
 	// maxBytes 0 is "no limit": these are a few kilobytes the relay wrote
 	// itself, not client input to bound.
-	id, err := sp.Enqueue(env, strings.NewReader(data), 0, lifetime)
+	id, err := m.spool.Enqueue(env, strings.NewReader(data), 0, lifetime)
 	if err != nil {
 		return "", fmt.Errorf("selfmail: enqueue: %w", err)
 	}
 
 	recipientsJSON, _ := json.Marshal(msg.To)
-	if rerr := st.RecordMessage(store.MessageRecord{
+	if rerr := m.store.RecordMessage(store.MessageRecord{
 		QueueID:      id.String(),
 		Client:       msg.Client,
 		Route:        msg.Route,
@@ -123,7 +119,7 @@ func enqueue(sp *spool.Spool, st *store.Store, log *slog.Logger, msg Message, li
 		ReceivedAt:   now,
 		ExpiresAt:    now.Add(lifetime),
 	}); rerr != nil {
-		log.Warn("recording a relay-composed message in history failed",
+		m.log.Warn("recording a relay-composed message in history failed",
 			"queue_id", id.String(), "listener", msg.Listener, "error", rerr)
 	}
 	return id, nil

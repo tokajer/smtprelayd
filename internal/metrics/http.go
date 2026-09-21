@@ -60,29 +60,6 @@ func requireToken(cfg *config.Config, next http.Handler, log *slog.Logger) http.
 	})
 }
 
-// requireLoopbackHost is the loopback listener's counterpart to requireToken:
-// where a public listener authenticates with a bearer token, a loopback one
-// authenticates by being unreachable — except from a browser, which resolves
-// names on the attacker's behalf. A page the operator visits can rebind a name
-// it controls to 127.0.0.1 and read the exposition, which carries route names
-// and queue depths.
-//
-// Applied only to a loopback listener. A public one is reached by its real
-// name or address, so requiring loopback in the Host header there would refuse
-// every legitimate scrape.
-func requireLoopbackHost(next http.Handler, log *slog.Logger) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !config.IsLoopbackHostHeader(r.Host) {
-			log.Warn("metrics request with a non-loopback Host header rejected",
-				"host", r.Host, "source", httpx.SourceAddr(r))
-			http.Error(w, "this endpoint only answers requests addressed to loopback",
-				http.StatusMisdirectedRequest)
-			return
-		}
-		next.ServeHTTP(w, r)
-	})
-}
-
 // Listen binds the metrics socket. Split from Serve so that an address
 // already in use fails startup synchronously, before the service reports
 // itself started; see web.Listen.
@@ -121,7 +98,14 @@ func Serve(ctx context.Context, cfg *config.Config, ln net.Listener, reg *Regist
 	if public {
 		handler = requireToken(cfg, handler, log)
 	} else {
-		handler = requireLoopbackHost(handler, log)
+		// The loopback listener's counterpart to requireToken: where a public
+		// listener authenticates with a bearer token, a loopback one
+		// authenticates by being unreachable -- except from a browser, which
+		// resolves names on the attacker's behalf and could otherwise read an
+		// exposition carrying route names and queue depths. Applied only here:
+		// a public listener is reached by its real name, so requiring loopback
+		// in the Host header there would refuse every legitimate scrape.
+		handler = httpx.RequireLoopbackHost(handler, log.With("component", "metrics"))
 	}
 
 	mux := http.NewServeMux()

@@ -130,11 +130,12 @@ func (s *Server) handle(ctx context.Context, conn net.Conn) {
 	// recipient, on every listener, regardless of TLS or authentication state.
 	client, bits, matched := s.match.Match(ss.remote)
 	if matched {
-		if !s.conns.acquire(client.Name, client.MaxConnections) {
+		key := connKeyClient(client.Name)
+		if !s.conns.acquire(key, client.MaxConnections) {
 			ss.reply(421, "4.7.0 too many connections for this client")
 			return
 		}
-		defer s.conns.release(client.Name, client.MaxConnections)
+		defer s.conns.release(key, client.MaxConnections)
 		ss.client = client
 		ss.clientBits = bits
 		ss.log = ss.log.With("client", client.Name)
@@ -142,7 +143,7 @@ func (s *Server) handle(ctx context.Context, conn net.Conn) {
 		// The refusal itself still happens at MAIL FROM, so that the reply
 		// names the actual reason. What changes here is only how much of the
 		// server an unauthorised source may occupy while getting there.
-		key := "unmatched:" + ss.remote.String()
+		key := connKeyUnmatched(ss.remote.String())
 		if !s.conns.acquire(key, unmatchedMaxConns) {
 			ss.reply(421, "4.7.0 too many connections")
 			return

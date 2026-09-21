@@ -6,6 +6,7 @@ package api
 import (
 	"encoding/base64"
 	"encoding/json"
+	"net/url"
 
 	"github.com/tokajer/smtprelayd/internal/store"
 )
@@ -40,6 +41,33 @@ type pageCursor struct {
 func encodeCursor(c pageCursor) string {
 	b, _ := json.Marshal(c)
 	return base64.RawURLEncoding.EncodeToString(b)
+}
+
+// pageFromQuery reads the pagination state one list request carries: the
+// cursor it was handed last time, narrowed by an explicit limit when it named
+// one. Every list endpoint begins with these two lines and none of them may
+// begin with only one of them -- a limit read without the cursor loses the
+// client's place, a cursor read without the limit ignores what it asked for.
+func pageFromQuery(q url.Values) pageCursor {
+	c := decodeCursor(q.Get("cursor"))
+	c.Limit = limitFromQuery(q, c.Limit)
+	return c
+}
+
+// nextCursor is the cursor for the page after the one just served, or nil
+// when there is none.
+//
+// The offset arithmetic lives here rather than in each handler because it was
+// the part every list endpoint repeated verbatim, and it is the part that is
+// invisible when wrong: an off-by-one is only noticed by a client that pages
+// to the end and either skips a row or loops. internal/web.pageLinks was
+// extracted on the same argument.
+func nextCursor(c pageCursor, hasMore bool) *string {
+	if !hasMore {
+		return nil
+	}
+	next := encodeCursor(pageCursor{Offset: c.Offset + c.Limit, Limit: c.Limit})
+	return &next
 }
 
 // decodeCursor parses an opaque cursor. An empty, invalid or tampered cursor

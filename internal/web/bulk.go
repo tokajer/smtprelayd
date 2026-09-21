@@ -63,12 +63,38 @@ type flash struct {
 	Text  string
 }
 
+// bulkAction is one of the two actions the queue page can apply to a set of
+// messages.
+//
+// Dispatch used to be the bare string "requeue" tested in three separate
+// places: the CSRF field name, the delete-all confirmation, and an if/else
+// whose else branch silently meant "delete" for any value that was not
+// "requeue". A value carries all three, so a third action cannot be added
+// with one of them left behind.
+type bulkAction struct {
+	// name appears in the CSRF field and action, and in the redirect's
+	// ?done= parameter that bulkFlash reads back.
+	name string
+
+	// confirmAll marks an action whose "all" scope is irreversible and so
+	// needs the confirmation interstitial's own field as well as the CSRF
+	// token.
+	confirmAll bool
+
+	apply func(*Server, *http.Request, spool.ID, string) queueaction.Outcome
+}
+
+var (
+	bulkRequeue = bulkAction{name: "requeue", apply: (*Server).requeueMessage}
+	bulkDelete  = bulkAction{name: "delete", confirmAll: true, apply: (*Server).deleteMessage}
+)
+
 func (s *Server) handleQueueRequeue(w http.ResponseWriter, r *http.Request) {
-	s.handleQueueBulk(w, r, "requeue")
+	s.handleQueueBulk(w, r, bulkRequeue)
 }
 
 func (s *Server) handleQueueDelete(w http.ResponseWriter, r *http.Request) {
-	s.handleQueueBulk(w, r, "delete")
+	s.handleQueueBulk(w, r, bulkDelete)
 }
 
 // handleQueueBulk applies one action to a set of messages: either the rows
@@ -78,11 +104,11 @@ func (s *Server) handleQueueDelete(w http.ResponseWriter, r *http.Request) {
 // because the queue view is what the operator is looking at when they ask
 // for it, and the two can differ -- a message with no spool copy is listed
 // there and is precisely the kind of entry that needs clearing.
-func (s *Server) handleQueueBulk(w http.ResponseWriter, r *http.Request, action string) {
+func (s *Server) handleQueueBulk(w http.ResponseWriter, r *http.Request, a bulkAction) {
 	// PostFormValue, not FormValue: the token and the selection must come
 	// from the submitted body, so a bare GET-shaped link carrying the same
 	// parameters cannot drive a bulk action.
-	if !s.csrf.verify(r.PostFormValue("csrf_"+action), "queue-"+action, "", time.Now()) {
+	if !s.csrf.verify(r.PostFormValue("csrf_"+a.name), "queue-"+a.name, "", time.Now()) {
 		http.Error(w, "invalid or expired form token", http.StatusForbidden)
 		return
 	}
@@ -112,7 +138,7 @@ func (s *Server) handleQueueBulk(w http.ResponseWriter, r *http.Request, action 
 		// Emptying the whole queue is irreversible, so the form that can do
 		// it is only rendered behind the confirmation interstitial. This is
 		// belt and braces for a request built by hand.
-		if action == "delete" && r.PostFormValue("confirm") != "delete-all" {
+		if a.confirmAll && r.PostFormValue("confirm") != "delete-all" {
 			http.Error(w, "deleting the whole queue must be confirmed", http.StatusBadRequest)
 			return
 		}
@@ -139,13 +165,7 @@ func (s *Server) handleQueueBulk(w http.ResponseWriter, r *http.Request, action 
 			res.Truncated = true
 			break
 		}
-		var outcome queueaction.Outcome
-		if action == "requeue" {
-			outcome = s.requeueMessage(r, id, details)
-		} else {
-			outcome = s.deleteMessage(r, id, details)
-		}
-		switch outcome {
+		switch a.apply(s, r, id, details) {
 		case queueaction.Done:
 			res.OK++
 		case queueaction.Cleared:
@@ -161,11 +181,11 @@ func (s *Server) handleQueueBulk(w http.ResponseWriter, r *http.Request, action 
 	// Logged whatever happens to the response: if the budget ran out or the
 	// operator navigated away, this line is the only record of how far an
 	// irreversible action got.
-	s.log.Info("bulk queue action", "action", action, "scope", scope, "source", r.RemoteAddr,
+	s.log.Info("bulk queue action", "action", a.name, "scope", scope, "source", r.RemoteAddr,
 		"ok", res.OK, "cleared", res.Cleared, "busy", res.Busy, "missing", res.Missing,
 		"failed", res.Failed, "incomplete", res.Truncated)
 
-	http.Redirect(w, r, "/queue?"+res.query(action).Encode(), http.StatusSeeOther)
+	http.Redirect(w, r, "/queue?"+res.query(a.name).Encode(), http.StatusSeeOther)
 }
 
 // activeQueueIDs lists the queue IDs the queue view currently shows, capped

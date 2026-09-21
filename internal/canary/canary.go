@@ -152,15 +152,19 @@ func waitUntil(ctx context.Context, deadline time.Time) bool {
 	}
 }
 
-// send composes and enqueues one canary message. Unlike a bounce digest it
-// is a perfectly ordinary message: Notification stays false, so a permanent
-// failure reaches bounce.Notifier.RecordFail through delivery.Manager.fail
-// exactly as any real message's would, reusing that existing alerting path
-// rather than building a second one. Client is set to the canary's own
-// Name, not a shared constant: internal/bounce groups digest entries by
-// Client, so distinct names keep each canary's failures reported
-// separately, and internal/config.Validate has already guaranteed no name
-// collides with a real client's.
+// send composes and enqueues one canary message.
+//
+// Unlike a bounce digest it is a perfectly ordinary message. Its Kind is
+// KindCanary and not KindNotification, which is what makes a permanent
+// failure reach bounce.Notifier.RecordFail through delivery.Manager.fail
+// exactly as any real message's would -- reusing that alerting path rather
+// than building a second one, since being reported is the whole purpose of a
+// canary.
+//
+// Client is the canary's own Name, not a shared constant: internal/bounce
+// groups digest entries by it, so distinct names keep each canary's failures
+// reported separately, and config.Validate has already guaranteed no canary
+// name collides with a real client's.
 func (r *Runner) send(now time.Time) error {
 	subject := fmt.Sprintf("[smtprelayd] canary %q %s", r.canary.Name, now.Format("2006-01-02 15:04:05 MST"))
 
@@ -169,12 +173,6 @@ func (r *Runner) send(now time.Time) error {
 		r.canary.Name, r.hostname, r.canary.Route)
 	body.WriteString("If it stops arriving on schedule, delivery through that route may be failing silently.\r\n")
 
-	// Notification stays false on purpose, so that a permanent failure
-	// reaches bounce.Notifier.RecordFail through delivery.Manager.fail
-	// exactly as a real message's would -- reusing that alerting path rather
-	// than building a second one. Client is the canary's own Name, because
-	// internal/bounce groups digest entries by it and config.Validate has
-	// already guaranteed the name collides with no client.
 	queueID, err := r.mailer.Send(selfmail.Message{
 		HeaderFrom:   r.canary.Sender,
 		EnvelopeFrom: r.canary.Sender,

@@ -19,7 +19,121 @@ fix below): the MSI installs without error, exactly one service registration
 remains (no duplicate), the on-disk binary is replaced, and the service keeps
 running afterwards. Uninstall remains unverified. Log rotation and Windows ACL
 verification at startup are complete.
-**Last session**: 2026-09-21 (fifty-second session) — An architectural review
+**Last session**: 2026-09-21 (fifty-third session) — A second architectural
+review of the whole tree, and everything from it acted on except the
+restructurings, which were deliberately deferred (see the end of this entry).
+The previous review moved code; this one found three defects and one
+misplaced security control, so those come first.
+
+**The loopback Host-header check was guarding the wrong thing.** It lived
+inside `web.Server.Handler()`, but the dashboard shares its socket with the
+JSON API, mounted under `/api/v1/` in `cmd/smtprelayd` — so the API inherited
+no check at all. `SECURITY.md` recorded that as intentional, on the grounds
+that every API endpoint wants a bearer token a rebound page cannot obtain.
+That is true of every endpoint but the one that matters: `GET
+/api/v1/health` deliberately wants none, and it reports the version, the
+uptime, every route name, each route's auth mechanism and whether each route
+currently holds a valid token. A page the operator visits could point a name
+it controls at 127.0.0.1 and read all of it same-origin. The check is now
+`httpx.RequireLoopbackHost`, applied once to the combined mux in
+`cmd/smtprelayd.loopbackHandler`, so it covers both surfaces and whatever is
+mounted there next. `SECURITY.md` and `docs/dev/Findings.md` carry the dated
+correction.
+
+This also reverses the fifty-second session's decision to leave the two
+copies of that middleware alone as "indirection without a defect fixed". The
+defect was not in either body — it was that having two of them made the
+placement of each a local question, and one of the two answered it wrongly.
+`internal/httpx` is consequently no longer a leaf: it imports
+`internal/config` for `IsLoopbackHostHeader`, which is already exported for
+serve-time use by design. No cycle; `config` imports nothing first-party.
+
+**`Discard` forgot bytes that were still on the disk.** It dropped the live
+index entry and the `spool/failed` entry before unlinking anything, so a
+removal that never succeeded left the files charged to nobody — invisible to
+the quota, `QueueDepth` and `Len` for the life of the process — and a
+surviving pair in the queue directory is re-indexed by `recover()` and
+delivered after the operator deleted it. It now takes a lease the way
+`Requeue` does (which is what keeps `ClaimBatch` away while the files go),
+unlinks first, and changes the accounting only for what actually went. This
+was the third site of an invariant `Fail` and `SweepFailed` already held and
+the only one that still got it wrong.
+
+**`requeueFailed` destroyed the message body when the metadata write
+failed.** After moving the body out of `spool/failed` it unlinked it on
+failure instead of putting it back, while the metadata stayed in
+`spool/failed` — so the dashboard went on listing the message as requeueable
+and the quota went on charging for a body that no longer existed. It was the
+one path in the package that could lose a body outright. The body is now
+renamed back, and the move uses `renameRetry` for the Windows
+sharing-violation reason `Fail`'s already did.
+
+**A bounce digest that could not be enqueued was dropped.** `dispatch` swaps
+`pending` out to a local, and a `send` failure logged one line and lost the
+queue IDs — while the branch immediately above it, the hourly volume cap,
+carries its own suppressed failures over deliberately. A spool full enough to
+refuse a digest is exactly when the operator needs the next one. Failures are
+now put back through `requeuePending`, bounded the way `RecordFail` bounds
+them, and the hourly budget is handed back too: it counts digests that went
+out, and charging one that produced no mail would suppress another client's.
+
+**Three tests for the give-up branches, which is where all of that lived.**
+The existing obstruction tests all clear the obstruction inside the retry
+window, so they covered `removeRetry` and `renameRetry` riding a race out and
+never the case where they give up — 87% statement coverage on `spool` whose
+uncovered remainder was exactly the error handling. `obstruct` needed no
+change; the tests just do not clean up. All four fixes fail without them, and
+the `Fail` test also caught the accounting asymmetry below.
+
+**The quota had two definitions of what the spool occupies.** The live index
+summed `Envelope.Size` (the body), the failed index the body *plus* its
+metadata file, so a message grew by a few hundred bytes as it moved from
+queued to failed. Both now mean the bodies; `usedBytes` states the resulting
+uniform understatement and the `requeueFailed` skew that mirrors it.
+
+**The command table carries its handler.** It held the name, the help and two
+flags but not the function, so `run` kept its own switch and a table entry
+with no case there was caught at runtime by "documented but not wired up;
+this is a bug". `run` is now a lookup and a call, the early-command block in
+`main` is gone (the four service verbs have handlers like everything else),
+and a missing handler is a test failure instead of an operator's error. It is
+the shape `internal/web`'s `dashboardPages` already used. The rendered help
+is byte-identical to `git show HEAD` output.
+
+**Also**: the queue page's bulk actions and the message page's single actions
+each dispatch on a value (`bulkAction`, `messageAction`) instead of a bare
+string tested in three places, whose `else` branch meant "delete" for
+anything that was not "requeue"; `api`'s two list endpoints share
+`pageFromQuery` and `nextCursor` rather than repeating the offset arithmetic
+(wire format unchanged); `connCounter`'s two key spaces are prefixed, so a
+client named `unmatched:<addr>` can no longer share an unauthorised source's
+budget; `selfmail.enqueue` folded into its only caller; `canary.send`'s
+rationale is written once and in terms of `Kind` rather than the legacy
+`Notification` field; `Validate`'s ordering contract is stated where the
+order is written; and the three doc comments claiming a nil `*metrics.Registry`
+is what happens "if metrics are disabled" now say what is true — it is for
+tests, `cmd/smtprelayd` always builds one, and `metrics.enabled` governs the
+HTTP endpoint alone.
+
+**Deliberately deferred, by decision**: the review's restructurings were
+listed and not done — extracting `failedStore` and `quotaLedger` as types out
+of `spool.Spool`, splitting the Prometheus exposition out of
+`internal/metrics` from the `Status()` read model the dashboard and API
+render from, a shared `internal/ratelimit` for the two identical per-minute
+token buckets (`listener.rateLimiter` and `delivery.routeLimiter`, ~50
+duplicated lines each), renaming `spool.Envelope.Client` to `Origin` for the
+three things it holds, `httpx.Serve` for the duplicated HTTP
+serve/shutdown blocks, and moving `rateLimiter`/`connCounter` out of
+`listener/match.go`. They are the next session's candidates.
+
+**Verified**: `gofmt` clean, `go vet ./...` clean, `go build ./...` and
+`GOOS=windows go build ./...` clean, `scripts/check-banned-imports.sh` clean
+on all three targets, full `go test ./...` green, and `go test -race` green
+over spool, bounce, listener, web and api. `gosec` and `govulncheck` were
+**not** run — neither is installed on this machine; CI still has to confirm
+them.
+
+**Session before that**: 2026-09-21 (fifty-second session) — An architectural review
 of the whole tree, then every finding from it acted on. The review was about
 structure rather than behaviour, so most of it moved code without changing
 what it does; three findings turned out to be defects and are listed first.
@@ -91,7 +205,7 @@ notifier's copy rather than the store's. The test now wires the store the way
 **`internal/config` no longer claims to reload.** Nothing in the tree ever
 has; `MEMORY.md` section 3 carries the dated correction.
 
-**Session before that**: 2026-09-21 (fifty-first session) — Two reviews, both acting
+**Three sessions ago**: 2026-09-21 (fifty-first session) — Two reviews, both acting
 on what the load measurement had exposed, and both ending in things the
 measurement said rather than things the code looked like.
 
