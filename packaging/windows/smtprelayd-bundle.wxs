@@ -58,6 +58,16 @@
 <Wix xmlns="http://schemas.microsoft.com/wix/2006/wi"
      xmlns:bal="http://schemas.microsoft.com/wix/BalExtension">
 
+  <!-- Manufacturer is the publisher every package of this project names:
+       smtprelayd.wxs's Manufacturer and nfpm.yaml's maintainer say the same.
+       Kept in step because the bundle and its own chained MSI each write an
+       ARP row, so a mismatch shows up as one product listed under two
+       publishers — which is what a field registry dump found on 2026-09-29,
+       when smtprelayd.wxs still said "Tokajer".
+
+       Distinct from the copyright line in every source file, which names the
+       copyright holder and is a legal attribution rather than a vendor
+       string. -->
   <Bundle Name="smtprelayd"
           Version="$(var.Version)"
           Manufacturer="smtprelayd community"

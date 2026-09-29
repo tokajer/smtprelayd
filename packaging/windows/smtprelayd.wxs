@@ -68,11 +68,17 @@
 -->
 <Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
 
+  <!-- Manufacturer is the publisher, and it has to match
+       smtprelayd-bundle.wxs: Burn registers the bundle in ARP and sets
+       ARPSYSTEMCOMPONENT on this chained MSI, so both rows exist and a
+       mismatch lists one product under two publishers. It said "Tokajer"
+       until 2026-09-29, when a field registry dump showed exactly that. Not
+       the same thing as the copyright holder named in every source file. -->
   <Product Id="*"
            Name="smtprelayd"
            Language="1033"
            Version="$(var.Version)"
-           Manufacturer="Tokajer"
+           Manufacturer="smtprelayd community"
            UpgradeCode="64270ec1-058e-489e-bd2d-284e42cb37af">
 
     <Package InstallerVersion="500" Compressed="yes" InstallScope="perMachine" Platform="x64" />

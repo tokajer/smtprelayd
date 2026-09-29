@@ -4661,13 +4661,14 @@ Unchanged, plus:
       half of this item, and it is the path an operator using the `.exe`
       actually takes.
 
-      **But the mixed path is broken, found the same day.** Installing from
-      the raw `.msi` and later upgrading with `setup.exe` leaves **two
-      entries in the Control Panel**. It is reachable because `release.yml`
-      ships both artifacts, so an existing `.msi`-based installation upgraded
-      with the `.exe` hits it. Tracked as its own open defect below; the
-      cause is not yet identified and must not be guessed at, since the two
-      plausible ones need different fixes.
+      **The mixed path is verified too, 2026-09-29**: `.msi` 0.7.1 then
+      `setup.exe` 0.7.2 over it, with Apps & Features showing one entry at
+      0.7.2 afterwards. The chained MSI's `MajorUpgrade` fires across the
+      artifact boundary and removes the old product — the two independent
+      upgrade codes agree, and Burn hides the inner MSI's ARP row itself. Both
+      upgrade paths are therefore covered: `.exe` over `.exe` and `.msi` over
+      `.exe`. The registry dump and the publisher mismatch it exposed are in
+      the defect section below.
 
       Still not confirmed: SmartScreen friction on the unsigned `.exe`
       (flagged as a possible regression versus today's unsigned `.msi`, not
@@ -4841,62 +4842,75 @@ here rather than only in that file:
 
 ## Open defects
 
-### Two Control Panel entries after `.msi` → `setup.exe` upgrade (2026-09-21)
+**None open as of 2026-09-29.** Everything below is closed and kept for its
+reasoning, not for action — the section has twice now listed defects that were
+already fixed, and a reader who trusts the heading loses time rediscovering
+them. Anything still open lives in the phase checklists above.
 
-Found on hardware. Installing version A from the raw
-`smtprelayd-<version>-amd64.msi` and then upgrading with
-`smtprelayd-<version>-amd64-setup.exe` leaves two entries in Apps & Features
-instead of one. `setup.exe` over `setup.exe` is clean (verified the same day),
-and so was `.msi` over `.msi` back on 2026-08-18; it is only the crossing
-that breaks.
+### The `.msi` → `setup.exe` upgrade path, resolved (2026-09-29)
 
-Why it is reachable at all: `release.yml` ships both artifacts, the `.msi`
-"for scripted/enterprise deployment". Any installation made before the
-bundle existed — which is every Windows installation so far — is an
-`.msi`-based one, so the first upgrade with the `.exe` takes exactly this
-path.
+Reported 2026-09-21 as "two versions in the Control Panel" after installing
+from the raw `.msi` and upgrading with `setup.exe`, and recorded here with two
+candidate causes. A registry dump from the machine in that state settled it,
+and **neither candidate was right**:
 
-**The cause is not yet identified, and there are two candidates that need
-different fixes.** Both fit "two entries"; which one it is decides the
-change, so it must not be guessed:
-
-1. **The bundle and its own chained MSI are both registered.** Burn
-   registers the bundle in ARP; the wrapped MSI registers itself too unless
-   it is told not to. `ARPSYSTEMCOMPONENT` appears nowhere in this tree, so
-   it has never been set. Signature: two entries, **same version** (B), one
-   of them the bundle. Fix: `<MsiProperty Name="ARPSYSTEMCOMPONENT"
-   Value="1" />` on the chained `MsiPackage`, so only the bundle is visible.
-   This would also mean `setup.exe` → `setup.exe` has been showing two
-   entries all along and the check on 2026-09-21 counted them as one.
-2. **The chained MSI did not major-upgrade the pre-existing product.**
-   `smtprelayd.wxs` has `<MajorUpgrade Schedule="afterInstallInitialize">`
-   and its own `UpgradeCode`; the bundle has a second, independent
-   `UpgradeCode` and its own related-bundle logic. If the inner upgrade did
-   not fire, A stays registered and the bundle adds B. Signature: two
-   entries with **different versions** (A and B). Fix is in the MSI's
-   upgrade detection, not in the bundle.
-
-**The one check that decides it**, on the machine in that state:
-
-```powershell
-Get-ItemProperty HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*,
-                 HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\* |
-  Where-Object DisplayName -like '*smtprelayd*' |
-  Select-Object DisplayName, DisplayVersion, Publisher, BundleVersion, UninstallString,
-                SystemComponent, PSChildName | Format-List
+```
+{D18939C6-...}  smtprelayd  0.7.2  Tokajer              SystemComponent=1
+                UninstallString: MsiExec.exe /I{D18939C6-...}
+{550d5a73-...}  smtprelayd  0.7.2  smtprelayd community BundleVersion=0.7.2.0
+                UninstallString: ...\Package Cache\...\setup.exe /uninstall
 ```
 
-A `PSChildName` that is a GUID in braces is the MSI's ProductCode; one that
-is the bundle's id with `BundleVersion` set is Burn's. Two different
-`DisplayVersion` values point at candidate 2, two identical ones at
-candidate 1.
+The test was `.msi` 0.7.1 first, then `setup.exe` 0.7.2 over it.
 
-**Also worth deciding rather than fixing:** the mixed path exists only
-because two artifacts ship. `setup.exe /uninstall /quiet CLEANDATA=1`
-already covers the scripted case the raw `.msi` was kept for, so shipping the
-`.exe` alone would remove this defect class outright instead of making two
-upgrade layers agree across an artifact boundary. That is a packaging
-decision, not a bug fix.
+**The upgrade works.** There is no 0.7.1 row left: the chained MSI's
+`MajorUpgrade` fired across the artifact boundary and took the old product
+with it, and the MSI product now reads 0.7.2. That was the thing actually at
+risk — the MSI has `UpgradeCode 64270ec1…` and the bundle a second,
+independent `2ab0d134…`, so the two upgrade layers had never been shown to
+agree. They do.
+
+**And the `ARPSYSTEMCOMPONENT` fix proposed for candidate 1 was already in
+effect.** Burn sets it on a chained `MsiPackage` itself — `SystemComponent=1`
+on the MSI row above — which hides that row from Programs and Features. So
+adding it to the bundle would have changed nothing, and adding it "because
+the symptom fits" would have been a fix credited with someone else's work.
+Worth keeping in mind for the next Burn question: that property is Burn's
+default, not something this packaging has to ask for.
+
+Both rows are 0.7.2, so nothing stale survives, and only one of the two is
+visible. **Confirmed on the machine 2026-09-29**: Apps & Features lists one
+entry, 0.7.2. So there was never a second product — what looked like "two
+versions" was the Programs and Features list not refreshed after the
+transaction, which caches and keeps showing the pre-upgrade entry until it is
+reopened.
+
+Worth keeping for the next time this shape appears: the symptom was real and
+the report was accurate, but the artefact was in the shell, not in the
+packaging. The registry is the authority for what is installed; the list is a
+view of it that can be stale. Reopening it is the first check, not the last.
+
+**One real defect did fall out of it, now fixed.** The two rows named
+different publishers for the same product — `Tokajer` from `smtprelayd.wxs`
+and `smtprelayd community` from `smtprelayd-bundle.wxs`. **Decided
+2026-09-29: the publisher is `smtprelayd community`**, so the MSI was the
+outlier, not the bundle. `nfpm.yaml`'s `maintainer` went with it (the email
+is unchanged), which makes all three packages name the same publisher. Both
+`.wxs` files carry a comment saying the two have to stay in step and why:
+Burn registers the bundle in ARP and sets `ARPSYSTEMCOMPONENT` on the chained
+MSI, so both rows exist either way and only a matching pair reads as one
+product.
+
+This is deliberately **not** applied to the copyright line in the 147 source
+files or in `README.md`, which still name Tokajer. A copyright holder is a
+legal attribution; a publisher is what a package manager displays as the
+origin. They are allowed to differ, and changing the first is a decision of a
+different kind.
+
+The mismatch is only visible when both ARP rows are looked at side by side,
+which is why nothing caught it until a field dump — and why the first attempt
+at fixing it went the wrong way, changing the bundle to match the MSI before
+the intended direction was confirmed.
 
 ### Deferred findings from the seventh review (2026-09-17) — all resolved
 
