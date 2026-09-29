@@ -4536,7 +4536,7 @@ dependencies. Detailed plan in `docs/dev/PHASE4-PLAN.md` (2026-08-10).
       the digest's own bounce never produced a second notification across
       several digest cycles.
 
-### Phase 5 — Productionisation ⬜
+### Phase 5 — Productionisation ✅
 
 Unchanged, plus:
 
@@ -4610,17 +4610,14 @@ Unchanged, plus:
       `/var/lib/smtprelayd`, missing client CIDR) — see the twenty-fifth
       session above. Closed on judgement, not on a standalone-host run;
       reopen if a Debian/Ubuntu deployment ever misbehaves.
-- [ ] Windows service start failure actually reported to the SCM — added
+- [x] Windows service start failure actually reported to the SCM — added
       2026-08-21, reasoned from the kardianos/service contract and verified
-      by unit/race tests only, never against a real Windows service: break
-      `smtprelayd.toml` (or occupy a configured listener port) on
-      `ATAXVM-STSC`, start the service, and confirm `services.msc`/
-      `Get-Service` shows it stopped with an error — not silently "running" —
-      and that the reason is in `smtprelayd.log`/`smtprelayd-error.log`.
-      **Deprioritised 2026-08-21**: "das windows startup verhalten passt auch"
-      — accepted on the reasoning/test-level evidence above, not on a
-      hardware run; still genuinely unverified on real hardware, revisit if
-      it becomes relevant again rather than treated as confirmed working.
+      by unit/race tests only until **field-verified 2026-09-29** on
+      `ATAXVM-STSC`: with a configured listener port already held by another
+      socket, the service does not start (not silently "running") and the
+      bind failure is written to the log. The broken-configuration variant
+      was not run separately; it fails through the same `awaitReady` path
+      earlier, before any listener binds.
 - [x] MSI Finish/success dialog on install — added 2026-08-21 (twenty-ninth
       session), `WixUIExtension`'s stock `ExitDialog`/`UserExit`/`FatalError`
       referenced via `<UIRef Id="WixUI_Common" />` +
@@ -4670,9 +4667,11 @@ Unchanged, plus:
       `.exe`. The registry dump and the publisher mismatch it exposed are in
       the defect section below.
 
-      Still not confirmed: SmartScreen friction on the unsigned `.exe`
-      (flagged as a possible regression versus today's unsigned `.msi`, not
-      yet observed either way).
+      **SmartScreen observed 2026-09-29, no regression**: the unsigned
+      `.exe` and `.msi` of the same release behave identically when
+      downloaded through the browser — the download is flagged and has to be
+      confirmed with "Keep", nothing beyond that. The `.exe` adds no friction
+      the `.msi` did not already have.
 - [x] CI workflow that runs on every push/PR (`.github/workflows/ci.yml`):
       gofmt, vet, `go test -race`, the banned-import check and govulncheck,
       plus a cross-compile job for all three targets
