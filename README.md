@@ -7,7 +7,12 @@ forwards it to a smarthost — primarily Microsoft 365 using OAuth2 / XOAUTH2.
 Runs as a Windows service or a systemd unit from a single static binary, with
 no runtime dependencies and no cgo.
 
-![Dashboard queue view showing deferred messages from a printer client](docs/guides/img/dashboard-queue.png)
+Status: feature-complete and in production use. The Microsoft 365 route
+delivers with `file:` and `dpapi:` client secrets, and the `.msi`, `setup.exe`,
+`.deb` and `.rpm` packages are verified on real hosts for install, upgrade and
+uninstall.
+
+![Dashboard queue view: three messages deferred by the smarthost, bulk requeue and delete, per-route status and recent bounces](docs/guides/img/dashboard-queue.png)
 
 ## Features
 
@@ -17,14 +22,18 @@ no runtime dependencies and no cgo.
 - Microsoft 365 authentication via OAuth2 client credentials, no stored password
 - Routing per recipient domain or source network across multiple smarthosts,
   splitting a message whose recipients belong to different routes
-- Structured JSON logs, searchable SQLite history, web dashboard
+- Structured JSON logs, searchable SQLite history, web dashboard with
+  per-message and bulk requeue/delete
 - JSON API for programmatic access: search history, inspect the queue,
   requeue or delete a message, with bearer-token auth and an audit log
 - Prometheus-format metrics endpoint for Checkmk
 - Bounce notification by mail: digest batches per client, with loop
   prevention and an hourly volume cap
-- Installable as a Windows service (`.msi`) or via `.deb`/`.rpm` with a
-  hardened systemd unit
+- Canary probe: a scheduled test mail per route, by interval or at fixed
+  times of day, alerting on failure and exported as metrics
+- Expiry warnings for the TLS certificate and Microsoft 365 client secrets
+- Installable as a Windows service (`setup.exe` or `.msi`) or via
+  `.deb`/`.rpm` with a hardened systemd unit
 
 ## Build
 
@@ -96,8 +105,8 @@ prompt required) register the service under the SCM as
 
 ## Install
 
-Tagged releases publish `.deb`, `.rpm` and `.msi` packages built by CI (see
-Releases). None of them start the service automatically: a fresh install has
+Tagged releases publish `.deb` and `.rpm` (amd64, arm64) and, for Windows,
+an `.msi` plus a `setup.exe` wrapping it, all built by CI (see Releases). None of them start the service automatically: a fresh install has
 no tenant, mailbox or client configuration yet.
 
 ```sh
@@ -111,15 +120,29 @@ ownership of `/etc/smtprelayd` and `/var/lib/smtprelayd`. The `.msi` registers
 the Windows service under the virtual account `NT SERVICE\smtprelayd` and
 sets an explicit ACL on `%ProgramData%\SMTPRelayd`, verified at every startup.
 
+On Windows, prefer `setup.exe`. It elevates once up front, so uninstalling
+through Apps & Features shows the full UI, including the choice to delete the
+data directory (queue, history, logs) as well. Unattended:
+
+```powershell
+.\smtprelayd-<version>-amd64-setup.exe /quiet
+.\smtprelayd-<version>-amd64-setup.exe /uninstall /quiet CLEANDATA=1   # also purge data
+```
+
+Neither package is code-signed, so Windows SmartScreen asks once before
+running either of them.
+
 ## Dashboard and API
 
-Enabling `[web]` in the configuration serves a read-only dashboard (queue,
-search, bounces, per-message detail, route status, a redacted configuration
-view) and, on the same listener under `/api/v1/`, a bearer-token-authenticated
-JSON API for search, queue inspection, and admin actions (requeue, delete) —
-see `docs/guides/API.md` for the full contract. The dashboard itself needs no token:
-it binds to loopback by default, the same trust boundary as the API's health
-endpoint.
+Enabling `[web]` in the configuration serves a dashboard (queue with
+per-message and bulk requeue/delete, search, bounces, per-message detail,
+route status, a redacted configuration view) and, on the same listener under
+`/api/v1/`, a bearer-token-authenticated JSON API for search, queue
+inspection, and admin actions (requeue, delete) — see `docs/guides/API.md` for
+the full contract. The dashboard itself has no login: its action forms carry
+a CSRF token, and it must bind to loopback, so reaching the page is the
+authentication. A non-loopback `web.address` is a startup error; use an SSH
+tunnel or an authenticating reverse proxy for remote access.
 
 The dashboard follows the browser's light or dark preference and can be
 recoloured from the configuration file. Every value is optional and must be a
@@ -171,7 +194,8 @@ holds a literal value; it is one of:
 Do not commit any of these referenced values. `docs/guides/CONFIGURATION.md` is a
 step-by-step guide to every configurable part — listeners and the relay's own
 TLS certificate, client policy and sender rewriting, a generic smarthost with
-SMTP AUTH, API/metrics bearer tokens, queue and bounce behaviour, Linux and
+SMTP AUTH, API/metrics bearer tokens, queue and bounce behaviour, the canary
+probe, Linux and
 Windows paths side by side throughout. For the Microsoft 365 route
 specifically, `docs/guides/MS365-AUTH.md` walks through all three secret forms from
 Entra ID app registration onward.
