@@ -190,10 +190,8 @@ For contributors and maintainers:
 
 - `MEMORY.md` — architecture decisions and rationale
 - `PROGRESS.md` — phase tracking
+- `docs/dev/HISTORY.md` — session log, closed defects and security review history
 - `docs/dev/EXPLOIT-SURFACE.md` — privilege escalation and code-level attack surface
-- `docs/dev/Findings.md` — security review history
-- `docs/dev/PHASE4-PLAN.md`, `docs/dev/PHASE5-CHECKLIST.md` — phase working documents
-- `docs/dev/SESSION-BOOTSTRAP.md` — how to start an assisted session cheaply
 
 ## Licence
 

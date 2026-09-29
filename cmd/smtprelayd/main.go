@@ -468,8 +468,7 @@ func startHTTP(ctx context.Context, bg *sync.WaitGroup, cfg *config.Config,
 
 // loopbackHandler assembles what the dashboard's listener serves.
 //
-// The dashboard and the JSON API share one socket, per
-// docs/dev/PHASE4-PLAN.md: the api handler is mounted under /api/v1/ with
+// The dashboard and the JSON API share one socket: the api handler is mounted under /api/v1/ with
 // that prefix stripped, so its own routes are registered without it, and
 // everything else falls through to the dashboard.
 //

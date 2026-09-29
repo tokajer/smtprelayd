@@ -34,7 +34,7 @@ func newCSRFSigner() (*csrfSigner, error) {
 	return &csrfSigner{key: key}, nil
 }
 
-// csrfTokenTTL matches the one hour docs/dev/PHASE4-PLAN.md specifies.
+// csrfTokenTTL bounds how long a rendered dashboard form stays usable.
 const csrfTokenTTL = time.Hour
 
 func (s *csrfSigner) token(action, queueID string, now time.Time) string {

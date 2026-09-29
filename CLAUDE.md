@@ -30,6 +30,9 @@ primarily Microsoft 365 via OAuth2 / XOAUTH2.
 - Update `PROGRESS.md` at the end of each working session. It is the handover
   document for the next chat.
 - Start a new chat per phase. Paste `MEMORY.md` + `PROGRESS.md` to bootstrap.
+- `docs/dev/HISTORY.md` is the archive (session logs, closed defects, finished
+  phase checklists, decision log). Never read it whole; grep it for the term
+  you need.
 - Do not summarise previous conversation content back to the user.
 - Prefer editing existing files over generating new ones.
 - Keep generated code free of tutorial comments. Comment *why*, never *what*.
