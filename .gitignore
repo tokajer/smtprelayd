@@ -6,3 +6,6 @@
 .claude
 ./claude/skills/
 ./claude/settings.json
+/smtprelayd
+/smtprelayd.exe
+*.log
