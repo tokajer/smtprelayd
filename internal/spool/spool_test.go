@@ -829,6 +829,43 @@ func TestFailRetriesTheRenameItCannotCompleteAtOnce(t *testing.T) {
 	}
 }
 
+// Fail records LastError by rewriting the message's own metadata before
+// moving it aside. If that write fails the move must still happen: the
+// alternative is a permanently failed message left live, re-offered to the
+// smarthost every minute forever.
+func TestFailMovesAsideWhenItsOwnMetadataWriteFails(t *testing.T) {
+	dir := t.TempDir()
+	s, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, err := s.Enqueue(Envelope{Route: "r"}, strings.NewReader("body"), 0, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	meta, ok := s.Claim(time.Now())
+	if !ok {
+		t.Fatal("nothing to claim")
+	}
+
+	// writeMeta opens its temporary file with O_CREATE|O_EXCL, so an
+	// obstruction at that path fails the write itself, the same trick the
+	// Release tests above use.
+	obstruction := filepath.Join(dir, "spool", "tmp", id.String()+".json")
+	obstruct(t, obstruction)
+	t.Cleanup(func() { _ = os.RemoveAll(obstruction) })
+
+	if err := s.Fail(meta, "permanent"); err != nil {
+		t.Fatalf("Fail returned %v; a failed LastError write must not stop the move", err)
+	}
+	if got := s.ClaimBatch(time.Now().Add(24*time.Hour), 1, nil); len(got) != 0 {
+		t.Fatalf("ClaimBatch found the failed message still live: %v", got)
+	}
+	if !s.Has(id) {
+		t.Error("Has reports the message gone after Fail, want it found in spool/failed")
+	}
+}
+
 // The three tests below cover the give-up branches the retry tests above stop
 // short of. Every one of them is an obstruction that is never cleared, which
 // is the case where the accounting has to survive: a file that could not be
@@ -1604,5 +1641,85 @@ func TestWriteStagedCopyRemovesTmpFileOnReadError(t *testing.T) {
 	}
 	if _, err := os.Stat(tmpPath); !os.IsNotExist(err) {
 		t.Fatalf("tmp file still exists after a failed copy: %v", err)
+	}
+}
+
+// A Release whose metadata write fails must not leave the message leased,
+// unclaimable and refusing Requeue/Discard with ErrBusy.
+func TestReleaseClearsTheLeaseWhenTheMetadataWriteFails(t *testing.T) {
+	dir := t.TempDir()
+	s, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, err := s.Enqueue(Envelope{Route: "r"}, strings.NewReader("body"), 0, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, ok := s.Claim(time.Now())
+	if !ok {
+		t.Fatal("nothing to claim")
+	}
+	m.NextAttempt = time.Now().Add(time.Hour)
+
+	// writeMeta opens its temporary file with O_CREATE|O_EXCL, so an
+	// obstruction at that path fails the write itself, the same trick
+	// TestRequeueFromFailedPutsTheBodyBackWhenTheMetadataWriteFails uses.
+	obstruction := filepath.Join(dir, "spool", "tmp", id.String()+".json")
+	obstruct(t, obstruction)
+	t.Cleanup(func() { _ = os.RemoveAll(obstruction) })
+
+	if err := s.Release(m); err == nil {
+		t.Fatal("Release reported success while the metadata write was blocked")
+	}
+	if s.leasedFor(id) {
+		t.Fatal("the message is still leased after a failed Release")
+	}
+
+	// Discard must not answer ErrBusy for a message no longer leased.
+	if err := s.Discard(id); err != nil {
+		t.Fatalf("Discard after a failed Release: %v", err)
+	}
+}
+
+// The same failure in ClaimBatch's view: the message must become claimable
+// again once its retry delay has passed, rather than sitting unclaimable
+// until restart. It must also keep the caller's in-memory state -- notably
+// Attempts, already incremented for this try -- rather than the stale
+// pre-attempt entry still in the index: only the on-disk copy failed to
+// advance, and a restart is what falls back to that older state.
+func TestReleaseFailureIsRetriedAfterTheDelay(t *testing.T) {
+	dir := t.TempDir()
+	s, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, err := s.Enqueue(Envelope{Route: "r"}, strings.NewReader("body"), 0, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, ok := s.Claim(time.Now())
+	if !ok {
+		t.Fatal("nothing to claim")
+	}
+	m.Attempts = 3
+
+	obstruction := filepath.Join(dir, "spool", "tmp", id.String()+".json")
+	obstruct(t, obstruction)
+	t.Cleanup(func() { _ = os.RemoveAll(obstruction) })
+
+	if err := s.Release(m); err == nil {
+		t.Fatal("Release reported success while the metadata write was blocked")
+	}
+
+	if got := s.ClaimBatch(time.Now(), 1, nil); len(got) != 0 {
+		t.Fatalf("ClaimBatch returned the message before its retry delay elapsed")
+	}
+	got := s.ClaimBatch(time.Now().Add(releaseRetryDelay+time.Second), 1, nil)
+	if len(got) != 1 || got[0].ID != id {
+		t.Fatalf("ClaimBatch after the retry delay = %v, want the message returned", got)
+	}
+	if got[0].Attempts != 3 {
+		t.Errorf("Attempts = %d after a failed Release, want 3 (the caller's state)", got[0].Attempts)
 	}
 }

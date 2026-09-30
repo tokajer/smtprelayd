@@ -18,7 +18,7 @@ mode   = "dark"
 accent = "#7c4dff"
 text   = "#eeeeee"
 `)
-	srv, _, _ := testServer(t, cfg)
+	srv, _, _ := testServer(t, cfg, nil)
 	rec := get(t, srv.Handler(), "/static/style.css")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d", rec.Code)
@@ -73,7 +73,7 @@ func TestThemeModePinsTheDocumentScheme(t *testing.T) {
 			extra = "\n[web.theme]\nmode = \"" + tc.mode + "\"\n"
 		}
 		cfg := testConfig(t, extra)
-		srv, _, _ := testServer(t, cfg)
+		srv, _, _ := testServer(t, cfg, nil)
 		rec := get(t, srv.Handler(), "/queue")
 		if !strings.Contains(rec.Body.String(), tc.want) {
 			t.Errorf("mode %q: %s missing from the rendered page", tc.mode, tc.want)
@@ -85,7 +85,7 @@ func TestThemeModePinsTheDocumentScheme(t *testing.T) {
 // page that forgets to name itself would silently highlight nothing.
 func TestNavigationMarksTheCurrentPage(t *testing.T) {
 	cfg := testConfig(t, "")
-	srv, _, _ := testServer(t, cfg)
+	srv, _, _ := testServer(t, cfg, nil)
 	for path, want := range map[string]string{
 		"/queue":   `<a href="/queue" class="active">`,
 		"/search":  `<a href="/search" class="active">`,

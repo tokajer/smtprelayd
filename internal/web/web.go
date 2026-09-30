@@ -12,6 +12,7 @@ import (
 	"net/http"
 
 	"github.com/tokajer/smtprelayd/internal/config"
+	"github.com/tokajer/smtprelayd/internal/expiry"
 	"github.com/tokajer/smtprelayd/internal/metrics"
 	"github.com/tokajer/smtprelayd/internal/queueaction"
 	"github.com/tokajer/smtprelayd/internal/spool"
@@ -54,21 +55,23 @@ var templateFS embed.FS
 // limit -- the other two are defaults, and neither may exceed it.
 const pageSize = 50
 
-// Server renders the read-only observability dashboard: live queue,
-// search, bounces, per-message detail, route status and a read-only
-// configuration view. It never reads a message body and never exposes a
-// secret, regardless of which config field is asked for.
+// Server renders the dashboard pages -- live queue, search, bounces,
+// per-message detail, route status and a read-only configuration view -- and
+// carries out the requeue and delete actions those pages offer. It never
+// reads a message body and never exposes a secret, regardless of which
+// config field is asked for.
 type Server struct {
-	cfg     *config.Config
-	store   *store.Store
-	spool   *spool.Spool
-	metrics *metrics.Registry
-	version string
-	log     *slog.Logger
-	tmpl    map[string]*template.Template
-	csrf    *csrfSigner
-	css     []byte
-	theme   string
+	cfg       *config.Config
+	store     *store.Store
+	spool     *spool.Spool
+	metrics   *metrics.Registry
+	deadlines []expiry.Item
+	version   string
+	log       *slog.Logger
+	tmpl      map[string]*template.Template
+	csrf      *csrfSigner
+	css       []byte
+	theme     string
 
 	// actions carries out requeue and delete. The JSON API holds the same
 	// thing, so both entry points cannot disagree about what they mean.
@@ -77,8 +80,10 @@ type Server struct {
 
 // New parses the embedded templates and builds a dashboard server. cfg, sp,
 // st and reg must outlive the server; nothing here mutates them. reg is
-// nil-safe; see the note on metrics.Registry.
-func New(cfg *config.Config, sp *spool.Spool, st *store.Store, reg *metrics.Registry, version string, log *slog.Logger) (*Server, error) {
+// nil-safe; see the note on metrics.Registry. deadlines is computed once in
+// cmd/smtprelayd.
+func New(cfg *config.Config, sp *spool.Spool, st *store.Store, reg *metrics.Registry,
+	deadlines []expiry.Item, version string, log *slog.Logger) (*Server, error) {
 	tmpl := make(map[string]*template.Template, len(dashboardPages))
 	// Load already validated service.timezone; a nil Location here just
 	// means every timestamp keeps rendering in whatever zone it already
@@ -103,7 +108,7 @@ func New(cfg *config.Config, sp *spool.Spool, st *store.Store, reg *metrics.Regi
 	// that regenerated it could only ever produce the same bytes.
 	css := append(append([]byte(nil), styleCSS...), themeOverrides(cfg.Web.Theme)...)
 	return &Server{
-		cfg: cfg, store: st, spool: sp, metrics: reg, version: version,
+		cfg: cfg, store: st, spool: sp, metrics: reg, deadlines: deadlines, version: version,
 		log: log.With("component", "web"), tmpl: tmpl, csrf: csrf,
 		css: css, theme: themeMode(cfg.Web.Theme),
 		actions: queueaction.New(sp, st, log.With("component", "web")),

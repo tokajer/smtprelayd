@@ -40,7 +40,7 @@ func NewHousekeeper(sp *spool.Spool, st *store.Store, log *slog.Logger) *Houseke
 // Run does one pass immediately, then one pass per pollInterval tick until
 // ctx is done.
 func (h *Housekeeper) Run(ctx context.Context) {
-	h.pass(time.Now())
+	h.pass(ctx, time.Now())
 
 	t := time.NewTicker(pollInterval)
 	defer t.Stop()
@@ -49,16 +49,16 @@ func (h *Housekeeper) Run(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			h.pass(time.Now())
+			h.pass(ctx, time.Now())
 		}
 	}
 }
 
 // pass runs the failed-spool sweep, the history retention sweep and the
 // quota check once.
-func (h *Housekeeper) pass(now time.Time) {
+func (h *Housekeeper) pass(ctx context.Context, now time.Time) {
 	h.sweepFailed(now)
-	h.sweepHistory(now)
+	h.sweepHistory(ctx, now)
 	h.reportQuota(h.spool.QuotaWarning())
 }
 
@@ -82,8 +82,8 @@ func (h *Housekeeper) sweepFailed(now time.Time) {
 // sweepHistory runs the history store's retention delete here rather than
 // inside a journal write. The store keeps its own hourly gate, so calling it
 // every tick costs one comparison.
-func (h *Housekeeper) sweepHistory(now time.Time) {
-	if deleted := h.store.RetentionSweep(now); deleted > 0 {
+func (h *Housekeeper) sweepHistory(ctx context.Context, now time.Time) {
+	if deleted := h.store.RetentionSweep(ctx, now); deleted > 0 {
 		h.log.Info("history retention sweep", "deleted_rows", deleted)
 	}
 }

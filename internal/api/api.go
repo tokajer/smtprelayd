@@ -25,7 +25,6 @@ import (
 type Server struct {
 	cfg     *config.Config
 	store   *store.Store
-	spool   *spool.Spool
 	metrics *metrics.Registry
 	version string
 	log     *slog.Logger
@@ -41,7 +40,7 @@ type Server struct {
 // metrics.Registry.
 func New(cfg *config.Config, sp *spool.Spool, st *store.Store, reg *metrics.Registry, version string, log *slog.Logger) *Server {
 	return &Server{
-		cfg: cfg, store: st, spool: sp, metrics: reg, version: version,
+		cfg: cfg, store: st, metrics: reg, version: version,
 		log: log.With("component", "api"), fails: newFailLimiter(),
 		actions: queueaction.New(sp, st, log.With("component", "api")),
 	}

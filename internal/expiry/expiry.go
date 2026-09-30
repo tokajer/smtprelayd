@@ -21,9 +21,7 @@ package expiry
 
 import (
 	"crypto/x509"
-	"encoding/pem"
 	"fmt"
-	"os"
 	"sort"
 	"time"
 
@@ -55,23 +53,17 @@ type Item struct {
 // an operator can see a healthy expiry rather than only ever hearing about an
 // unhealthy one.
 //
-// certErr is non-nil when tls.cert_file is configured but unreadable. That is
-// not an Item: the listener would not have started on it, so it means the
-// file changed under a running service, and the caller decides whether to log
-// it or show it.
-func Items(cfg *config.Config) (items []Item, certErr error) {
-	if path := cfg.TLS.CertFile; path != "" {
-		notAfter, err := certNotAfter(path)
-		if err != nil {
-			certErr = err
-		} else {
-			items = append(items, Item{
-				Key:     "tls-certificate",
-				What:    "the listener TLS certificate",
-				Detail:  path,
-				Expires: notAfter,
-			})
-		}
+// served is the certificate the listener actually presents to clients, or
+// nil when none is configured; it is read once at startup by the caller.
+func Items(cfg *config.Config, served *x509.Certificate) []Item {
+	var items []Item
+	if served != nil {
+		items = append(items, Item{
+			Key:     "tls-certificate",
+			What:    "the listener TLS certificate",
+			Detail:  cfg.TLS.CertFile,
+			Expires: served.NotAfter,
+		})
 	}
 
 	for _, r := range cfg.Routes {
@@ -92,33 +84,11 @@ func Items(cfg *config.Config) (items []Item, certErr error) {
 	// Soonest first, so the most urgent line is the one read first -- in the
 	// mail and in the dashboard alike.
 	sort.Slice(items, func(i, j int) bool { return items[i].Expires.Before(items[j].Expires) })
-	return items, certErr
+	return items
 }
 
 // DaysUntil is negative once t has passed. Truncating rather than rounding
 // keeps "1 day left" from being printed for something lapsing in an hour.
 func DaysUntil(t, now time.Time) int {
 	return int(t.Sub(now).Hours() / 24)
-}
-
-// certNotAfter reads the leaf certificate's expiry. The file may hold a
-// chain, and the leaf is the first block in it — the same one
-// tls.LoadX509KeyPair presents to clients, so this reports on the
-// certificate that is actually served.
-func certNotAfter(path string) (time.Time, error) {
-	raw, err := os.ReadFile(path) //#nosec G304 -- the path is tls.cert_file, an operator-supplied configuration value that the listener already opens
-	if err != nil {
-		return time.Time{}, err
-	}
-	for block, rest := pem.Decode(raw); block != nil; block, rest = pem.Decode(rest) {
-		if block.Type != "CERTIFICATE" {
-			continue
-		}
-		c, err := x509.ParseCertificate(block.Bytes)
-		if err != nil {
-			return time.Time{}, err
-		}
-		return c.NotAfter, nil
-	}
-	return time.Time{}, fmt.Errorf("no certificate found in %s", path)
 }

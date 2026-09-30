@@ -23,6 +23,8 @@ import (
 	"time"
 
 	"github.com/BurntSushi/toml"
+
+	"github.com/tokajer/smtprelayd/internal/ostrust"
 )
 
 // Config is the complete on-disk configuration. Field names mirror
@@ -76,15 +78,26 @@ type TLS struct {
 }
 
 type Client struct {
-	Name            string   `toml:"name"`
-	CIDR            []string `toml:"cidr"`
-	Route           string   `toml:"route"`
-	MaxMessageMB    int      `toml:"max_message_mb"`
-	MaxRecipients   int      `toml:"max_recipients"`
-	RateLimitPerMin int      `toml:"rate_limit_per_min"`
-	MaxConnections  int      `toml:"max_connections"`
-	Rewrite         Rewrite  `toml:"rewrite"`
-	Bounce          Bounce   `toml:"bounce"`
+	Name            string       `toml:"name"`
+	CIDR            []string     `toml:"cidr"`
+	Route           string       `toml:"route"`
+	MaxMessageMB    int          `toml:"max_message_mb"`
+	MaxRecipients   int          `toml:"max_recipients"`
+	RateLimitPerMin int          `toml:"rate_limit_per_min"`
+	MaxConnections  int          `toml:"max_connections"`
+	Rewrite         Rewrite      `toml:"rewrite"`
+	Bounce          ClientBounce `toml:"bounce"`
+}
+
+// ClientBounce is the subset of [bounce] a client may override: only who is
+// notified. bounce.sender, notify_route, digest_minutes and max_per_hour stay
+// global-only, so a printer's failures can be routed to whoever administers
+// the printers without duplicating the digest window or the volume cap per
+// client. Carrying only Notify is what makes that a decode-time refusal
+// rather than a validator check: the strict TOML decoder reports
+// client.bounce.sender and the like as unknown keys on its own.
+type ClientBounce struct {
+	Notify []string `toml:"notify"`
 }
 
 type Rewrite struct {
@@ -433,10 +446,10 @@ func (s *Secret) resolve(field string) error {
 		return nil
 	case strings.HasPrefix(s.ref, "file:"):
 		path := strings.TrimPrefix(s.ref, "file:")
-		if err := checkSecretFile(path); err != nil {
+		if err := ostrust.CheckSecretFile(path); err != nil {
 			return fmt.Errorf("%s: %w", field, err)
 		}
-		//#nosec G304 -- an operator-written file: reference, and checkSecretFile above has already verified its ownership, mode and containing directory
+		//#nosec G304 -- an operator-written file: reference, and CheckSecretFile above has already verified its ownership, mode and containing directory
 		b, err := os.ReadFile(path)
 		if err != nil {
 			return fmt.Errorf("%s: %w", field, err)
@@ -450,9 +463,9 @@ func (s *Secret) resolve(field string) error {
 		// Windows only: the file holds ciphertext produced by
 		// "smtprelayd protect-secret", bound to this machine's DPAPI key
 		// rather than sitting on disk in plaintext the way file: does.
-		// resolveDPAPISecret itself runs checkSecretFile first.
+		// ostrust.ResolveDPAPISecret itself runs CheckSecretFile first.
 		path := strings.TrimPrefix(s.ref, "dpapi:")
-		v, err := resolveDPAPISecret(path)
+		v, err := ostrust.ResolveDPAPISecret(path)
 		if err != nil {
 			return fmt.Errorf("%s: %w", field, err)
 		}
@@ -506,7 +519,7 @@ func Load(path string) (*Config, error) {
 	if path == "" {
 		return nil, errors.New("config: no configuration file given")
 	}
-	if err := CheckConfigFile(path); err != nil {
+	if err := ostrust.CheckConfigFile(path); err != nil {
 		return nil, err
 	}
 

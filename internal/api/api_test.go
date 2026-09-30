@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/tokajer/smtprelayd/internal/config"
+	"github.com/tokajer/smtprelayd/internal/expiry"
 	"github.com/tokajer/smtprelayd/internal/metrics"
 	"github.com/tokajer/smtprelayd/internal/spool"
 	"github.com/tokajer/smtprelayd/internal/store"
@@ -62,7 +63,7 @@ func testServer(t *testing.T) (*Server, *store.Store, *spool.Spool) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	reg := metrics.New(metrics.ConfigExpiry(cfg), sp, []string{"m365", "legacy"}, nil, nil)
+	reg := metrics.New(expiry.Items(cfg, nil), sp, []string{"m365", "legacy"}, nil, nil)
 	return New(cfg, sp, st, reg, "test", discardLog()), st, sp
 }
 

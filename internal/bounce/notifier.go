@@ -26,7 +26,6 @@ import (
 // through the failure callback itself.
 type Notifier struct {
 	cfg    *config.Config
-	spool  *spool.Spool
 	store  *store.Store
 	mailer *selfmail.Mailer
 	log    *slog.Logger
@@ -46,7 +45,7 @@ type Notifier struct {
 // reg is nil-safe; see the note on metrics.Registry.
 func New(cfg *config.Config, sp *spool.Spool, st *store.Store, reg *metrics.Registry, log *slog.Logger) *Notifier {
 	return &Notifier{
-		cfg: cfg, spool: sp, store: st, mailer: selfmail.New(sp, st, reg, log.With("component", "bounce")),
+		cfg: cfg, store: st, mailer: selfmail.New(sp, st, reg, log.With("component", "bounce")),
 		log:     log.With("component", "bounce"),
 		pending: map[string][]string{}, overflow: map[string]int{}, hourStart: time.Now(),
 	}
@@ -111,6 +110,13 @@ func (n *Notifier) Run(ctx context.Context) {
 		}
 	}
 }
+
+// Flush sends whatever is pending now. Called once at shutdown, after the
+// delivery manager has stopped: attempts it recorded right up to that point
+// can still call RecordFail, so flushing any earlier would lose them. The
+// enqueue behind dispatch is a durable spool write, so this is worth doing
+// even though there will be no later tick to pick the digest up.
+func (n *Notifier) Flush() { n.dispatch(time.Now()) }
 
 // recipientsFor resolves the notification recipients for a client: its own
 // bounce.notify override if it set one, otherwise the global bounce.notify

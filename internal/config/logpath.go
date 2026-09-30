@@ -21,7 +21,8 @@ import (
 // name a location outside the data directory, not that the resulting path is
 // safe to open — a symlink planted inside the data directory would still
 // point wherever it points. That is the data directory's own trust check
-// (CheckDir, CheckDataDirACL) to enforce, and it is enforced there.
+// (ostrust.CheckDir, ostrust.CheckDataDirACL) to enforce, and it is enforced
+// there.
 func LogPath(dataDir, file string) (string, error) {
 	if file == "" {
 		return "", nil // no file logging configured

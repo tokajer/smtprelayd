@@ -44,7 +44,7 @@ func concServer(t *testing.T, cfg *config.Config) (addr string, sp *spool.Spool)
 	t.Cleanup(func() { _ = st.Close() })
 
 	cfg.Listeners[0].Address = "127.0.0.1:0"
-	set, err := New(cfg, sp, st, nil, discardLog())
+	set, err := New(cfg, sp, st, nil, nil, discardLog())
 	if err != nil {
 		t.Fatal(err)
 	}

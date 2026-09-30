@@ -3,7 +3,7 @@
 
 //go:build !windows
 
-package config
+package ostrust
 
 import (
 	"fmt"
@@ -32,7 +32,7 @@ func CheckDir(path string) error {
 	return checkTrusted(path, true)
 }
 
-// checkSecretFile applies the config file's trust requirement to a file
+// CheckSecretFile applies the config file's trust requirement to a file
 // named by a "file:" secret reference, plus a mode check the configuration
 // file does not need: a secret must not be readable by group or others.
 //
@@ -43,7 +43,7 @@ func CheckDir(path string) error {
 // having been left behind was a finding. Both stop at the immediate parent:
 // an attacker who controls a higher ancestor can rename the whole subtree,
 // and that is not defended against here.
-func checkSecretFile(path string) error {
+func CheckSecretFile(path string) error {
 	if err := checkTrusted(filepath.Dir(path), true); err != nil {
 		return fmt.Errorf("directory of secret file %s: %w", path, err)
 	}

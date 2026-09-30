@@ -88,12 +88,16 @@ func isPublic(cfg *config.Config) bool {
 // loopback is served over TLS and requires a read-scope bearer token;
 // config.Validate refuses such an address unless both a token and a
 // certificate exist, so the two halves cannot disagree about which mode this
-// is in.
-func Serve(ctx context.Context, cfg *config.Config, ln net.Listener, reg *Registry, log *slog.Logger) error {
+// is in. cert is loaded once by the caller.
+func Serve(ctx context.Context, cfg *config.Config, ln net.Listener, reg *Registry, cert *tls.Certificate, log *slog.Logger) error {
 	addr := cfg.Metrics.Address
 	var handler http.Handler = reg
 
 	public := isPublic(cfg)
+	if public && cert == nil {
+		_ = ln.Close()
+		return fmt.Errorf("metrics: a non-loopback address requires a TLS certificate")
+	}
 	if public {
 		handler = requireToken(cfg, handler, log)
 	} else {
@@ -124,12 +128,7 @@ func Serve(ctx context.Context, cfg *config.Config, ln net.Listener, reg *Regist
 
 	accept := func() error { return srv.Serve(ln) }
 	if public {
-		cert, err := tls.LoadX509KeyPair(cfg.TLS.CertFile, cfg.TLS.KeyFile)
-		if err != nil {
-			_ = ln.Close()
-			return fmt.Errorf("metrics: loading TLS certificate: %w", err)
-		}
-		srv.TLSConfig = &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12}
+		srv.TLSConfig = &tls.Config{Certificates: []tls.Certificate{*cert}, MinVersion: tls.VersionTLS12}
 		log.Info("metrics listener requires a read-scope bearer token", "address", addr)
 		accept = func() error { return srv.ServeTLS(ln, "", "") }
 	}

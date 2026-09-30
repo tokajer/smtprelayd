@@ -58,6 +58,33 @@ libraries that do not exist understated it in the one direction that matters.
 
 ## 3. Component layout
 
+**Amended 2026-09-30.** A second architectural review, acted on the same day.
+`internal/ostrust` is new: the ownership checks, the Windows data directory
+ACL and the DPAPI binding moved out of `internal/config`, so the package every
+other one imports no longer carries the two `unsafe` exceptions or the only
+code that changes filesystem permissions. `config` imports it, never the
+reverse. The TLS key pair is loaded once in the composition root
+(`loadCertificate`) and handed to the listener set and the metrics endpoint;
+the expiry deadlines are computed once from that loaded certificate
+(`expiry.Items(cfg, leaf)`) and handed to the registry, the dashboard and the
+expiry watcher. `store.Class` types the attempt class, with one class-to-status
+table. `listener` and `selfmail` take a consumer-side `Journal` interface the
+way `delivery` and `queueaction` already did.
+
+Observable consequences: expiry reporting describes the certificate the
+service is serving, not the file on disk, so a renewed file shows up after the
+restart that also makes the listener serve it; `smtprelayd_expiry_read_errors`
+is gone, because nothing reads the file at scrape time any more. A `Release`
+whose metadata write fails keeps its retry state in memory instead of leaving
+the message leased until restart, and a `Fail` whose metadata write fails
+still moves the message to `spool/failed`. A copy withdrawn after a later
+route copy failed to commit is recorded as removed instead of staying listed
+as queued. Pending bounce failures are flushed into one last digest at
+shutdown, after the delivery manager has stopped. A global-only `bounce.*` key
+on a client is now refused by the decoder as an unknown key. The API trims
+whitespace around text filter values, as the dashboard always did. A rate
+token is only taken once a worker slot is held.
+
 **Amended 2026-09-29.** Five restructurings from an architectural review,
 all behaviour-preserving except where noted below. `internal/mailaddr` is
 new: a stdlib-only leaf package holding the address and domain syntax that
@@ -158,6 +185,8 @@ decision that starts with those consumers, not with the loader.
 ```
 cmd/smtprelayd/        service wrapper, CLI (run, install, uninstall, queue)
 internal/config       TOML load and validation
+internal/ostrust      file and directory ownership checks, the Windows data
+                      directory ACL, DPAPI secret binding
 internal/listener     ports 25 / 587 / 465, STARTTLS, client matching by
                       source address, per-client connection caps -- no
                       inbound AUTH is offered
@@ -520,8 +549,8 @@ The load-bearing principles:
 - **Secrets never touch disk in plaintext.** Environment references, a
   restricted file, or — **added 2026-08-20**, Windows only — a file encrypted
   with the machine's DPAPI key (`dpapi:<path>`, written once by
-  `smtprelayd protect-secret`, decrypted by `internal/config`'s
-  `resolveDPAPISecret`). `dpapi:` genuinely raises the bar over `file:`: the
+  `smtprelayd protect-secret`, decrypted by `internal/ostrust`'s
+  `ResolveDPAPISecret`). `dpapi:` genuinely raises the bar over `file:`: the
   ciphertext is useless if copied off the machine. It does not, and cannot,
   defend against an attacker who already has Administrator/SYSTEM on the
   machine the service runs on — the service decrypts unattended at boot, with
@@ -541,8 +570,8 @@ The load-bearing principles:
   Administrators and `NT SERVICE\smtprelayd`, inheritable, and **protected**
   against inheritance from `%ProgramData%`, whose `BUILTIN\Users:(OI)(CI)(RX)`
   would otherwise expose message bodies to every interactive account. The
-  installer writes it (`config.SecureDataDir`), startup verifies it
-  (`config.CheckDataDirACL`) and refuses to run otherwise. The daemon never
+  installer writes it (`ostrust.SecureDataDir`), startup verifies it
+  (`ostrust.CheckDataDirACL`) and refuses to run otherwise. The daemon never
   repairs it itself — a service that widens its own permissions at startup
   would defeat the check.
 - **Misconfiguration is the realistic attack.** `smtprelayd selftest` actively
@@ -558,7 +587,8 @@ The load-bearing principles:
   fails on any other. `unsafe` is banned the same way, with a narrow,
   explicitly named exception in `internal/buildpolicy`'s
   `allowedBannedImports` for hand-written Windows API bindings that have no
-  safe wrapper in `golang.org/x/sys/windows`: `trust_windows.go` (ACL
+  safe wrapper in `golang.org/x/sys/windows`: `internal/ostrust`'s
+  `trust_windows.go` (ACL
   `LocalFree`) and, **added 2026-08-20**, `dpapi_windows.go`
   (`CryptProtectData`/`CryptUnprotectData`, the `dpapi:` secret above). Each
   entry is one file, named in the allowlist with its reason, so a later

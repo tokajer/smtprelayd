@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/tokajer/smtprelayd/internal/expiry"
 	"github.com/tokajer/smtprelayd/internal/metrics"
 	"github.com/tokajer/smtprelayd/internal/spool"
 	"github.com/tokajer/smtprelayd/internal/store"
@@ -32,11 +33,11 @@ func TestRoutesPageShowsEveryRouteCounter(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	reg := metrics.New(metrics.ConfigExpiry(cfg), sp, []string{"m365"}, nil, nil)
+	reg := metrics.New(expiry.Items(cfg, nil), sp, []string{"m365"}, nil, nil)
 	reg.Delivered("m365")
 	reg.RecipientsRefused("m365", 7)
 
-	srv, err := New(cfg, sp, st, reg, "test", discardLog())
+	srv, err := New(cfg, sp, st, reg, nil, "test", discardLog())
 	if err != nil {
 		t.Fatal(err)
 	}

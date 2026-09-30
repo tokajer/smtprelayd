@@ -236,10 +236,9 @@ func (s *Store) RecordMessage(rec MessageRecord) error {
 	return nil
 }
 
-// RecordAttempt inserts a delivery attempt record.
-// class is one of "delivered", "temporary", "permanent", "expired", or
-// "removed" (written by RecordRemoval, never by the delivery worker).
-func (s *Store) RecordAttempt(queueID string, attemptNum int, smtpCode int, smtpResponse, class string, nextAttemptAt *time.Time) error {
+// RecordAttempt inserts a delivery attempt record. class is ClassRemoved only
+// when written by RecordRemoval, never by the delivery worker.
+func (s *Store) RecordAttempt(queueID string, attemptNum int, smtpCode int, smtpResponse string, class Class, nextAttemptAt *time.Time) error {
 	now := s.now().UTC()
 	var nextStr *string
 	if nextAttemptAt != nil {
@@ -272,7 +271,7 @@ func (s *Store) RecordAttempt(queueID string, attemptNum int, smtpCode int, smtp
 	// was then requeued and delivered still belongs in the bounce view, so
 	// the flag records that it happened, not what is true now.
 	bounced := 0
-	if class == "permanent" || class == "expired" {
+	if classStatus[class] == StatusBounced {
 		bounced = 1
 	}
 	if _, err := tx.Exec(`
@@ -304,11 +303,11 @@ func (s *Store) RecordAttempt(queueID string, attemptNum int, smtpCode int, smtp
 // one writer, so contention is bounded by retentionChunk's 5000-row DELETEs
 // waiting inside busy_timeout(5000), not by anything pausing for the whole
 // sweep to finish.
-func (s *Store) RetentionSweep(now time.Time) int64 {
+func (s *Store) RetentionSweep(ctx context.Context, now time.Time) int64 {
 	if !s.claimCleanup(now) {
 		return 0
 	}
-	return s.retentionCleanup(now)
+	return s.retentionCleanup(ctx, now)
 }
 
 // claimCleanup reports whether the hourly retention slot is due and takes
@@ -340,7 +339,7 @@ func (s *Store) RecordRemoval(queueID string) error {
 	if err := row.Scan(&next); err != nil {
 		return fmt.Errorf("store: record removal: %w", err)
 	}
-	return s.RecordAttempt(queueID, next, 0, "", "removed", nil)
+	return s.RecordAttempt(queueID, next, 0, "", ClassRemoved, nil)
 }
 
 // ReconcileRemoved marks a message removed when its spool copy is already
@@ -366,7 +365,7 @@ func (s *Store) ReconcileRemoved(queueID string) (bool, error) {
 		return false, nil
 	}
 	switch msg.Status {
-	case "queued", "deferred":
+	case StatusQueued, StatusDeferred:
 		if err := s.RecordRemoval(queueID); err != nil {
 			return false, err
 		}
@@ -446,19 +445,23 @@ const retentionChunk = 5000
 // leaving an operator to discover it.
 //
 // The journal is best-effort: a failed cleanup must not take down delivery,
-// so it logs and returns rather than propagating the error.
-func (s *Store) retentionCleanup(now time.Time) int64 {
+// so it logs and returns rather than propagating the error. A cancelled ctx
+// is not a failure, though: it means shutdown is underway, which is quiet
+// and expected rather than something an operator needs warned about.
+func (s *Store) retentionCleanup(ctx context.Context, now time.Time) int64 {
 	cutoff := now.Add(-s.retentionTTL).UTC().Format(time.RFC3339)
 	var total int64
 	for {
 		// A subselect rather than "DELETE ... LIMIT": the LIMIT form needs
 		// SQLITE_ENABLE_UPDATE_DELETE_LIMIT, which is not a guarantee this
 		// driver makes. Attempts follow through the ON DELETE CASCADE.
-		result, err := s.db.Exec(`DELETE FROM messages WHERE queue_id IN (
+		result, err := s.db.ExecContext(ctx, `DELETE FROM messages WHERE queue_id IN (
 			SELECT queue_id FROM messages WHERE created_at < ? LIMIT ?
 		)`, cutoff, retentionChunk)
 		if err != nil {
-			s.log.Warn("store: retention cleanup failed", "error", err, "deleted_so_far", total)
+			if ctx.Err() == nil {
+				s.log.Warn("store: retention cleanup failed", "error", err, "deleted_so_far", total)
+			}
 			return total
 		}
 		affected, err := result.RowsAffected()

@@ -19,6 +19,7 @@ import (
 	"github.com/tokajer/smtprelayd/internal/metrics"
 	"github.com/tokajer/smtprelayd/internal/ratelimit"
 	"github.com/tokajer/smtprelayd/internal/spool"
+	"github.com/tokajer/smtprelayd/internal/store"
 )
 
 // pollInterval bounds how long a freshly queued message waits before a worker
@@ -32,7 +33,7 @@ const pollInterval = 5 * time.Second
 // fake that returns an error, which a real *store.Store backed by SQLite is
 // not a state a test can put on demand.
 type Journal interface {
-	RecordAttempt(queueID string, attemptNum int, smtpCode int, smtpResponse, class string, nextAttemptAt *time.Time) error
+	RecordAttempt(queueID string, attemptNum int, smtpCode int, smtpResponse string, class store.Class, nextAttemptAt *time.Time) error
 }
 
 // FailRecorder is told about every message that failed permanently or
@@ -67,6 +68,13 @@ type Manager struct {
 	tokens map[string]smarthost.TokenSource
 	rate   *ratelimit.Limiter
 	wg     sync.WaitGroup
+
+	// now is where every scheduling decision in this file reads the current
+	// time from: ClaimBatch, the rate limiter, the expiry check and the
+	// backoff/hold deadlines. Defaults to time.Now; only a test assigns it,
+	// which is what lets a temporary failure past a message's expiry be
+	// driven deterministically instead of by a real clock.
+	now func() time.Time
 }
 
 // New builds the delivery manager. Each route gets its own concurrency budget
@@ -87,6 +95,7 @@ func New(cfg *config.Config, sp *spool.Spool, j Journal, reg *metrics.Registry, 
 		limits: map[string]int{},
 		tokens: tokens,
 		rate:   ratelimit.New(),
+		now:    time.Now,
 	}
 	for _, r := range cfg.Routes {
 		m.routes[r.Name] = make(chan struct{}, r.MaxConcurrent)
@@ -164,7 +173,7 @@ func (m *Manager) dispatch(ctx context.Context) bool {
 	skip := func(route string) bool { return saturated[route] }
 
 	for {
-		batch := m.spool.ClaimBatch(time.Now(), claimBatchSize, skip)
+		batch := m.spool.ClaimBatch(m.now(), claimBatchSize, skip)
 		if len(batch) == 0 {
 			return true
 		}
@@ -204,13 +213,8 @@ func (m *Manager) dispatchOne(ctx context.Context, meta *spool.Meta, saturated m
 		m.fail(meta, "route no longer configured")
 		return true
 	}
-	// Pace before taking a worker slot, so that a throttled route does not
-	// hold its whole concurrency budget waiting.
-	if wait, ok := m.rate.Allow(route, m.limits[route], time.Now()); !ok {
-		saturated[route] = true
-		m.hold(meta, wait)
-		return true
-	}
+	// Slot first, rate limit second; see the note at the Allow call below for
+	// why the order matters.
 	select {
 	case budget <- struct{}{}:
 	case <-ctx.Done():
@@ -229,6 +233,17 @@ func (m *Manager) dispatchOne(ctx context.Context, meta *spool.Meta, saturated m
 		// alone -- it was never offered to the smarthost.
 		saturated[route] = true
 		m.hold(meta, pollInterval)
+		return true
+	}
+	// Asked only once a slot is actually held: a token consumed without a
+	// send lowers the effective rate below the configured one on a
+	// saturated route, and the limiter has no way to refund it, so a token
+	// spent before the slot check was won would be one send permanently
+	// lost from the budget every time no slot was free.
+	if wait, ok := m.rate.Allow(route, m.limits[route], m.now()); !ok {
+		<-budget
+		saturated[route] = true
+		m.hold(meta, wait)
 		return true
 	}
 	m.wg.Add(1)
@@ -356,7 +371,7 @@ func (m *Manager) record(log *slog.Logger, meta *spool.Meta, res attemptResult) 
 		log.Info("delivered", "attempts", meta.Attempts, "duration_ms", res.elapsed.Milliseconds(),
 			"recipients", len(meta.Envelope.To))
 		m.recordOutcome(meta, outcomeDelivered, nil)
-		m.journal(log, meta, res.partialCode, res.partialResponse, "delivered", nil)
+		m.journal(log, meta, res.partialCode, res.partialResponse, store.ClassDelivered, nil)
 		if err := m.spool.Remove(meta.ID); err != nil {
 			log.Error("cannot remove delivered message", "error", err)
 		}
@@ -365,14 +380,14 @@ func (m *Manager) record(log *slog.Logger, meta *spool.Meta, res attemptResult) 
 		log.Warn("permanent delivery failure", "attempts", meta.Attempts, "error", err.Error())
 		m.recordOutcome(meta, outcomeBounced, err)
 		code, resp := extractSMTPError(err)
-		m.journal(log, meta, code, resp, "permanent", nil)
+		m.journal(log, meta, code, resp, store.ClassPermanent, nil)
 		m.fail(meta, err.Error())
 
-	case time.Now().After(meta.Expires):
+	case m.now().After(meta.Expires):
 		log.Warn("message expired in queue", "attempts", meta.Attempts, "error", err.Error())
 		m.recordOutcome(meta, outcomeBounced, err)
 		code, resp := extractSMTPError(err)
-		m.journal(log, meta, code, resp, "expired", nil)
+		m.journal(log, meta, code, resp, store.ClassExpired, nil)
 		m.fail(meta, "expired in queue: "+err.Error())
 
 	default:
@@ -385,7 +400,7 @@ func (m *Manager) record(log *slog.Logger, meta *spool.Meta, res attemptResult) 
 func (m *Manager) deferRetry(log *slog.Logger, meta *spool.Meta, err error) {
 	delay := m.backoff(meta.Attempts)
 	meta.LastError = err.Error()
-	meta.NextAttempt = time.Now().Add(delay)
+	meta.NextAttempt = m.now().Add(delay)
 	if meta.NextAttempt.After(meta.Expires) {
 		meta.NextAttempt = meta.Expires
 	}
@@ -393,7 +408,7 @@ func (m *Manager) deferRetry(log *slog.Logger, meta *spool.Meta, err error) {
 		"retry_in_s", int(delay.Seconds()), "error", err.Error())
 	m.recordOutcome(meta, outcomeDeferred, err)
 	code, resp := extractSMTPError(err)
-	m.journal(log, meta, code, resp, "temporary", &meta.NextAttempt)
+	m.journal(log, meta, code, resp, store.ClassTemporary, &meta.NextAttempt)
 	if err := m.spool.Release(meta); err != nil {
 		log.Error("cannot update queued message", "error", err)
 	}
@@ -452,7 +467,7 @@ func (m *Manager) recordOutcome(meta *spool.Meta, o outcome, err error) {
 // a failure is not silent: it is logged and counted, because a database that
 // stopped accepting writes otherwise shows up only as a dashboard that slowly
 // empties, which nobody reports.
-func (m *Manager) journal(log *slog.Logger, meta *spool.Meta, code int, resp, class string, next *time.Time) {
+func (m *Manager) journal(log *slog.Logger, meta *spool.Meta, code int, resp string, class store.Class, next *time.Time) {
 	if err := m.history.RecordAttempt(meta.ID.String(), meta.Attempts, code, resp, class, next); err != nil {
 		log.Warn("history journal write failed", "class", class, "error", err)
 		m.metrics.JournalWriteFailure()
@@ -482,7 +497,7 @@ func (m *Manager) backoff(attempt int) time.Duration {
 // worst exactly when a smarthost is hanging and the queue behind it is
 // deepest.
 func (m *Manager) hold(meta *spool.Meta, d time.Duration) {
-	until := time.Now().Add(d)
+	until := m.now().Add(d)
 	if until.After(meta.Expires) {
 		// Past its own expiry the message could never be tried again and
 		// would not be expired either, so nothing would ever clear it.

@@ -10,6 +10,8 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"flag"
 	"fmt"
@@ -36,10 +38,12 @@ import (
 	"github.com/tokajer/smtprelayd/internal/config"
 	"github.com/tokajer/smtprelayd/internal/delivery"
 	"github.com/tokajer/smtprelayd/internal/delivery/smarthost"
+	"github.com/tokajer/smtprelayd/internal/expiry"
 	"github.com/tokajer/smtprelayd/internal/httpx"
 	"github.com/tokajer/smtprelayd/internal/listener"
 	"github.com/tokajer/smtprelayd/internal/logging"
 	"github.com/tokajer/smtprelayd/internal/metrics"
+	"github.com/tokajer/smtprelayd/internal/ostrust"
 	"github.com/tokajer/smtprelayd/internal/spool"
 	"github.com/tokajer/smtprelayd/internal/store"
 	"github.com/tokajer/smtprelayd/internal/web"
@@ -179,6 +183,24 @@ func serve(ctx context.Context, configPath string, console bool, ready chan<- er
 	}
 	defer closer.Close()
 
+	// Loaded once, here, so the listener, the metrics gauge and the dashboard
+	// all report on the same certificate rather than each reading the file
+	// separately.
+	cert, err := loadCertificate(cfg)
+	if err != nil {
+		log.Error("tls: failed to load certificate", "error", err)
+		return err
+	}
+	var leaf *x509.Certificate
+	if cert != nil {
+		leaf = cert.Leaf
+	}
+	// Computed once here, from the certificate actually loaded for serving,
+	// and handed to everything that reports on it: config validation also
+	// parses the pair once to check it, but that is not the same certificate
+	// this process ends up presenting to clients.
+	deadlines := expiry.Items(cfg, leaf)
+
 	// From here on the logger is live and writable, so every startup failure
 	// is logged before it is returned: main() only echoes it to stderr (lost
 	// on a Windows service with no console), while the log file is what an
@@ -209,9 +231,9 @@ func serve(ctx context.Context, configPath string, console bool, ready chan<- er
 	// and the metrics endpoint read it. It used to be built inside
 	// delivery.New and pulled back out through a getter, which hid the
 	// composition in a worker and left the listener with nothing to count on.
-	reg := metrics.New(metrics.ConfigExpiry(cfg), sp, routeNames(cfg), canaryNames(cfg), nil)
+	reg := metrics.New(deadlines, sp, routeNames(cfg), canaryNames(cfg), nil)
 
-	set, err := listener.New(cfg, sp, st, reg, log)
+	set, err := listener.New(cfg, sp, st, reg, cert, log)
 	if err != nil {
 		log.Error("listener: failed to start", "error", err)
 		return err
@@ -243,14 +265,14 @@ func serve(ctx context.Context, configPath string, console bool, ready chan<- er
 	if err := verifyTokens(ctx, dm, log); err != nil {
 		return err
 	}
-	done := startWorkers(ctx, &bg, cfg, sp, st, reg, log, dm, notifier)
+	done := startWorkers(ctx, &bg, cfg, sp, st, reg, log, dm, notifier, deadlines)
 
 	// Both HTTP sockets are bound here, synchronously, for the reason
 	// set.Bind is separate from set.Run: a port already in use used to be a
 	// log line from a goroutine after the service had reported itself
 	// started, and on Windows the SCM then showed a running service with no
 	// dashboard.
-	if err := startHTTP(ctx, &bg, cfg, st, sp, reg, log); err != nil {
+	if err := startHTTP(ctx, &bg, cfg, st, sp, reg, cert, deadlines, log); err != nil {
 		return err
 	}
 
@@ -304,7 +326,7 @@ func logStartupFailure(configPath string, cfg *config.Config, cause error) {
 	// DACL, so a service that failed to start produced no console (it is a
 	// service) and no error log either -- exactly the case this exists for,
 	// and exactly the state the 2026-08-11 field incident was in.
-	if err := config.CheckDir(cfg.Service.DataDir); err != nil {
+	if err := ostrust.CheckDir(cfg.Service.DataDir); err != nil {
 		return
 	}
 	path := filepath.Join(cfg.Service.DataDir, "smtprelayd-error.log")
@@ -324,7 +346,7 @@ func checkEnvironment(cfg *config.Config) error {
 	if err := os.MkdirAll(cfg.Service.DataDir, 0o700); err != nil {
 		return err
 	}
-	if err := config.CheckDir(cfg.Service.DataDir); err != nil {
+	if err := ostrust.CheckDir(cfg.Service.DataDir); err != nil {
 		return fmt.Errorf("data directory: %w", err)
 	}
 	if err := verifyDataDirSecurity(cfg.Service.DataDir); err != nil {
@@ -334,10 +356,23 @@ func checkEnvironment(cfg *config.Config) error {
 	if err != nil {
 		return err
 	}
-	if err := config.CheckDir(filepath.Dir(exe)); err != nil {
+	if err := ostrust.CheckDir(filepath.Dir(exe)); err != nil {
 		return fmt.Errorf("binary directory: %w", err)
 	}
 	return nil
+}
+
+// loadCertificate reads the listener's TLS key pair. Returns nil, nil when no
+// certificate is configured.
+func loadCertificate(cfg *config.Config) (*tls.Certificate, error) {
+	if cfg.TLS.CertFile == "" {
+		return nil, nil
+	}
+	cert, err := tls.LoadX509KeyPair(cfg.TLS.CertFile, cfg.TLS.KeyFile)
+	if err != nil {
+		return nil, err
+	}
+	return &cert, nil
 }
 
 // buildTokenSources constructs one authms365.TokenSource per xoauth2 route
@@ -437,7 +472,7 @@ func openSpool(cfg *config.Config) (*spool.Spool, error) {
 // count; shutdown itself is bg.Wait.
 func startWorkers(ctx context.Context, bg *sync.WaitGroup, cfg *config.Config,
 	sp *spool.Spool, st *store.Store, reg *metrics.Registry, log *slog.Logger,
-	dm *delivery.Manager, notifier *bounce.Notifier) <-chan struct{} {
+	dm *delivery.Manager, notifier *bounce.Notifier, deadlines []expiry.Item) <-chan struct{} {
 	done := make(chan struct{})
 	bg.Go(func() {
 		dm.Run(ctx)
@@ -446,7 +481,7 @@ func startWorkers(ctx context.Context, bg *sync.WaitGroup, cfg *config.Config,
 	// See the note on delivery.Housekeeper for why this runs apart from dm.Run.
 	hk := delivery.NewHousekeeper(sp, st, log)
 	bg.Go(func() { hk.Run(ctx) })
-	bg.Go(func() { notifier.Run(ctx) })
+	bg.Go(func() { notifier.Run(ctx); <-done; notifier.Flush() })
 	lifetime := time.Duration(cfg.Queue.MaxLifetimeHours) * time.Hour
 	for _, c := range cfg.Canaries {
 		r := canary.New(c, cfg.Service.Hostname, lifetime, sp, st, reg, log)
@@ -455,7 +490,7 @@ func startWorkers(ctx context.Context, bg *sync.WaitGroup, cfg *config.Config,
 	// Started unconditionally: it reports through the notifier, which
 	// declines to send when bounce.notify is empty, so an unconfigured
 	// contact costs one idle ticker rather than needing a switch of its own.
-	expiryWatcher := bounce.NewExpiryWatcher(cfg, notifier, log)
+	expiryWatcher := bounce.NewExpiryWatcher(cfg, deadlines, notifier, log)
 	bg.Go(func() { expiryWatcher.Run(ctx) })
 	return done
 }
@@ -465,7 +500,8 @@ func startWorkers(ctx context.Context, bg *sync.WaitGroup, cfg *config.Config,
 // already in use fails startup instead of being logged from a goroutine
 // after the service has reported itself started.
 func startHTTP(ctx context.Context, bg *sync.WaitGroup, cfg *config.Config,
-	st *store.Store, sp *spool.Spool, reg *metrics.Registry, log *slog.Logger) error {
+	st *store.Store, sp *spool.Spool, reg *metrics.Registry, cert *tls.Certificate,
+	deadlines []expiry.Item, log *slog.Logger) error {
 	if cfg.Metrics.Enabled {
 		ln, err := metrics.Listen(cfg)
 		if err != nil {
@@ -473,7 +509,7 @@ func startHTTP(ctx context.Context, bg *sync.WaitGroup, cfg *config.Config,
 			return err
 		}
 		bg.Go(func() {
-			if err := metrics.Serve(ctx, cfg, ln, reg, log); err != nil {
+			if err := metrics.Serve(ctx, cfg, ln, reg, cert, log); err != nil {
 				log.Error("metrics listener stopped", "error", err)
 			}
 		})
@@ -482,7 +518,7 @@ func startHTTP(ctx context.Context, bg *sync.WaitGroup, cfg *config.Config,
 		return nil
 	}
 
-	ws, err := web.New(cfg, sp, st, reg, version, log)
+	ws, err := web.New(cfg, sp, st, reg, deadlines, version, log)
 	if err != nil {
 		log.Error("web: failed to start", "error", err)
 		return err

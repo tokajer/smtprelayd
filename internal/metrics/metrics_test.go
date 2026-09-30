@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/tokajer/smtprelayd/internal/config"
+	"github.com/tokajer/smtprelayd/internal/expiry"
 	"github.com/tokajer/smtprelayd/internal/spool"
 )
 
@@ -301,7 +302,7 @@ func TestLoopbackServeGuardsTheExpositionWithTheHostHeader(t *testing.T) {
 	defer cancel()
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	done := make(chan error, 1)
-	go func() { done <- Serve(ctx, cfg, ln, New(nil, nil, []string{"m365"}, nil, nil), log) }()
+	go func() { done <- Serve(ctx, cfg, ln, New(nil, nil, []string{"m365"}, nil, nil), nil, log) }()
 
 	url := "http://" + ln.Addr().String() + "/metrics"
 	for host, want := range map[string]int{
@@ -342,7 +343,7 @@ func TestExpiryGaugeIsExposed(t *testing.T) {
 			TenantID: "t", SecretExpires: now.Add(10 * 24 * time.Hour).Format("2006-01-02"),
 		}},
 	}}
-	body := New(ConfigExpiry(cfg), nil, []string{"m365"}, nil, nil).text()
+	body := New(expiry.Items(cfg, nil), nil, []string{"m365"}, nil, nil).text()
 
 	if !strings.Contains(body, "# TYPE smtprelayd_expiry_seconds gauge") {
 		t.Fatalf("exposition is missing the gauge declaration:\n%s", body)
@@ -377,7 +378,7 @@ func TestExpiryGaugeGoesNegativeAfterTheDate(t *testing.T) {
 			TenantID: "t", SecretExpires: time.Now().Add(-5 * 24 * time.Hour).Format("2006-01-02"),
 		}},
 	}}
-	body := New(ConfigExpiry(cfg), nil, []string{"m365"}, nil, nil).text()
+	body := New(expiry.Items(cfg, nil), nil, []string{"m365"}, nil, nil).text()
 	for _, l := range strings.Split(body, "\n") {
 		if strings.HasPrefix(l, "smtprelayd_expiry_seconds{") {
 			if !strings.Contains(l, " -") {
@@ -387,16 +388,6 @@ func TestExpiryGaugeGoesNegativeAfterTheDate(t *testing.T) {
 		}
 	}
 	t.Fatalf("no expiry sample:\n%s", body)
-}
-
-// A certificate that cannot be read must not simply drop out of the
-// exposition: a vanished gauge looks the same as a stopped scrape.
-func TestUnreadableCertificateIsExposedAsAnError(t *testing.T) {
-	cfg := &config.Config{TLS: config.TLS{CertFile: filepath.Join(t.TempDir(), "absent.crt")}}
-	body := New(ConfigExpiry(cfg), nil, nil, nil, nil).text()
-	if !strings.Contains(body, "smtprelayd_expiry_read_errors 1") {
-		t.Errorf("exposition does not report the unreadable certificate:\n%s", body)
-	}
 }
 
 // Recipients refused on an otherwise delivered message are the one delivery
@@ -489,17 +480,13 @@ func TestRegisterTokenAgerFeedsTheGauge(t *testing.T) {
 }
 
 // The exposition is a table now (expositionSeries), so the thing worth
-// pinning is that every family declares itself properly and that the two
-// expiry families stay mutually exclusive: a scraper reads HELP and TYPE, and
-// a family that lost one of them, or a gauge that appeared alongside its own
-// error gauge, would be a silent misread rather than a failure.
+// pinning is that every family declares itself properly: a scraper reads
+// HELP and TYPE, and a family that lost one of them would be a silent
+// misread rather than a failure.
 func TestEveryFamilyDeclaresItself(t *testing.T) {
 	r := New(nil, nil, []string{"m365"}, []string{"daily"}, nil)
 	text := r.text()
 	for _, se := range expositionSeries {
-		if se.when != nil {
-			continue // conditional: covered below
-		}
 		if !strings.Contains(text, "# HELP "+se.name+" ") {
 			t.Errorf("%s has no HELP line", se.name)
 		}
@@ -515,9 +502,6 @@ func TestEveryFamilyDeclaresItself(t *testing.T) {
 		if se.kind != "counter" && se.kind != "gauge" {
 			t.Errorf("%s has type %q", se.name, se.kind)
 		}
-	}
-	if strings.Contains(text, "smtprelayd_expiry_read_errors") {
-		t.Error("the read-error gauge is present although the deadlines were readable")
 	}
 }
 

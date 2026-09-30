@@ -18,6 +18,7 @@ import (
 	"github.com/tokajer/smtprelayd/internal/bounce"
 	"github.com/tokajer/smtprelayd/internal/config"
 	"github.com/tokajer/smtprelayd/internal/delivery/smarthost"
+	"github.com/tokajer/smtprelayd/internal/expiry"
 	"github.com/tokajer/smtprelayd/internal/metrics"
 	"github.com/tokajer/smtprelayd/internal/spool"
 	"github.com/tokajer/smtprelayd/internal/store"
@@ -37,7 +38,7 @@ func testRegistry(cfg *config.Config, sp *spool.Spool) *metrics.Registry {
 	for _, c := range cfg.Canaries {
 		canaries = append(canaries, c.Name)
 	}
-	return metrics.New(metrics.ConfigExpiry(cfg), sp, routes, canaries, nil)
+	return metrics.New(expiry.Items(cfg, nil), sp, routes, canaries, nil)
 }
 
 // testManager builds a manager with the collaborators serve() would give
@@ -346,7 +347,7 @@ func TestHoldNeverDefersPastExpiry(t *testing.T) {
 // real SQLite file can be put into on demand.
 type failingJournal struct{}
 
-func (failingJournal) RecordAttempt(string, int, int, string, string, *time.Time) error {
+func (failingJournal) RecordAttempt(string, int, int, string, store.Class, *time.Time) error {
 	return errors.New("history store unavailable")
 }
 
@@ -370,5 +371,76 @@ func TestJournalWriteFailureIsCounted(t *testing.T) {
 	m.journal(discardLog(), &spool.Meta{ID: id}, 0, "", "delivered", nil)
 	if got := reg.JournalWriteFailures(); got != before+1 {
 		t.Fatalf("JournalWriteFailures() = %d, want %d", got, before+1)
+	}
+}
+
+// A temporary failure past the message's own expiry must be recorded as
+// store.ClassExpired and moved to spool/failed, not deferred for a retry
+// that would only run out the clock again. m.now is what lets "past the
+// expiry" be driven deterministically instead of racing a real clock against
+// a short-lived test message.
+func TestExpiredTemporaryFailureIsRecordedAsExpiredNotDeferred(t *testing.T) {
+	cfg := &config.Config{
+		Queue:  config.Queue{MaxLifetimeHours: 1, RetryScheduleMin: []int{1}},
+		Routes: []config.Route{{Name: "m365", Auth: "none", MaxConcurrent: 1}},
+	}
+	sp, err := spool.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, err := store.Open(filepath.Join(t.TempDir(), "history.db"), discardLog(), 90, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	reg := testRegistry(cfg, sp)
+	m := New(cfg, sp, st, reg, nil, nil, discardLog())
+
+	now := time.Now()
+	env := spool.Envelope{From: "a@example.at", To: []string{"b@example.net"}, Route: "m365",
+		Origin: "printers", Received: now}
+	id, err := sp.Enqueue(env, strings.NewReader("x"), 0, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// record's journal write updates a message row that has to exist first;
+	// in production the listener creates it via journalAccepted before the
+	// delivery manager ever sees the message.
+	if err := st.RecordMessage(store.MessageRecord{
+		QueueID: id.String(), Client: "printers", Route: "m365",
+		EnvelopeFrom: "a@example.at", Recipients: []string{"b@example.net"},
+		Listener: "smtp", RemoteAddr: "127.0.0.1", ReceivedAt: now, ExpiresAt: now.Add(time.Hour),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	meta, ok := sp.Claim(time.Now())
+	if !ok {
+		t.Fatal("claim failed")
+	}
+	meta.Attempts = 1
+
+	// Fixed past the message's own expiry, so record's expiry check fires
+	// without depending on the real wall clock or MaxLifetimeHours being
+	// short enough to race in a test.
+	m.now = func() time.Time { return meta.Expires.Add(time.Minute) }
+
+	m.record(discardLog(), meta, attemptResult{err: &smarthost.TempError{Err: errors.New("try later")}})
+
+	if got := sp.Len(); got != 0 {
+		t.Fatalf("spool still holds %d live message(s); an expired failure must leave the live queue", got)
+	}
+	if !sp.Has(id) {
+		t.Fatal("the message is gone entirely; an expiry should move it to spool/failed, not delete it")
+	}
+
+	msg, err := st.FindMessageByID(id.String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if msg == nil || len(msg.Attempts) == 0 {
+		t.Fatal("no attempt was journalled")
+	}
+	if last := msg.Attempts[len(msg.Attempts)-1]; last.Class != store.ClassExpired {
+		t.Errorf("journalled class = %q, want %q", last.Class, store.ClassExpired)
 	}
 }

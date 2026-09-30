@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"crypto/tls"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"net"
 	"net/netip"
@@ -86,11 +87,56 @@ const (
 	AuthXOAUTH2 = "xoauth2"
 )
 
+// The rewrite mode, header_from and reply_to vocabulary. It lives here,
+// rather than in internal/rewrite, because internal/rewrite already imports
+// internal/config, and this is the shared vocabulary both the validator and
+// rewrite.Compile check a client's configuration against; internal/rewrite
+// re-exports these under its own names (ModeOff, HeaderFromKeep, ...) so its
+// own callers see no difference.
+const (
+	RewriteOff            = "off"
+	RewriteIfUnauthorized = "if_unauthorized"
+	RewriteForce          = "force"
+	HeaderFromKeep        = "keep"
+
+	ReplyToPreserve = "preserve"
+	ReplyToDrop     = "drop"
+	ReplyToFixed    = "fixed"
+)
+
+// errReplyToAddress and errReplyToUnknown are ParseReplyTo's two distinct
+// failure shapes: an invalid fixed:<address> is a different mistake from an
+// unrecognised disposition entirely.
+var (
+	errReplyToAddress = errors.New("rewrite.reply_to fixed address is not valid")
+	errReplyToUnknown = errors.New("rewrite.reply_to must be preserve, drop or fixed:<address>")
+)
+
+// ParseReplyTo splits a rewrite.reply_to value into its disposition and, for
+// "fixed:<address>", the address. An empty value means preserve.
+func ParseReplyTo(s string) (disposition, addr string, err error) {
+	rt := strings.TrimSpace(s)
+	switch {
+	case rt == "" || rt == ReplyToPreserve:
+		return ReplyToPreserve, "", nil
+	case rt == ReplyToDrop:
+		return ReplyToDrop, "", nil
+	case strings.HasPrefix(rt, ReplyToFixed+":"):
+		addr = strings.TrimSpace(strings.TrimPrefix(rt, ReplyToFixed+":"))
+		if !mailaddr.ValidAddress(addr) {
+			return "", "", errReplyToAddress
+		}
+		return ReplyToFixed, addr, nil
+	default:
+		return "", "", errReplyToUnknown
+	}
+}
+
 // Per-element defaults, named so that normalize and the checks that accept
 // these values cannot drift apart.
 const (
 	defaultListenerTLS      = TLSNone
-	defaultRewriteMode      = "off"
+	defaultRewriteMode      = RewriteOff
 	defaultRoutePort        = 587
 	defaultRouteTLS         = TLSStartTLS
 	defaultRouteConcurrency = 4
@@ -405,53 +451,9 @@ func (v *validator) clients() {
 			prefixes = append(prefixes, owned{prefix: p, owner: cl.Name})
 		}
 
-		switch cl.Rewrite.Mode {
-		case defaultRewriteMode:
-		case "force", "if_unauthorized":
-			switch {
-			case cl.Rewrite.EnvelopeFrom == "":
-				v.add("%s: rewrite.envelope_from is required for mode %s", where, cl.Rewrite.Mode)
-			case !mailaddr.ValidAddress(cl.Rewrite.EnvelopeFrom):
-				v.add("%s: rewrite.envelope_from %q is not a valid address", where, cl.Rewrite.EnvelopeFrom)
-			}
-			// An empty allowlist would make if_unauthorized behave exactly
-			// like force while reading as if it were selective.
-			if cl.Rewrite.Mode == "if_unauthorized" && len(cl.Rewrite.AllowedSenders) == 0 {
-				v.add("%s: rewrite.mode if_unauthorized requires at least one allowed_senders entry", where)
-			}
-			if hf := strings.TrimSpace(cl.Rewrite.HeaderFrom); hf != "" && hf != "keep" {
-				_, addr, ok := mailaddr.SplitMailbox(hf)
-				switch {
-				case !ok:
-					v.add("%s: rewrite.header_from must be keep, an address, or "+
-						"a printable ASCII display name followed by <address>", where)
-				case mailaddr.DomainOf(addr) != mailaddr.DomainOf(cl.Rewrite.EnvelopeFrom):
-					// SPF checks the envelope and DMARC checks the header, so
-					// a split between the two domains fails alignment at the
-					// smarthost and is never what the operator wanted.
-					v.add("%s: rewrite.header_from domain %q does not match rewrite.envelope_from domain %q",
-						where, mailaddr.DomainOf(addr), mailaddr.DomainOf(cl.Rewrite.EnvelopeFrom))
-				}
-			}
-		default:
-			v.add("%s: rewrite.mode must be off, if_unauthorized or force", where)
-		}
-		for j, p := range cl.Rewrite.AllowedSenders {
-			if !mailaddr.ValidSenderPattern(p) {
-				v.add("%s: rewrite.allowed_senders[%d] %q must be an address or *@domain", where, j, p)
-			}
-		}
-		switch rt := strings.TrimSpace(cl.Rewrite.ReplyTo); {
-		case rt == "" || rt == "preserve" || rt == "drop":
-		case strings.HasPrefix(rt, "fixed:"):
-			if !mailaddr.ValidAddress(strings.TrimSpace(strings.TrimPrefix(rt, "fixed:"))) {
-				v.add("%s: rewrite.reply_to fixed address is not valid", where)
-			}
-		default:
-			v.add("%s: rewrite.reply_to must be preserve, drop or fixed:<address>", where)
-		}
-		// rateLimiter.allow and connCounter.acquire both read a limit of zero
-		// or less as "unlimited", so a mistyped minus sign switches the
+		v.clientRewrite(cl, where)
+		// ratelimit.Limiter.Allow and connCounter.acquire both read a limit of
+		// zero or less as "unlimited", so a mistyped minus sign switches the
 		// control off instead of failing startup -- the same "looks
 		// configured but does nothing" shape strict TOML decoding exists to
 		// prevent, one layer below where decoding can see it.
@@ -459,6 +461,52 @@ func (v *validator) clients() {
 			v.add("%s: max_message_mb, max_recipients, rate_limit_per_min and max_connections must not be negative "+
 				"(0 means unlimited)", where)
 		}
+	}
+}
+
+// clientRewrite checks one client's [client.rewrite] block: the mode and
+// what it requires, the allowed_senders patterns and the reply_to
+// disposition. Kept apart from clients() so the per-client loop there reads
+// as a list of checks rather than one growing unbroken one.
+func (v *validator) clientRewrite(cl *Client, where string) {
+	switch cl.Rewrite.Mode {
+	case defaultRewriteMode:
+	case RewriteForce, RewriteIfUnauthorized:
+		switch {
+		case cl.Rewrite.EnvelopeFrom == "":
+			v.add("%s: rewrite.envelope_from is required for mode %s", where, cl.Rewrite.Mode)
+		case !mailaddr.ValidAddress(cl.Rewrite.EnvelopeFrom):
+			v.add("%s: rewrite.envelope_from %q is not a valid address", where, cl.Rewrite.EnvelopeFrom)
+		}
+		// An empty allowlist would make if_unauthorized behave exactly
+		// like force while reading as if it were selective.
+		if cl.Rewrite.Mode == RewriteIfUnauthorized && len(cl.Rewrite.AllowedSenders) == 0 {
+			v.add("%s: rewrite.mode if_unauthorized requires at least one allowed_senders entry", where)
+		}
+		if hf := strings.TrimSpace(cl.Rewrite.HeaderFrom); hf != "" && hf != HeaderFromKeep {
+			_, addr, ok := mailaddr.SplitMailbox(hf)
+			switch {
+			case !ok:
+				v.add("%s: rewrite.header_from must be keep, an address, or "+
+					"a printable ASCII display name followed by <address>", where)
+			case mailaddr.DomainOf(addr) != mailaddr.DomainOf(cl.Rewrite.EnvelopeFrom):
+				// SPF checks the envelope and DMARC checks the header, so
+				// a split between the two domains fails alignment at the
+				// smarthost and is never what the operator wanted.
+				v.add("%s: rewrite.header_from domain %q does not match rewrite.envelope_from domain %q",
+					where, mailaddr.DomainOf(addr), mailaddr.DomainOf(cl.Rewrite.EnvelopeFrom))
+			}
+		}
+	default:
+		v.add("%s: rewrite.mode must be off, if_unauthorized or force", where)
+	}
+	for j, p := range cl.Rewrite.AllowedSenders {
+		if !mailaddr.ValidSenderPattern(p) {
+			v.add("%s: rewrite.allowed_senders[%d] %q must be an address or *@domain", where, j, p)
+		}
+	}
+	if _, _, err := ParseReplyTo(cl.Rewrite.ReplyTo); err != nil {
+		v.add("%s: %v", where, err)
 	}
 }
 
@@ -792,16 +840,13 @@ func (v *validator) bounce() {
 	// Only bounce.notify may be overridden per client, so that a printer's
 	// failures can be routed to whoever administers the printers without
 	// duplicating the digest window, volume cap or notify route per client.
-	// Every other bounce.* field left set on a client is silently unused by
-	// the notifier, which is exactly the "looks configured but does
-	// nothing" trap CLAUDE.md's strict decoding otherwise closes.
+	// config.ClientBounce carries only Notify, so every other bounce.* field
+	// left set on a client is refused by the strict TOML decoder itself, as
+	// an unknown key, before Validate ever runs.
 	clientNotifies := false
 	for _, cl := range v.c.Clients {
 		if len(cl.Bounce.Notify) > 0 {
 			clientNotifies = true
-		}
-		if cl.Bounce.Sender != "" || cl.Bounce.NotifyRoute != "" || cl.Bounce.DigestMinutes != 0 || cl.Bounce.MaxPerHour != 0 {
-			v.add("client %q: bounce.sender, bounce.notify_route, bounce.digest_minutes and bounce.max_per_hour are global-only; only bounce.notify may be set per client", cl.Name)
 		}
 		// These reach a From: and To: line through fmt.Fprintf, so a CR or LF
 		// in one splits the digest's header block. Operator-controlled rather

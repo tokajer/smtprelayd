@@ -17,5 +17,5 @@ func syncDir(string) error { return nil }
 // ensureMode is a no-op on Windows. Unix mode bits do not restrict access
 // there -- os.Chmod only toggles the read-only attribute -- and access is
 // governed by the data directory's explicit DACL, which the installer sets
-// and CheckDataDirACL verifies at startup.
+// and ostrust.CheckDataDirACL verifies at startup.
 func ensureMode(string) error { return nil }

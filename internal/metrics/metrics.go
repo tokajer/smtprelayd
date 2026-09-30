@@ -8,7 +8,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/tokajer/smtprelayd/internal/config"
 	"github.com/tokajer/smtprelayd/internal/expiry"
 	"github.com/tokajer/smtprelayd/internal/spool"
 )
@@ -21,20 +20,6 @@ import (
 // knowing this exists.
 type TokenAger interface {
 	TokenAge() (time.Duration, bool)
-}
-
-// ExpirySource reports the deadlines the expiry gauges describe. It is the
-// whole of what the registry needs from the configuration, declared here on
-// the consumer side the way TokenAger is: the registry used to hold a
-// *config.Config for this one family and nothing else, so every field of the
-// configuration was reachable from a counter table.
-type ExpirySource func() ([]expiry.Item, error)
-
-// ConfigExpiry is the ExpirySource the service uses: what internal/expiry
-// finds in a loaded configuration. It exists so the composition root can wire
-// the registry without either side growing an import for it.
-func ConfigExpiry(cfg *config.Config) ExpirySource {
-	return func() ([]expiry.Item, error) { return expiry.Items(cfg) }
 }
 
 // Registry accumulates delivery counters and reads live gauges from the
@@ -55,22 +40,19 @@ func ConfigExpiry(cfg *config.Config) ExpirySource {
 // the dashboard's route page need it whether or not a metrics listener is
 // bound, since metrics.enabled governs only the HTTP endpoint. ServeHTTP and
 // Serve are not part of that nil-safety and carry no guard of their own.
+
 type Registry struct {
-	// expiry is read at scrape time for the expiry gauges; see ExpirySource.
-	expiry      ExpirySource
+	// expiry holds the deadlines the expiry gauge renders; computed once at
+	// startup, so nothing here can fail at scrape time.
+	expiry      []expiry.Item
 	spool       *spool.Spool
-	routes      []string // sorted, for deterministic exposition
+	routeNames  []string // sorted, for deterministic exposition
 	canaryNames []string // sorted, for deterministic exposition
 	start       time.Time
 
 	mu                  sync.Mutex
 	tokens              map[string]TokenAger // route -> token source, xoauth2 routes only
-	delivered           map[string]uint64
-	bounced             map[string]uint64
-	deferredCnt         map[string]uint64
-	authFailures        map[string]uint64
-	recipientsRefused   map[string]uint64
-	lastDelivery        map[string]time.Time
+	routes              map[string]*routeCounters
 	apiAuthFailure      uint64
 	notificationFailure uint64
 	canaryFailure       map[string]uint64
@@ -79,45 +61,55 @@ type Registry struct {
 	journalWriteFails   uint64
 }
 
+// routeCounters is one route's delivery counters and gauges, held together so
+// that recording an event and reading a route's status each take one map
+// lookup instead of one per field.
+type routeCounters struct {
+	delivered, bounced, deferred, authFailures, recipientsRefused uint64
+	lastDelivery                                                  time.Time
+}
+
+// route returns the counters for name, creating them on first use. Most
+// routes are seeded by New; this only matters for an event recorded for a
+// route name New was not given, which route() still tracks internally but
+// Status/the exposition never see, since both iterate routeNames. Callers
+// hold r.mu.
+func (r *Registry) route(name string) *routeCounters {
+	rc, ok := r.routes[name]
+	if !ok {
+		rc = &routeCounters{}
+		r.routes[name] = rc
+	}
+	return rc
+}
+
 // New builds a registry seeded with zero counters for every configured
 // route and every configured canary, so one that has never delivered still
 // reports 0 instead of being absent from the exposition until its first
 // event. tokens may be nil; cmd/smtprelayd's buildTokenSources registers its
 // token sources through RegisterTokenAger once it has built them, which is
 // what lets the registry exist before the delivery manager and be handed to
-// the listener. exp may be
-// nil too, in which case the exposition simply omits the expiry families --
-// which is what a caller with no deadlines to report wants, and what a
-// configuration naming neither a certificate nor an xoauth2 route produced
-// anyway.
-func New(exp ExpirySource, sp *spool.Spool, routes, canaryNames []string, tokens map[string]TokenAger) *Registry {
+// the listener. deadlines may be nil too, in which case the expiry gauge is
+// still exposed, with no samples.
+func New(deadlines []expiry.Item, sp *spool.Spool, routes, canaryNames []string, tokens map[string]TokenAger) *Registry {
 	sorted := append([]string(nil), routes...)
 	sort.Strings(sorted)
 	sortedCanaries := append([]string(nil), canaryNames...)
 	sort.Strings(sortedCanaries)
 
 	r := &Registry{
-		expiry:             exp,
+		expiry:             deadlines,
 		spool:              sp,
 		tokens:             map[string]TokenAger{},
-		routes:             sorted,
+		routeNames:         sorted,
 		canaryNames:        sortedCanaries,
 		start:              time.Now(),
-		delivered:          map[string]uint64{},
-		bounced:            map[string]uint64{},
-		deferredCnt:        map[string]uint64{},
-		authFailures:       map[string]uint64{},
-		recipientsRefused:  map[string]uint64{},
-		lastDelivery:       map[string]time.Time{},
+		routes:             map[string]*routeCounters{},
 		canaryFailure:      map[string]uint64{},
 		lastCanaryDelivery: map[string]time.Time{},
 	}
 	for _, name := range sorted {
-		r.delivered[name] = 0
-		r.bounced[name] = 0
-		r.deferredCnt[name] = 0
-		r.authFailures[name] = 0
-		r.recipientsRefused[name] = 0
+		r.routes[name] = &routeCounters{}
 	}
 	for _, name := range sortedCanaries {
 		r.canaryFailure[name] = 0
@@ -175,8 +167,9 @@ func (r *Registry) Delivered(route string) {
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.delivered[route]++
-	r.lastDelivery[route] = time.Now()
+	rc := r.route(route)
+	rc.delivered++
+	rc.lastDelivery = time.Now()
 }
 
 // Bounced records a permanent failure or an expiry in queue on route.
@@ -186,7 +179,7 @@ func (r *Registry) Bounced(route string) {
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.bounced[route]++
+	r.route(route).bounced++
 }
 
 // Deferred records a temporary failure that returned the message to the
@@ -197,7 +190,7 @@ func (r *Registry) Deferred(route string) {
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.deferredCnt[route]++
+	r.route(route).deferred++
 }
 
 // AuthFailure records a delivery attempt that failed because of the relay's
@@ -208,7 +201,7 @@ func (r *Registry) AuthFailure(route string) {
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.authFailures[route]++
+	r.route(route).authFailures++
 }
 
 // RecipientsRefused records recipients a smarthost refused permanently while
@@ -226,7 +219,7 @@ func (r *Registry) RecipientsRefused(route string, n int) {
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.recipientsRefused[route] += uint64(n) //#nosec G115 -- n is a slice length, checked positive above
+	r.route(route).recipientsRefused += uint64(n) //#nosec G115 -- n is a slice length, checked positive above
 }
 
 // APIAuthFailure records a rejected bearer token on the HTTP API. It has no
@@ -340,14 +333,9 @@ func (r *Registry) Status() []RouteStatus {
 		return nil
 	}
 	r.mu.Lock()
-	delivered := cloneCounts(r.delivered)
-	bounced := cloneCounts(r.bounced)
-	deferredCnt := cloneCounts(r.deferredCnt)
-	authFailures := cloneCounts(r.authFailures)
-	recipientsRefused := cloneCounts(r.recipientsRefused)
-	lastDelivery := make(map[string]time.Time, len(r.lastDelivery))
-	for k, v := range r.lastDelivery {
-		lastDelivery[k] = v
+	counters := make(map[string]routeCounters, len(r.routes))
+	for k, v := range r.routes {
+		counters[k] = *v
 	}
 	tokens := make(map[string]TokenAger, len(r.tokens))
 	for k, v := range r.tokens {
@@ -360,20 +348,21 @@ func (r *Registry) Status() []RouteStatus {
 		depth = r.spool.QueueDepth(time.Now())
 	}
 
-	out := make([]RouteStatus, 0, len(r.routes))
-	for _, route := range r.routes {
+	out := make([]RouteStatus, 0, len(r.routeNames))
+	for _, route := range r.routeNames {
 		d := depth[route]
+		rc := counters[route]
 		st := RouteStatus{
 			Route:             route,
 			Queued:            d.Queued,
 			Deferred:          d.Deferred,
 			OldestQueued:      d.OldestQueued,
-			Delivered:         delivered[route],
-			Bounced:           bounced[route],
-			DeferredTotal:     deferredCnt[route],
-			AuthFailures:      authFailures[route],
-			RecipientsRefused: recipientsRefused[route],
-			LastDelivery:      lastDelivery[route],
+			Delivered:         rc.delivered,
+			Bounced:           rc.bounced,
+			DeferredTotal:     rc.deferred,
+			AuthFailures:      rc.authFailures,
+			RecipientsRefused: rc.recipientsRefused,
+			LastDelivery:      rc.lastDelivery,
 		}
 		if ts, ok := tokens[route]; ok {
 			if age, ok := ts.TokenAge(); ok {

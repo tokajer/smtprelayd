@@ -3,7 +3,7 @@
 
 //go:build windows
 
-package config
+package ostrust
 
 import (
 	"fmt"
@@ -106,15 +106,15 @@ func unprotectMachineSecret(ciphertext []byte) ([]byte, error) {
 	return blobBytes(out), nil
 }
 
-// resolveDPAPISecret reads and decrypts a DPAPI-protected secret file. It
+// ResolveDPAPISecret reads and decrypts a DPAPI-protected secret file. It
 // runs the same symlink/reparse-point and containing-directory checks
-// checkSecretFile already runs for file:, since a secret file is a secret
+// CheckSecretFile already runs for file:, since a secret file is a secret
 // file whether or not it happens to be encrypted at rest.
-func resolveDPAPISecret(path string) (string, error) {
-	if err := checkSecretFile(path); err != nil {
+func ResolveDPAPISecret(path string) (string, error) {
+	if err := CheckSecretFile(path); err != nil {
 		return "", err
 	}
-	//#nosec G304 -- an operator-written dpapi: reference, and checkSecretFile above has already verified its containing directory and that it is not a symlink or reparse point
+	//#nosec G304 -- an operator-written dpapi: reference, and CheckSecretFile above has already verified its containing directory and that it is not a symlink or reparse point
 	ciphertext, err := os.ReadFile(path)
 	if err != nil {
 		return "", err

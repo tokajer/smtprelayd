@@ -23,13 +23,22 @@ import (
 	"github.com/tokajer/smtprelayd/internal/store"
 )
 
+// Journal is what this package needs from the history store: one row per
+// accepted copy, and the update that marks a withdrawn copy removed again.
+// Declared on the consumer side, like delivery.Journal, so the
+// journal-failure path can be tested with a fake.
+type Journal interface {
+	RecordMessage(rec store.MessageRecord) error
+	RecordRemoval(queueID string) error
+}
+
 // Server is one configured inbound listener.
 type Server struct {
 	cfg   *config.Config
 	lc    config.Listener
 	log   *slog.Logger
 	spool *spool.Spool
-	store *store.Store
+	store Journal
 
 	// metrics may be nil: every method on it is nil-safe, so the counters it
 	// feeds (session panics, journal write failures) are then simply not
@@ -65,8 +74,9 @@ type Set struct {
 
 // New builds all listeners from the configuration. The TLS material and the
 // client matcher are shared, so a certificate problem fails before any socket
-// is bound. reg is nil-safe; see Server.metrics.
-func New(cfg *config.Config, sp *spool.Spool, st *store.Store, reg *metrics.Registry, log *slog.Logger) (*Set, error) {
+// is bound. reg is nil-safe; see Server.metrics. cert is nil when no
+// certificate is configured; it is loaded once by the caller.
+func New(cfg *config.Config, sp *spool.Spool, st Journal, reg *metrics.Registry, cert *tls.Certificate, log *slog.Logger) (*Set, error) {
 	match, err := NewMatcher(cfg.Clients)
 	if err != nil {
 		return nil, err
@@ -88,15 +98,6 @@ func New(cfg *config.Config, sp *spool.Spool, st *store.Store, reg *metrics.Regi
 	rate := ratelimit.New()
 	conns := newConnCounter()
 	sem := make(chan struct{}, cfg.Limits.MaxConnections)
-
-	var cert *tls.Certificate
-	if cfg.TLS.CertFile != "" {
-		c, err := tls.LoadX509KeyPair(cfg.TLS.CertFile, cfg.TLS.KeyFile)
-		if err != nil {
-			return nil, fmt.Errorf("listener: tls: %w", err)
-		}
-		cert = &c
-	}
 
 	set := &Set{}
 	for _, lc := range cfg.Listeners {

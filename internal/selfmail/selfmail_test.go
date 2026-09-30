@@ -217,3 +217,41 @@ func TestJournalWriteFailureIsCounted(t *testing.T) {
 		t.Fatalf("JournalWriteFailures() = %d, want 1", got)
 	}
 }
+
+// Send is the last place before HeaderFrom, To and Subject reach a header
+// line, so it must not depend on every caller having already validated them:
+// a CR, LF or NUL there would let a composed value inject a header or start a
+// new one.
+func TestSendRefusesControlCharacters(t *testing.T) {
+	base := Message{
+		HeaderFrom: "a@example.at", EnvelopeFrom: "a@example.at",
+		To: []string{"b@example.at"}, Subject: "s", Body: "x\r\n",
+		Origin: "x", Route: "r", Listener: "l",
+	}
+	for _, tc := range []struct {
+		name string
+		msg  func() Message
+	}{
+		{"HeaderFrom CR", func() Message { m := base; m.HeaderFrom = "a\r@example.at"; return m }},
+		{"HeaderFrom LF", func() Message { m := base; m.HeaderFrom = "a\n@example.at"; return m }},
+		{"HeaderFrom NUL", func() Message { m := base; m.HeaderFrom = "a\x00@example.at"; return m }},
+		{"To CRLF injection", func() Message {
+			m := base
+			m.To = []string{"b@example.at\r\nBcc: evil@example.at"}
+			return m
+		}},
+		{"Subject LF", func() Message { m := base; m.Subject = "s\nX-Injected: yes"; return m }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sp, st, log := testDeps(t)
+			_, err := New(sp, st, nil, log).Send(tc.msg(), time.Hour, time.Now())
+			if err == nil {
+				t.Fatal("Send accepted a value containing a control character")
+			}
+			const want = "selfmail: HeaderFrom, To or Subject contains a control character"
+			if err.Error() != want {
+				t.Errorf("error = %q, want %q", err.Error(), want)
+			}
+		})
+	}
+}

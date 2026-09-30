@@ -13,6 +13,7 @@
 package selfmail
 
 import (
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -61,19 +62,26 @@ type Message struct {
 	Kind spool.Kind
 }
 
+// Journal is what this package needs from the history store: one row per
+// composed message. Declared on the consumer side, like delivery.Journal and
+// listener.Journal, so the journal-failure path can be tested with a fake.
+type Journal interface {
+	RecordMessage(rec store.MessageRecord) error
+}
+
 // Mailer spools relay-composed mail. The spool, the store, the registry and
 // the logger are the same four for every message this process writes, so
 // they are held once here rather than passed at each of the three call sites
 // alongside the message itself.
 type Mailer struct {
 	spool   *spool.Spool
-	store   *store.Store
+	store   Journal
 	metrics *metrics.Registry
 	log     *slog.Logger
 }
 
 // New builds a Mailer. reg is nil-safe; see the note on metrics.Registry.
-func New(sp *spool.Spool, st *store.Store, reg *metrics.Registry, log *slog.Logger) *Mailer {
+func New(sp *spool.Spool, st Journal, reg *metrics.Registry, log *slog.Logger) *Mailer {
 	return &Mailer{spool: sp, store: st, metrics: reg, log: log}
 }
 
@@ -81,6 +89,17 @@ func New(sp *spool.Spool, st *store.Store, reg *metrics.Registry, log *slog.Logg
 // write is best-effort: a message that is queued but unrecorded still gets
 // delivered, whereas failing here would lose it.
 func (m *Mailer) Send(msg Message, lifetime time.Duration, now time.Time) (spool.ID, error) {
+	// This is the last place before HeaderFrom, To and Subject reach a header
+	// line, so it must not depend on every caller having already validated
+	// them.
+	const controlChars = "\r\n\x00"
+	unsafe := append([]string{msg.HeaderFrom, msg.Subject}, msg.To...)
+	for _, v := range unsafe {
+		if strings.ContainsAny(v, controlChars) {
+			return "", errors.New("selfmail: HeaderFrom, To or Subject contains a control character")
+		}
+	}
+
 	var b strings.Builder
 	fmt.Fprintf(&b, "From: %s\r\n", msg.HeaderFrom)
 	fmt.Fprintf(&b, "To: %s\r\n", strings.Join(msg.To, ", "))

@@ -368,6 +368,9 @@ max_per_hour = 12
 	}
 }
 
+// A global-only bounce field set on a client is refused before Validate ever
+// runs: config.ClientBounce carries only Notify, so the strict TOML decoder
+// itself reports the rest as unknown keys.
 func TestClientBounceRejectsGlobalOnlyFields(t *testing.T) {
 	body := strings.Replace(baseConfig, "route = \"m365\"\n", "route = \"m365\"\n\n[client.bounce]\ndigest_minutes = 5\n", 1) + `
 [bounce]
@@ -378,7 +381,7 @@ digest_minutes = 15
 max_per_hour = 12
 `
 	_, err := Load(write(t, body))
-	if err == nil || !strings.Contains(err.Error(), "global-only") {
+	if err == nil || !strings.Contains(err.Error(), "unknown key") {
 		t.Fatalf("a client setting bounce.digest_minutes was accepted: %v", err)
 	}
 }

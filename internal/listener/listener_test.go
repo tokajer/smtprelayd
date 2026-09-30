@@ -29,7 +29,7 @@ func testSet(t *testing.T, address string) *Set {
 	// defaults are applied now; a config built by hand has to call it
 	// itself, the way config.Load already does through Validate.
 	cfg.Normalize()
-	set, err := New(cfg, nil, nil, nil, discardLog())
+	set, err := New(cfg, nil, nil, nil, nil, discardLog())
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -154,7 +154,7 @@ func TestShutdownDoesNotWaitForAnIdleSession(t *testing.T) {
 	// write needs a real deadline, not the zero one an unnormalized config
 	// would give it.
 	cfg.Normalize()
-	set, err := New(cfg, nil, nil, nil, discardLog())
+	set, err := New(cfg, nil, nil, nil, nil, discardLog())
 	if err != nil {
 		t.Fatal(err)
 	}

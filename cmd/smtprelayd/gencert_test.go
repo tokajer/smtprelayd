@@ -19,7 +19,7 @@ import (
 )
 
 // writeConfig puts a minimal configuration on disk with the mode
-// config.CheckConfigFile insists on.
+// ostrust.CheckConfigFile insists on.
 func writeConfig(t *testing.T, body string) string {
 	t.Helper()
 	dir := t.TempDir()

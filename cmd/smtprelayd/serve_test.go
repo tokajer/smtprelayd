@@ -104,7 +104,7 @@ func TestLoopbackHandlerGuardsBothTheDashboardAndTheAPI(t *testing.T) {
 	cfg := config.Defaults()
 	cfg.Service.DataDir = dir
 	reg := metrics.New(nil, sp, []string{"m365"}, nil, nil)
-	ws, err := web.New(cfg, sp, st, reg, "test", log)
+	ws, err := web.New(cfg, sp, st, reg, nil, "test", log)
 	if err != nil {
 		t.Fatal(err)
 	}

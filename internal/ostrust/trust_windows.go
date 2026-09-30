@@ -3,7 +3,7 @@
 
 //go:build windows
 
-package config
+package ostrust
 
 import (
 	"fmt"
@@ -47,13 +47,13 @@ func CheckDir(path string) error {
 	return nil
 }
 
-// checkSecretFile mirrors CheckConfigFile on Windows: the reparse-point
+// CheckSecretFile mirrors CheckConfigFile on Windows: the reparse-point
 // refusal is the portable half, and the directory holding the file is
 // checked for the same reason, so that a secret cannot be swapped by
 // replacing it from a directory the caller does not control. Mode bits and
 // ownership are not the access-control mechanism here; a secret outside the
 // data directory is the operator's to protect with an ACL.
-func checkSecretFile(path string) error {
+func CheckSecretFile(path string) error {
 	if err := CheckDir(filepath.Dir(path)); err != nil {
 		return fmt.Errorf("directory of secret file %s: %w", path, err)
 	}

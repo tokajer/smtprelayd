@@ -543,7 +543,13 @@ func (s *Spool) writeMeta(m *Meta) error {
 		_ = os.Remove(tmp)
 		return err
 	}
-	return os.Rename(tmp, s.metaPath(m.ID))
+	if err := os.Rename(tmp, s.metaPath(m.ID)); err != nil {
+		// A leftover tmp file would make every later write for this ID fail
+		// on O_EXCL.
+		_ = os.Remove(tmp)
+		return err
+	}
+	return nil
 }
 
 func (s *Spool) readMeta(id ID) (*Meta, error) {
@@ -669,9 +675,22 @@ func (s *Spool) Defer(m *Meta, until time.Time) {
 	delete(s.leased, m.ID)
 }
 
+// releaseRetryDelay is the floor placed on NextAttempt after a failed
+// metadata write on Release. The retry state is then held in memory only,
+// and the floor keeps a full disk from turning into a hot loop.
+const releaseRetryDelay = time.Minute
+
 // Release returns a message to the queue with an updated retry state.
 func (s *Spool) Release(m *Meta) error {
 	if err := s.writeMeta(m); err != nil {
+		s.mu.Lock()
+		c := *m
+		if floor := time.Now().Add(releaseRetryDelay); c.NextAttempt.Before(floor) {
+			c.NextAttempt = floor
+		}
+		s.putLocked(&c)
+		delete(s.leased, m.ID)
+		s.mu.Unlock()
 		return err
 	}
 	s.mu.Lock()

@@ -5,6 +5,8 @@ package bounce
 
 import (
 	"bytes"
+	"crypto/x509"
+	"encoding/pem"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -17,23 +19,37 @@ import (
 	"github.com/tokajer/smtprelayd/internal/expiry"
 )
 
-func certExpiringIn(t *testing.T, d time.Duration) string {
+// certExpiringIn writes a real certificate to disk, expiring at the given
+// offset from now, and returns both its path (for cfg.TLS.CertFile) and its
+// parsed leaf (what cmd/smtprelayd's loadCertificate would hand to
+// expiry.Items as the served certificate).
+func certExpiringIn(t *testing.T, d time.Duration) (path string, leaf *x509.Certificate) {
 	t.Helper()
 	certPEM, _, err := certgen.Generate(certgen.Options{Hosts: []string{"relay"}, Validity: d})
 	if err != nil {
 		t.Fatal(err)
 	}
-	path := filepath.Join(t.TempDir(), "relay.crt")
+	path = filepath.Join(t.TempDir(), "relay.crt")
 	if err := os.WriteFile(path, certPEM, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	return path
+	block, _ := pem.Decode(certPEM)
+	if block == nil {
+		t.Fatal("no PEM block in the generated certificate")
+	}
+	leaf, err = x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return path, leaf
 }
 
-func watcherFor(t *testing.T, cfg *config.Config) *ExpiryWatcher {
+// watcherFor builds a watcher over the deadlines computed from cfg and the
+// served certificate, the way cmd/smtprelayd's serve does once at startup.
+func watcherFor(t *testing.T, cfg *config.Config, leaf *x509.Certificate) *ExpiryWatcher {
 	t.Helper()
 	// A nil notifier is fine for collect and compose: they never send.
-	return NewExpiryWatcher(cfg, nil, discardLog())
+	return NewExpiryWatcher(cfg, expiry.Items(cfg, leaf), nil, discardLog())
 }
 
 // warn_days is the lead time, so raising it must pull a distant deadline into
@@ -41,21 +57,22 @@ func watcherFor(t *testing.T, cfg *config.Config) *ExpiryWatcher {
 // the path works, and it is documented as such.
 func TestWarnDaysWidensAndDisablesTheWindow(t *testing.T) {
 	now := time.Now()
-	certFile := certExpiringIn(t, 90*24*time.Hour)
+	certFile, leaf := certExpiringIn(t, 90*24*time.Hour)
 
 	cfg := &config.Config{TLS: config.TLS{CertFile: certFile}, Expiry: config.Expiry{WarnDays: 30}}
-	if items := watcherFor(t, cfg).collect(now); len(items) != 0 {
+	if items := watcherFor(t, cfg, leaf).collect(now); len(items) != 0 {
 		t.Fatalf("30 days: got %v, want nothing 90 days out", items)
 	}
 
 	cfg.Expiry.WarnDays = 120
-	if items := watcherFor(t, cfg).collect(now); len(items) != 1 {
+	if items := watcherFor(t, cfg, leaf).collect(now); len(items) != 1 {
 		t.Fatalf("120 days: got %v, want the certificate", items)
 	}
 
 	// Zero switches the warnings off entirely, however close the deadline.
-	near := &config.Config{TLS: config.TLS{CertFile: certExpiringIn(t, 24*time.Hour)}}
-	if items := watcherFor(t, near).collect(now); len(items) != 0 {
+	nearFile, nearLeaf := certExpiringIn(t, 24*time.Hour)
+	near := &config.Config{TLS: config.TLS{CertFile: nearFile}}
+	if items := watcherFor(t, near, nearLeaf).collect(now); len(items) != 0 {
 		t.Fatalf("warn_days 0: got %v, want nothing", items)
 	}
 }
@@ -74,21 +91,17 @@ func TestAlreadyExpiredIsStillCollected(t *testing.T) {
 	if err := os.WriteFile(path, certPEM, 0o644); err != nil {
 		t.Fatal(err)
 	}
+	block, _ := pem.Decode(certPEM)
+	if block == nil {
+		t.Fatal("no PEM block in the generated certificate")
+	}
+	leaf, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		t.Fatal(err)
+	}
 	cfg := &config.Config{TLS: config.TLS{CertFile: path}, Expiry: config.Expiry{WarnDays: 30}}
-	if items := watcherFor(t, cfg).collect(now); len(items) != 1 {
+	if items := watcherFor(t, cfg, leaf).collect(now); len(items) != 1 {
 		t.Fatalf("collect() = %v, want the expired certificate", items)
-	}
-}
-
-// An unreadable certificate is a log line, not a mail: the listener would not
-// have started on one, so mailing about it helps nobody.
-func TestUnreadableCertificateIsNotCollected(t *testing.T) {
-	cfg := &config.Config{
-		TLS:    config.TLS{CertFile: filepath.Join(t.TempDir(), "absent.crt")},
-		Expiry: config.Expiry{WarnDays: 30},
-	}
-	if items := watcherFor(t, cfg).collect(time.Now()); len(items) != 0 {
-		t.Fatalf("collect() = %v, want nothing for an unreadable file", items)
 	}
 }
 
@@ -103,10 +116,11 @@ func TestUnreadableCertificateIsNotCollected(t *testing.T) {
 // the copy, so deleting the gate from check left it green.
 func TestAnItemIsNotRepeatedWithinTheResendInterval(t *testing.T) {
 	cfg := baseCfg()
-	cfg.TLS = config.TLS{CertFile: certExpiringIn(t, 10*24*time.Hour)}
+	certFile, leaf := certExpiringIn(t, 10*24*time.Hour)
+	cfg.TLS = config.TLS{CertFile: certFile}
 	cfg.Expiry = config.Expiry{WarnDays: 30}
 	n, sp, _ := testNotifier(t, cfg)
-	w := NewExpiryWatcher(cfg, n, discardLog())
+	w := NewExpiryWatcher(cfg, expiry.Items(cfg, leaf), n, discardLog())
 	now := time.Now()
 
 	for _, step := range []struct {
@@ -132,11 +146,12 @@ func TestCheckLogsWithoutMailingWhenNoNotifyIsConfigured(t *testing.T) {
 	var buf bytes.Buffer
 	log := slog.New(slog.NewTextHandler(&buf, nil))
 
+	certFile, leaf := certExpiringIn(t, 10*24*time.Hour)
 	cfg := &config.Config{
-		TLS:    config.TLS{CertFile: certExpiringIn(t, 10*24*time.Hour)},
+		TLS:    config.TLS{CertFile: certFile},
 		Expiry: config.Expiry{WarnDays: 30},
 	}
-	w := NewExpiryWatcher(cfg, nil, log)
+	w := NewExpiryWatcher(cfg, expiry.Items(cfg, leaf), nil, log)
 	w.check(time.Now())
 
 	out := buf.String()

@@ -8,7 +8,7 @@ package main
 import "fmt"
 
 // verifyDataDirSecurity is a no-op on Unix, where directory permissions are
-// checked by CheckDir instead.
+// checked by ostrust.CheckDir instead.
 func verifyDataDirSecurity(dataDir string) error {
 	return nil
 }

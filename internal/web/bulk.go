@@ -195,7 +195,7 @@ func (s *Server) activeQueueIDs() ([]spool.ID, bool, error) {
 	// answer it, which is exactly "there were more than bulkMax active
 	// messages" -- and the caller has to say so, because a bulk action that
 	// silently covered part of the queue is the wrong kind of surprise.
-	msgs, truncated, err := s.store.FindMessages(store.MessageFilter{Status: "active", Limit: bulkMax})
+	msgs, truncated, err := s.store.FindMessages(store.MessageFilter{Status: store.StatusActive, Limit: bulkMax})
 	if err != nil {
 		return nil, false, err
 	}

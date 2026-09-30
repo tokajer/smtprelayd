@@ -96,7 +96,7 @@ func TestLoadThroughputVersusSpoolSize(t *testing.T) {
 			cfg.Limits.MaxConnections = 450
 			cfg.Clients[0].MaxConnections = 0
 			cfg.Listeners[0].Address = "127.0.0.1:0"
-			set, err := New(cfg, sp, st, nil, discardLog())
+			set, err := New(cfg, sp, st, nil, nil, discardLog())
 			if err != nil {
 				t.Fatal(err)
 			}

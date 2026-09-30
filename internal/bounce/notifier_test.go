@@ -55,7 +55,7 @@ func baseCfg() *config.Config {
 		},
 		Clients: []config.Client{
 			{Name: "printers", Route: "m365"},
-			{Name: "erp", Route: "m365", Bounce: config.Bounce{Notify: []string{"erp-admins@example.at"}}},
+			{Name: "erp", Route: "m365", Bounce: config.ClientBounce{Notify: []string{"erp-admins@example.at"}}},
 		},
 	}
 }
@@ -314,6 +314,24 @@ func TestRunStopsOnContextCancellation(t *testing.T) {
 	case <-done:
 	case <-time.After(2 * time.Second):
 		t.Fatal("Run did not stop after context cancellation")
+	}
+}
+
+// A failure recorded shortly before shutdown must not wait for a digest
+// interval that will never arrive: Run flushes once on ctx.Done before
+// returning, since the enqueue behind dispatch is a durable spool write.
+func TestFlushSendsPendingFailures(t *testing.T) {
+	cfg := baseCfg()
+	n, sp, _ := testNotifier(t, cfg)
+	n.RecordFail("printers", "Q1")
+
+	n.Flush()
+
+	if got := n.Pending(); got != 0 {
+		t.Errorf("Pending() = %d after Flush, want 0", got)
+	}
+	if sp.Len() != 1 {
+		t.Errorf("spool holds %d messages after Flush, want 1 queued digest", sp.Len())
 	}
 }
 

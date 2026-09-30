@@ -4,8 +4,8 @@
 package expiry
 
 import (
-	"os"
-	"path/filepath"
+	"crypto/x509"
+	"encoding/pem"
 	"testing"
 	"time"
 
@@ -13,9 +13,11 @@ import (
 	"github.com/tokajer/smtprelayd/internal/config"
 )
 
-// writeCert puts a real certificate on disk expiring at the given offset from
-// now, so the parsing path is exercised rather than stubbed.
-func writeCert(t *testing.T, validity time.Duration) string {
+// genCert builds a real leaf certificate expiring at the given offset from
+// now, so the parsing path is exercised rather than stubbed. It stands in for
+// what cmd/smtprelayd's loadCertificate hands to Items as the served
+// certificate.
+func genCert(t *testing.T, validity time.Duration) *x509.Certificate {
 	t.Helper()
 	certPEM, _, err := certgen.Generate(certgen.Options{
 		Hosts: []string{"relay.internal.example.at"}, Validity: validity,
@@ -23,22 +25,23 @@ func writeCert(t *testing.T, validity time.Duration) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	path := filepath.Join(t.TempDir(), "relay.crt")
-	if err := os.WriteFile(path, certPEM, 0o644); err != nil {
+	block, _ := pem.Decode(certPEM)
+	if block == nil {
+		t.Fatal("no PEM block in the generated certificate")
+	}
+	leaf, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
 		t.Fatal(err)
 	}
-	return path
+	return leaf
 }
 
 // Items reports every deadline regardless of how far away it is: the window
 // is the caller's business, and the dashboard shows healthy ones too.
 func TestItemsReportsTheCertificateWhateverItsDistance(t *testing.T) {
 	for _, validity := range []time.Duration{10 * 24 * time.Hour, 900 * 24 * time.Hour} {
-		cfg := &config.Config{TLS: config.TLS{CertFile: writeCert(t, validity)}}
-		items, err := Items(cfg)
-		if err != nil {
-			t.Fatal(err)
-		}
+		cfg := &config.Config{TLS: config.TLS{CertFile: "relay.crt"}}
+		items := Items(cfg, genCert(t, validity))
 		if len(items) != 1 {
 			t.Fatalf("validity %v: Items() = %v, want the certificate", validity, items)
 		}
@@ -48,16 +51,16 @@ func TestItemsReportsTheCertificateWhateverItsDistance(t *testing.T) {
 	}
 }
 
-// An unreadable certificate is an error, not an Item: the listener would not
-// have started on one, so it means the file changed under a running service.
-func TestItemsReportsAnUnreadableCertificateAsAnError(t *testing.T) {
-	cfg := &config.Config{TLS: config.TLS{CertFile: filepath.Join(t.TempDir(), "absent.crt")}}
-	items, err := Items(cfg)
-	if err == nil {
-		t.Fatal("an unreadable certificate must be reported as an error")
-	}
-	if len(items) != 0 {
-		t.Errorf("Items() = %v, want nothing", items)
+// No served certificate means none is configured (or the listener refused to
+// start on it, in which case the process never reaches Items at all): either
+// way there is nothing to report.
+func TestItemsWithNoServedCertificateReportsNoCertificate(t *testing.T) {
+	cfg := &config.Config{TLS: config.TLS{CertFile: "relay.crt"}}
+	items := Items(cfg, nil)
+	for _, it := range items {
+		if it.Key == "tls-certificate" {
+			t.Fatalf("Items() with no served certificate reported one: %v", items)
+		}
 	}
 }
 
@@ -74,10 +77,7 @@ func TestItemsCollectsOAuth2SecretsPerRoute(t *testing.T) {
 		{Name: "undated", Auth: "xoauth2"},
 	}}
 
-	items, err := Items(cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
+	items := Items(cfg, nil)
 	if len(items) != 2 {
 		t.Fatalf("Items() = %v, want the two dated xoauth2 routes", items)
 	}
@@ -90,24 +90,21 @@ func TestItemsCollectsOAuth2SecretsPerRoute(t *testing.T) {
 func TestItemsSortsSoonestFirst(t *testing.T) {
 	now := time.Now()
 	cfg := &config.Config{
-		TLS: config.TLS{CertFile: writeCert(t, 200*24*time.Hour)},
+		TLS: config.TLS{CertFile: "relay.crt"},
 		Routes: []config.Route{{Name: "m365", Auth: "xoauth2", OAuth2: config.OAuth2{
 			TenantID: "t", SecretExpires: now.Add(5 * 24 * time.Hour).Format("2006-01-02"),
 		}}},
 	}
-	items, err := Items(cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
+	items := Items(cfg, genCert(t, 200*24*time.Hour))
 	if len(items) != 2 || items[0].Key != "oauth2-secret:m365" {
 		t.Fatalf("Items() = %v, want the secret first", items)
 	}
 }
 
 func TestItemsWithNothingConfigured(t *testing.T) {
-	items, err := Items(&config.Config{})
-	if err != nil || len(items) != 0 {
-		t.Fatalf("Items() = %v, %v, want nothing and no error", items, err)
+	items := Items(&config.Config{}, nil)
+	if len(items) != 0 {
+		t.Fatalf("Items() = %v, want nothing", items)
 	}
 }
 
@@ -130,21 +127,5 @@ func TestDaysUntil(t *testing.T) {
 	}
 	if got := DaysUntil(now.Add(-3*24*time.Hour), now); got != -3 {
 		t.Errorf("DaysUntil(-3d) = %d, want -3", got)
-	}
-}
-
-func TestCertNotAfterSkipsNonCertificateBlocks(t *testing.T) {
-	certPEM, keyPEM, err := certgen.Generate(certgen.Options{Hosts: []string{"h"}, Validity: time.Hour})
-	if err != nil {
-		t.Fatal(err)
-	}
-	// Key first, as some tooling writes combined PEM files: the certificate
-	// must still be found rather than the key being parsed as one.
-	path := filepath.Join(t.TempDir(), "combined.pem")
-	if err := os.WriteFile(path, append(keyPEM, certPEM...), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := certNotAfter(path); err != nil {
-		t.Fatalf("certNotAfter on a combined PEM: %v", err)
 	}
 }

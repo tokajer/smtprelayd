@@ -12,37 +12,39 @@ live deployment: the Microsoft 365 route delivers with both `file:` and
 the Burn `setup.exe`, `.rpm` and `.deb` (install, upgrade in every
 combination, uninstall with and without purging the data directory).
 
-**Last session**: 2026-09-29 — Architectural review, every finding acted
-on (branch `new-features`, not yet committed). The structure is recorded in
-the `MEMORY.md` §3 amendment of the same date. In short:
+**Last session**: 2026-09-30 — Second architectural review, findings acted
+on (branch `new-features`, not yet committed). Structure and observable
+changes are recorded in the `MEMORY.md` §3 amendment of the same date. In
+short:
 
-- `internal/mailaddr` split out of `config`; `MatchToken` moved to `httpx`.
-- `delivery.Housekeeper` runs the sweeps and the quota warning apart from
-  dispatch.
-- OAuth2 token sources are built in `serve()`.
-- `config.Normalize` is the single home of defaults.
-- `metrics.Registry` is nil-safe.
-- `store.Open` takes the database path.
-- Constructor arguments now run in the order cfg, sp, st, reg, …, log.
-
-Intended observable changes, all recorded in `MEMORY.md`:
-
-- A zero or negative `data_timeout_sec` now means 300 s, not 60 s.
-- The dashboard Configuration page shows normalized values.
-- Selfmail journal failures are counted.
-- The startup "client secret expires soon/has expired" lines are replaced by
-  the `ExpiryWatcher`'s daily "expiry deadline approaching/has passed" lines.
-  These are logged even without `bounce.notify`, where the watcher used to
-  log a false "expiry warning sent".
+- `internal/ostrust` split out of `config` (trust checks, ACL, DPAPI).
+- The TLS key pair is loaded once in `serve()`; expiry deadlines are computed
+  once from the served certificate.
+- `store.Class` and one class-to-status table; `RetentionSweep` takes a
+  context, which closes the item deferred on 2026-09-29.
+- `spool.Release` and `spool.Fail` no longer strand a message when the
+  metadata write fails.
+- `listener.withdraw` records the removal; `bounce.Notifier.Flush` runs at
+  shutdown.
+- `listener.Journal` and `selfmail.Journal` interfaces, `delivery.Manager.now`.
+- `config.ClientBounce`, shared rewrite constants and `config.ParseReplyTo`.
 
 Verified: gofmt, `go vet` and `go build` clean on linux and windows,
-`go test -race ./...` green, banned imports and `govulncheck` clean. `gosec`
-reports the same four pre-existing G104 findings as `HEAD`.
+`go test -race ./...` green, banned imports clean. `govulncheck` and `gosec`
+were not run in this session (neither is installed on the machine used).
 
-Deferred: `store.RetentionSweep` takes no context, so a shutdown during a
-sweep of a very large history (about 15 s at 1M rows) waits for it. This is
-pre-existing, not caused by this change, and matters only for the Windows SCM
-stop timeout.
+Considered and left alone, with the reason:
+
+- `spool.Remove` still drops the index entry before unlinking: for a delivered
+  message the alternatives are an immediate redelivery or a lease that never
+  clears.
+- `Store` methods other than `RetentionSweep` take no context.
+- `spool.Open` still derives the `spool/` layout from the data directory.
+- Components still hold the whole `*config.Config`; narrow one when it is next
+  touched.
+- The multi-route commit failure that reaches `listener.withdraw` has a unit
+  test on `withdraw` only; driving it end to end needs a spool quota finer
+  than 1 GiB or a failure seam in `spool.Commit`.
 
 **Nothing else is open.** Every remaining item is a deferred feature the operator
 chose not to pursue yet, each of which would be its own phase. The scoping

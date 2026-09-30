@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/tokajer/smtprelayd/internal/httpx"
@@ -25,11 +26,6 @@ func limitFromQuery(q url.Values, fallback int) int {
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
-		return
-	}
-
 	statusByRoute := map[string]metrics.RouteStatus{}
 	for _, st := range s.metrics.Status() {
 		statusByRoute[st.Route] = st
@@ -64,14 +60,15 @@ func (s *Server) handleBounces(w http.ResponseWriter, r *http.Request) {
 	c := pageFromQuery(q)
 
 	class := q.Get("class")
-	if class != "" && class != "permanent" && class != "expired" {
+	if !store.ValidBounceClass(class) {
 		writeJSONError(w, http.StatusBadRequest, "class must be permanent or expired")
 		return
 	}
 
+	get := func(k string) string { return strings.TrimSpace(q.Get(k)) }
 	filter := store.BounceFilter{
-		Sender: q.Get("sender"), Recipient: q.Get("recipient"), Subject: q.Get("subject"),
-		Client: q.Get("client"), Route: q.Get("route"), Class: class,
+		Sender: get("sender"), Recipient: get("recipient"), Subject: get("subject"),
+		Client: get("client"), Route: get("route"), Class: class,
 		Limit: c.Limit, Offset: c.Offset,
 	}
 	if msg := httpx.ParseTimeRange(q, &filter.Since, &filter.Until); msg != "" {
@@ -97,7 +94,7 @@ func (s *Server) handleBounces(w http.ResponseWriter, r *http.Request) {
 // published API contract, so it is not accepted here.
 func validMessageStatus(s string) bool {
 	switch s {
-	case "", "queued", "deferred", "delivered", "bounced":
+	case "", store.StatusQueued, store.StatusDeferred, store.StatusDelivered, store.StatusBounced:
 		return true
 	default:
 		return false
@@ -114,9 +111,10 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	get := func(k string) string { return strings.TrimSpace(q.Get(k)) }
 	filter := store.MessageFilter{
-		Sender: q.Get("sender"), Recipient: q.Get("recipient"), Subject: q.Get("subject"),
-		Client: q.Get("client"), Route: q.Get("route"), Status: status,
+		Sender: get("sender"), Recipient: get("recipient"), Subject: get("subject"),
+		Client: get("client"), Route: get("route"), Status: status,
 		Limit: c.Limit, Offset: c.Offset,
 	}
 	if msg := httpx.ParseTimeRange(q, &filter.Since, &filter.Until); msg != "" {

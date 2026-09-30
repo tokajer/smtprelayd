@@ -3,7 +3,7 @@
 
 //go:build windows
 
-package config
+package ostrust
 
 import (
 	"fmt"

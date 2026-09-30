@@ -52,19 +52,21 @@ const (
 // immediately and mails again if anything is inside the window, which is the
 // safe direction to err in for a warning.
 type ExpiryWatcher struct {
-	cfg      *config.Config
-	notifier *Notifier
-	log      *slog.Logger
+	cfg       *config.Config
+	deadlines []expiry.Item
+	notifier  *Notifier
+	log       *slog.Logger
 
 	// lastSent is read and written only from Run's own goroutine, or
 	// directly by a test.
 	lastSent map[string]time.Time
 }
 
-// NewExpiryWatcher builds a watcher. It does nothing until Run is started.
-func NewExpiryWatcher(cfg *config.Config, n *Notifier, log *slog.Logger) *ExpiryWatcher {
+// NewExpiryWatcher builds a watcher over deadlines, computed once in
+// cmd/smtprelayd. It does nothing until Run is started.
+func NewExpiryWatcher(cfg *config.Config, deadlines []expiry.Item, n *Notifier, log *slog.Logger) *ExpiryWatcher {
 	return &ExpiryWatcher{
-		cfg: cfg, notifier: n,
+		cfg: cfg, deadlines: deadlines, notifier: n,
 		log:      log.With("component", "expiry"),
 		lastSent: map[string]time.Time{},
 	}
@@ -151,22 +153,16 @@ func (w *ExpiryWatcher) check(now time.Time) {
 // range.
 func (w *ExpiryWatcher) collect(now time.Time) []expiry.Item {
 	// Checked before anything is read. Run already returns early when the
-	// window is zero, so this is unreachable in the service -- but reading a
-	// certificate and logging about it hourly for warnings that are switched
-	// off is not what the disabled state should cost.
+	// window is zero, so this is unreachable in the service -- but filtering
+	// the stored deadlines hourly for warnings that are switched off is not
+	// what the disabled state should cost.
 	window := expiry.WarnWindow(w.cfg)
 	if window <= 0 {
 		return nil
 	}
-	all, certErr := expiry.Items(w.cfg)
-	if certErr != nil {
-		// Worth a log line, not a mail: see expiry.Items.
-		w.log.Warn("cannot read the TLS certificate to check its expiry",
-			"file", w.cfg.TLS.CertFile, "error", certErr)
-	}
 	deadline := now.Add(window)
 	var due []expiry.Item
-	for _, it := range all {
+	for _, it := range w.deadlines {
 		if it.Expires.Before(deadline) {
 			due = append(due, it)
 		}

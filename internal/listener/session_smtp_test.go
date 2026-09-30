@@ -18,6 +18,7 @@ import (
 
 	"github.com/tokajer/smtprelayd/internal/certgen"
 	"github.com/tokajer/smtprelayd/internal/config"
+	"github.com/tokajer/smtprelayd/internal/metrics"
 	"github.com/tokajer/smtprelayd/internal/spool"
 	"github.com/tokajer/smtprelayd/internal/store"
 )
@@ -103,7 +104,7 @@ func serveTest(t *testing.T, cfg *config.Config) *smtpConn {
 	// hand (as every test here does) has to call it itself, the way
 	// config.Load already does through Validate.
 	cfg.Normalize()
-	set, err := New(cfg, nil, nil, nil, discardLog())
+	set, err := New(cfg, nil, nil, nil, loadTestCert(t, cfg), discardLog())
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -133,6 +134,22 @@ func serveTest(t *testing.T, cfg *config.Config) *smtpConn {
 	s := &smtpConn{t: t, c: conn, br: bufio.NewReader(conn)}
 	s.expect("banner", "220")
 	return s
+}
+
+// loadTestCert loads the key pair cfg.TLS names, standing in for the load
+// cmd/smtprelayd's loadCertificate does once at startup: listener.New takes
+// an already-loaded certificate rather than a path. Returns nil when the
+// config carries none, which is the common case among these tests.
+func loadTestCert(t *testing.T, cfg *config.Config) *tls.Certificate {
+	t.Helper()
+	if cfg.TLS.CertFile == "" {
+		return nil
+	}
+	cert, err := tls.LoadX509KeyPair(cfg.TLS.CertFile, cfg.TLS.KeyFile)
+	if err != nil {
+		t.Fatalf("loading the test certificate: %v", err)
+	}
+	return &cert
 }
 
 func plainConfig(clients ...config.Client) *config.Config {
@@ -229,24 +246,19 @@ func serveQueued(t *testing.T, cfg *config.Config) *smtpConn {
 	return s
 }
 
-// serveQueuedWithStore is serveQueued for a test that also has to read back
-// what was journalled.
-func serveQueuedWithStore(t *testing.T, cfg *config.Config) (*smtpConn, *store.Store) {
+// serveQueuedCore is what every serveQueued* variant shares: a spool, a bound
+// listener wired to the given journal and metrics registry (either may be
+// nil), and a dialled connection past the banner.
+func serveQueuedCore(t *testing.T, cfg *config.Config, j Journal, reg *metrics.Registry) *smtpConn {
 	t.Helper()
-	dir := t.TempDir()
-	sp, err := spool.Open(dir)
+	sp, err := spool.Open(t.TempDir())
 	if err != nil {
 		t.Fatalf("spool.Open: %v", err)
 	}
-	st, err := store.Open(filepath.Join(dir, "history.db"), discardLog(), 90, true)
-	if err != nil {
-		t.Fatalf("store.Open: %v", err)
-	}
-	t.Cleanup(func() { _ = st.Close() })
 
 	cfg.Listeners[0].Address = "127.0.0.1:0"
 	cfg.Normalize()
-	set, err := New(cfg, sp, st, nil, discardLog())
+	set, err := New(cfg, sp, j, reg, nil, discardLog())
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -275,7 +287,19 @@ func serveQueuedWithStore(t *testing.T, cfg *config.Config) (*smtpConn, *store.S
 	}
 	s := &smtpConn{t: t, c: conn, br: bufio.NewReader(conn)}
 	s.expect("banner", "220")
-	return s, st
+	return s
+}
+
+// serveQueuedWithStore is serveQueued for a test that also has to read back
+// what was journalled.
+func serveQueuedWithStore(t *testing.T, cfg *config.Config) (*smtpConn, *store.Store) {
+	t.Helper()
+	st, err := store.Open(filepath.Join(t.TempDir(), "history.db"), discardLog(), 90, true)
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	return serveQueuedCore(t, cfg, st, nil), st
 }
 
 // queueConfig is plainConfig plus the route a committed message needs.
@@ -498,5 +522,38 @@ func TestJournalMetadataIsIdenticalForEveryRouteCopy(t *testing.T) {
 		if msg.Route == first.Route {
 			t.Errorf("both copies went to route %q; the recipients did not split", msg.Route)
 		}
+	}
+}
+
+// fakeJournal is a Journal that always answers err, for testing the
+// journal-write-failure path without a real history store.
+type fakeJournal struct{ err error }
+
+func (f fakeJournal) RecordMessage(store.MessageRecord) error { return f.err }
+func (f fakeJournal) RecordRemoval(string) error              { return f.err }
+
+// serveQueuedWithJournal is serveQueuedWithStore for a test that supplies its
+// own Journal (a fake) instead of a real history store, and needs the
+// metrics registry back to read the counters the journal path feeds.
+func serveQueuedWithJournal(t *testing.T, cfg *config.Config, j Journal) (*smtpConn, *metrics.Registry) {
+	t.Helper()
+	reg := metrics.New(nil, nil, nil, nil, nil)
+	return serveQueuedCore(t, cfg, j, reg), reg
+}
+
+// A history journal write failure must not refuse the message: it is already
+// durably queued by the time journalAccepted runs, and history is
+// best-effort. Only the counter records the failure.
+func TestJournalWriteFailureDoesNotRefuseTheMessage(t *testing.T) {
+	s, reg := serveQueuedWithJournal(t, queueConfig(), fakeJournal{err: errors.New("db closed")})
+	s.beginData()
+	s.send("Subject: x")
+	s.send("")
+	s.send("body")
+	s.send(".")
+	s.expect("end of data despite the journal failure", "250")
+
+	if got := reg.JournalWriteFailures(); got != 1 {
+		t.Fatalf("JournalWriteFailures() = %d, want 1", got)
 	}
 }

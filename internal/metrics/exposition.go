@@ -39,7 +39,6 @@ type snapshot struct {
 	sessionPanics      uint64
 	journalWriteFails  uint64
 	expiryItems        []expiry.Item
-	expiryErr          error
 }
 
 // series is one metric family: its identity, and the samples it contributes.
@@ -51,12 +50,6 @@ type series struct {
 	name string
 	kind string // counter or gauge
 	help string
-
-	// when gates the whole family, header included. Only the two expiry
-	// families use it: a gauge that is present and zero says something
-	// different from one that is absent, and CHECKMK.md documents which of
-	// the two appears when.
-	when func(*snapshot) bool
 
 	// Exactly one of value and rows is set. value is the shorthand for a
 	// family that is a single unlabelled sample, which is most of the
@@ -123,23 +116,11 @@ var expositionSeries = []series{
 		// the same expression rather than a second one.
 		name: "smtprelayd_expiry_seconds", kind: "gauge",
 		help: "Seconds until a certificate or credential expires; negative once it has.",
-		when: func(s *snapshot) bool { return s.expiryErr == nil },
 		rows: func(b *strings.Builder, s *snapshot) {
 			for _, it := range s.expiryItems {
 				fmt.Fprintf(b, "smtprelayd_expiry_seconds{item=%s} %d\n",
 					label(it.Key), int64(time.Until(it.Expires).Seconds()))
 			}
-		},
-	},
-	{
-		// A certificate that cannot be read is not silently absent from the
-		// exposition: a gauge that vanishes looks the same as a monitoring
-		// system that stopped scraping.
-		name: "smtprelayd_expiry_read_errors", kind: "gauge",
-		help: "Certificate or credential deadlines that could not be read.",
-		when: func(s *snapshot) bool { return s.expiryErr != nil },
-		rows: func(b *strings.Builder, _ *snapshot) {
-			b.WriteString("smtprelayd_expiry_read_errors 1\n")
 		},
 	},
 	{
@@ -232,9 +213,7 @@ func (r *Registry) snapshot() *snapshot {
 		status: r.Status(),
 		uptime: time.Since(r.start).Seconds(),
 	}
-	if r.expiry != nil {
-		s.expiryItems, s.expiryErr = r.expiry()
-	}
+	s.expiryItems = r.expiry
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -256,9 +235,6 @@ func (r *Registry) text() string {
 	snap := r.snapshot()
 	var b strings.Builder
 	for _, se := range expositionSeries {
-		if se.when != nil && !se.when(snap) {
-			continue
-		}
 		fmt.Fprintf(&b, "# HELP %s %s\n", se.name, se.help)
 		fmt.Fprintf(&b, "# TYPE %s %s\n", se.name, se.kind)
 		switch {

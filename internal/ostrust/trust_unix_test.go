@@ -3,7 +3,7 @@
 
 //go:build !windows
 
-package config
+package ostrust
 
 import (
 	"os"
@@ -14,7 +14,7 @@ import (
 
 // A secret file is only as protected as the directory it sits in: a
 // group-writable parent lets another account unlink it and put its own file
-// there. CheckConfigFile was fixed for exactly this; checkSecretFile was left
+// there. CheckConfigFile was fixed for exactly this; CheckSecretFile was left
 // behind until 2026-08-11.
 func TestCheckSecretFileRejectsWritableDirectory(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "secrets")
@@ -26,14 +26,14 @@ func TestCheckSecretFileRejectsWritableDirectory(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := checkSecretFile(path); err != nil {
+	if err := CheckSecretFile(path); err != nil {
 		t.Fatalf("a 0600 secret in a 0700 directory was rejected: %v", err)
 	}
 
 	if err := os.Chmod(dir, 0o770); err != nil {
 		t.Fatal(err)
 	}
-	err := checkSecretFile(path)
+	err := CheckSecretFile(path)
 	if err == nil {
 		t.Fatal("a secret in a group-writable directory was accepted")
 	}
@@ -51,7 +51,7 @@ func TestCheckSecretFileStillRejectsAReadableSecret(t *testing.T) {
 	if err := os.WriteFile(path, []byte("s3cr3t"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := checkSecretFile(path); err == nil {
+	if err := CheckSecretFile(path); err == nil {
 		t.Fatal("a world-readable secret was accepted")
 	}
 }
@@ -60,7 +60,7 @@ func TestCheckSecretFileStillRejectsAReadableSecret(t *testing.T) {
 // and the directory the binary runs from are checked at startup by a process
 // that may be privileged enough to bind port 25, and a link lets whoever can
 // replace it point that process somewhere else. The writable-directory branch
-// is covered through checkSecretFile above; this branch and CheckDir itself
+// is covered through CheckSecretFile above; this branch and CheckDir itself
 // had no test, so either could be deleted with the suite green.
 //
 // The ownership branch is not covered here: it needs a directory owned by

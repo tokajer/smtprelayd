@@ -18,8 +18,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/tokajer/smtprelayd/internal/certgen"
 	"github.com/tokajer/smtprelayd/internal/config"
+	"github.com/tokajer/smtprelayd/internal/expiry"
 	"github.com/tokajer/smtprelayd/internal/metrics"
 	"github.com/tokajer/smtprelayd/internal/spool"
 	"github.com/tokajer/smtprelayd/internal/store"
@@ -67,7 +67,9 @@ enabled = true
 	return cfg
 }
 
-func testServer(t *testing.T, cfg *config.Config) (*Server, *store.Store, *spool.Spool) {
+// testServer builds a dashboard server. deadlines is almost always nil: only
+// TestConfigPageShowsExpiries needs one, and passes its own.
+func testServer(t *testing.T, cfg *config.Config, deadlines []expiry.Item) (*Server, *store.Store, *spool.Spool) {
 	t.Helper()
 	st, err := store.Open(filepath.Join(t.TempDir(), "history.db"), discardLog(), 90, cfg.History.RetainSubjects)
 	if err != nil {
@@ -78,7 +80,7 @@ func testServer(t *testing.T, cfg *config.Config) (*Server, *store.Store, *spool
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv, err := New(cfg, sp, st, nil, "test", discardLog())
+	srv, err := New(cfg, sp, st, nil, deadlines, "test", discardLog())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -105,7 +107,7 @@ func get(t *testing.T, h http.Handler, target string) *httptest.ResponseRecorder
 
 func TestSecurityHeadersOnEveryPage(t *testing.T) {
 	cfg := testConfig(t, "")
-	srv, _, _ := testServer(t, cfg)
+	srv, _, _ := testServer(t, cfg, nil)
 	h := srv.Handler()
 
 	for _, path := range []string{"/queue", "/search", "/bounces", "/routes", "/config"} {
@@ -125,7 +127,7 @@ func TestSecurityHeadersOnEveryPage(t *testing.T) {
 
 func TestRootRedirectsToQueue(t *testing.T) {
 	cfg := testConfig(t, "")
-	srv, _, _ := testServer(t, cfg)
+	srv, _, _ := testServer(t, cfg, nil)
 	rec := get(t, srv.Handler(), "/")
 	if rec.Code != http.StatusFound || rec.Header().Get("Location") != "/queue" {
 		t.Fatalf("got %d %q", rec.Code, rec.Header().Get("Location"))
@@ -134,7 +136,7 @@ func TestRootRedirectsToQueue(t *testing.T) {
 
 func TestXSSShapedSubjectIsEscaped(t *testing.T) {
 	cfg := testConfig(t, "")
-	srv, st, _ := testServer(t, cfg)
+	srv, st, _ := testServer(t, cfg, nil)
 
 	now := time.Now()
 	const evilSubject = `<script>alert(1)</script><img src=x onerror=alert(2)>`
@@ -171,7 +173,7 @@ func TestXSSShapedSubjectIsEscaped(t *testing.T) {
 
 func TestSubjectRedactedWhenRetentionDisabled(t *testing.T) {
 	cfg := testConfig(t, "\n[history]\nretention_days = 90\nretain_subjects = false\n")
-	srv, st, _ := testServer(t, cfg)
+	srv, st, _ := testServer(t, cfg, nil)
 
 	now := time.Now()
 	// store.RecordMessage itself already redacts when retain_subjects is
@@ -193,7 +195,7 @@ func TestSubjectRedactedWhenRetentionDisabled(t *testing.T) {
 
 func TestMessageHandlerRejectsInvalidQueueID(t *testing.T) {
 	cfg := testConfig(t, "")
-	srv, _, _ := testServer(t, cfg)
+	srv, _, _ := testServer(t, cfg, nil)
 
 	// Wrong length, wrong alphabet (lowercase), and wrong alphabet (digits
 	// the Crockford-style ID encoding never produces) respectively — none of
@@ -209,7 +211,7 @@ func TestMessageHandlerRejectsInvalidQueueID(t *testing.T) {
 
 func TestMessageHandlerReportsMissingMessage(t *testing.T) {
 	cfg := testConfig(t, "")
-	srv, _, _ := testServer(t, cfg)
+	srv, _, _ := testServer(t, cfg, nil)
 	// A syntactically valid but unknown queue ID must render a clean "not
 	// found" page, not a server error.
 	rec := get(t, srv.Handler(), "/messages/AAAAAAAAAAAAAAAA")
@@ -223,7 +225,7 @@ func TestMessageHandlerReportsMissingMessage(t *testing.T) {
 
 func TestQueueStatusFilterOnlyShowsActiveMessages(t *testing.T) {
 	cfg := testConfig(t, "")
-	srv, st, _ := testServer(t, cfg)
+	srv, st, _ := testServer(t, cfg, nil)
 
 	now := time.Now()
 	_ = st.RecordMessage(store.MessageRecord{QueueID: "QUEUEDAAAAAAAAAA", Client: "printers", Route: "m365", EnvelopeFrom: "relay@example.com", OriginalFrom: "", Recipients: []string{"user@example.com"}, Subject: "still queued", Listener: "smtp", RemoteAddr: "10.10.5.5", ReceivedAt: now, ExpiresAt: now.Add(time.Hour), TLSUsed: false})
@@ -242,7 +244,7 @@ func TestQueueStatusFilterOnlyShowsActiveMessages(t *testing.T) {
 
 func TestSearchInvalidTimeRangeShowsErrorNotCrash(t *testing.T) {
 	cfg := testConfig(t, "")
-	srv, _, _ := testServer(t, cfg)
+	srv, _, _ := testServer(t, cfg, nil)
 	rec := get(t, srv.Handler(), "/search?since=not-a-date")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200 with an inline error", rec.Code)
@@ -279,7 +281,7 @@ oauth2.mailbox = "relay@contoso.onmicrosoft.com"
 		t.Fatal("test setup failed: secret did not resolve to the expected value")
 	}
 
-	srv, _, _ := testServer(t, cfg)
+	srv, _, _ := testServer(t, cfg, nil)
 	rec := get(t, srv.Handler(), "/config")
 	body := rec.Body.String()
 	if strings.Contains(body, secretValue) {
@@ -292,7 +294,7 @@ oauth2.mailbox = "relay@contoso.onmicrosoft.com"
 
 func TestMessagePageIncludesCSRFTokens(t *testing.T) {
 	cfg := testConfig(t, "")
-	srv, st, _ := testServer(t, cfg)
+	srv, st, _ := testServer(t, cfg, nil)
 	now := time.Now()
 	if err := st.RecordMessage(store.MessageRecord{QueueID: "CSRFPAGEAAAAAAAA", Client: "printers", Route: "m365", EnvelopeFrom: "relay@example.com", OriginalFrom: "", Recipients: []string{"user@example.com"}, Subject: "s", Listener: "smtp", RemoteAddr: "10.10.5.5", ReceivedAt: now, ExpiresAt: now.Add(time.Hour), TLSUsed: false}); err != nil {
 		t.Fatal(err)
@@ -314,11 +316,12 @@ func TestMessagePageIncludesCSRFTokens(t *testing.T) {
 // good, so Requeue and Delete can never succeed again.
 func TestMessagePageHidesActionsForTerminalStatus(t *testing.T) {
 	cfg := testConfig(t, "")
-	srv, st, _ := testServer(t, cfg)
+	srv, st, _ := testServer(t, cfg, nil)
 	now := time.Now()
 
 	for _, tc := range []struct {
-		id, class string
+		id    string
+		class store.Class
 	}{
 		{"TERMDELIVERED222", "delivered"},
 		{"TERMREMOVED22222", "removed"},
@@ -352,7 +355,7 @@ func postForm(h http.Handler, target, csrf string) *httptest.ResponseRecorder {
 
 func TestRequeueActionRejectsMissingOrWrongCSRF(t *testing.T) {
 	cfg := testConfig(t, "")
-	srv, st, sp := testServer(t, cfg)
+	srv, st, sp := testServer(t, cfg, nil)
 	id := enqueueMessage(t, st, sp, "m365")
 
 	if rec := postForm(srv.Handler(), "/messages/"+id+"/requeue", ""); rec.Code != http.StatusForbidden {
@@ -377,7 +380,7 @@ func TestRequeueActionRejectsMissingOrWrongCSRF(t *testing.T) {
 
 func TestRequeueActionSucceedsAndAudits(t *testing.T) {
 	cfg := testConfig(t, "")
-	srv, st, sp := testServer(t, cfg)
+	srv, st, sp := testServer(t, cfg, nil)
 	id := enqueueMessage(t, st, sp, "m365")
 
 	token := srv.csrf.token("requeue", id, time.Now())
@@ -397,7 +400,7 @@ func TestRequeueActionSucceedsAndAudits(t *testing.T) {
 
 func TestDeleteActionRemovesFromSpoolKeepsHistory(t *testing.T) {
 	cfg := testConfig(t, "")
-	srv, st, sp := testServer(t, cfg)
+	srv, st, sp := testServer(t, cfg, nil)
 	id := enqueueMessage(t, st, sp, "m365")
 
 	token := srv.csrf.token("delete", id, time.Now())
@@ -477,7 +480,7 @@ func recordGhost(t *testing.T, st *store.Store, id string) string {
 
 func TestQueuePageRendersBulkForm(t *testing.T) {
 	cfg := testConfig(t, "")
-	srv, st, sp := testServer(t, cfg)
+	srv, st, sp := testServer(t, cfg, nil)
 	id := enqueueMessage(t, st, sp, "m365")
 
 	body := get(t, srv.Handler(), "/queue").Body.String()
@@ -506,7 +509,7 @@ func TestQueuePageRendersBulkForm(t *testing.T) {
 // from a message that is genuinely waiting to be sent.
 func TestQueuePageMarksRowsWithNoSpoolCopy(t *testing.T) {
 	cfg := testConfig(t, "")
-	srv, st, sp := testServer(t, cfg)
+	srv, st, sp := testServer(t, cfg, nil)
 	live := enqueueMessage(t, st, sp, "m365")
 	recordGhost(t, st, "GHOSTAAAAAAAAAAA")
 
@@ -521,7 +524,7 @@ func TestQueuePageMarksRowsWithNoSpoolCopy(t *testing.T) {
 
 func TestQueueBulkRejectsMissingOrWrongCSRF(t *testing.T) {
 	cfg := testConfig(t, "")
-	srv, st, sp := testServer(t, cfg)
+	srv, st, sp := testServer(t, cfg, nil)
 	id := enqueueMessage(t, st, sp, "m365")
 	now := time.Now()
 
@@ -543,7 +546,7 @@ func TestQueueBulkRejectsMissingOrWrongCSRF(t *testing.T) {
 
 func TestQueueBulkDeleteRemovesOnlySelected(t *testing.T) {
 	cfg := testConfig(t, "")
-	srv, st, sp := testServer(t, cfg)
+	srv, st, sp := testServer(t, cfg, nil)
 	keep := enqueueMessage(t, st, sp, "m365")
 	gone1 := enqueueMessage(t, st, sp, "m365")
 	gone2 := enqueueMessage(t, st, sp, "m365")
@@ -582,7 +585,7 @@ func TestQueueBulkDeleteRemovesOnlySelected(t *testing.T) {
 
 func TestQueueBulkRequeueSelectedAudits(t *testing.T) {
 	cfg := testConfig(t, "")
-	srv, st, sp := testServer(t, cfg)
+	srv, st, sp := testServer(t, cfg, nil)
 	id := enqueueMessage(t, st, sp, "m365")
 
 	rec := postValues(srv.Handler(), "/queue/requeue", url.Values{
@@ -607,7 +610,7 @@ func TestQueueBulkRequeueSelectedAudits(t *testing.T) {
 // handler refuses an unconfirmed request outright.
 func TestQueueBulkDeleteAllRequiresConfirmation(t *testing.T) {
 	cfg := testConfig(t, "")
-	srv, st, sp := testServer(t, cfg)
+	srv, st, sp := testServer(t, cfg, nil)
 	enqueueMessage(t, st, sp, "m365")
 	enqueueMessage(t, st, sp, "m365")
 	token := srv.csrf.token("queue-delete", "", time.Now())
@@ -651,7 +654,7 @@ func TestQueueBulkDeleteAllRequiresConfirmation(t *testing.T) {
 // must now clear it.
 func TestDeleteClearsAQueueRowWithNoSpoolCopy(t *testing.T) {
 	cfg := testConfig(t, "")
-	srv, st, _ := testServer(t, cfg)
+	srv, st, _ := testServer(t, cfg, nil)
 	single := recordGhost(t, st, "GHOSTSINGLEAAAAA")
 	bulk := recordGhost(t, st, "GHOSTBULKAAAAAAA")
 
@@ -702,7 +705,7 @@ func TestDeleteClearsAQueueRowWithNoSpoolCopy(t *testing.T) {
 // send. It must be reported as missing rather than silently counted as done.
 func TestQueueBulkRequeueReportsMessagesWithNoSpoolCopy(t *testing.T) {
 	cfg := testConfig(t, "")
-	srv, st, _ := testServer(t, cfg)
+	srv, st, _ := testServer(t, cfg, nil)
 	id := recordGhost(t, st, "GHOSTREQUEUEAAAA")
 
 	rec := postValues(srv.Handler(), "/queue/requeue", url.Values{
@@ -724,7 +727,7 @@ func TestQueueBulkRequeueReportsMessagesWithNoSpoolCopy(t *testing.T) {
 
 func TestQueueBulkRejectsMalformedRequests(t *testing.T) {
 	cfg := testConfig(t, "")
-	srv, _, _ := testServer(t, cfg)
+	srv, _, _ := testServer(t, cfg, nil)
 	token := srv.csrf.token("queue-delete", "", time.Now())
 
 	cases := map[string]url.Values{
@@ -780,7 +783,7 @@ func TestBulkFlashIsBuiltFromCountsOnly(t *testing.T) {
 
 func TestQueueScriptServedWithJSContentType(t *testing.T) {
 	cfg := testConfig(t, "")
-	srv, _, _ := testServer(t, cfg)
+	srv, _, _ := testServer(t, cfg, nil)
 	rec := get(t, srv.Handler(), "/static/queue.js")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d", rec.Code)
@@ -797,7 +800,7 @@ func TestQueueScriptServedWithJSContentType(t *testing.T) {
 
 func TestStyleServedWithCSSContentType(t *testing.T) {
 	cfg := testConfig(t, "")
-	srv, _, _ := testServer(t, cfg)
+	srv, _, _ := testServer(t, cfg, nil)
 	rec := get(t, srv.Handler(), "/static/style.css")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d", rec.Code)
@@ -870,17 +873,6 @@ func TestServeIsPlainHTTPEvenWithATLSCertificateConfigured(t *testing.T) {
 // to see it when it is.
 func TestConfigPageShowsExpiries(t *testing.T) {
 	cfg := testConfig(t, "")
-	certPEM, _, err := certgen.Generate(certgen.Options{
-		Hosts: []string{"relay.internal.example.at"}, Validity: 400 * 24 * time.Hour,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	certFile := filepath.Join(t.TempDir(), "relay.crt")
-	if err := os.WriteFile(certFile, certPEM, 0o644); err != nil {
-		t.Fatal(err)
-	}
-	cfg.TLS.CertFile = certFile
 	cfg.Routes = append(cfg.Routes, config.Route{
 		Name: "m365", Auth: "xoauth2",
 		OAuth2: config.OAuth2{
@@ -888,8 +880,15 @@ func TestConfigPageShowsExpiries(t *testing.T) {
 			SecretExpires: time.Now().Add(10 * 24 * time.Hour).Format("2006-01-02"),
 		},
 	})
+	// expiryRows only ever renders s.deadlines; it never reads tls.cert_file
+	// itself, so the certificate item is a literal here rather than one read
+	// back from a certificate generated and written to disk just for this.
+	deadlines := append(expiry.Items(cfg, nil), expiry.Item{
+		Key: "tls-certificate", What: "the listener TLS certificate",
+		Detail: "relay.crt", Expires: time.Now().Add(400 * 24 * time.Hour),
+	})
 
-	srv, _, _ := testServer(t, cfg)
+	srv, _, _ := testServer(t, cfg, deadlines)
 	body := get(t, srv.Handler(), "/config").Body.String()
 	for _, want := range []string{
 		"Expiry",
@@ -907,25 +906,12 @@ func TestConfigPageShowsExpiries(t *testing.T) {
 	}
 }
 
-// A certificate path that cannot be read is surfaced, not silently omitted:
-// it means the file changed under a running service.
-func TestConfigPageReportsAnUnreadableCertificate(t *testing.T) {
-	cfg := testConfig(t, "")
-	cfg.TLS.CertFile = filepath.Join(t.TempDir(), "absent.crt")
-
-	srv, _, _ := testServer(t, cfg)
-	body := get(t, srv.Handler(), "/config").Body.String()
-	if !strings.Contains(body, "could not be read") {
-		t.Errorf("config page should report the unreadable certificate:\n%s", body)
-	}
-}
-
 // A bulk action whose client has gone must stop rather than finish an
 // irreversible run nobody will see the result of, and must report that it
 // stopped so the operator knows to repeat it.
 func TestQueueBulkStopsWhenTheClientDisconnects(t *testing.T) {
 	cfg := testConfig(t, "")
-	srv, st, sp := testServer(t, cfg)
+	srv, st, sp := testServer(t, cfg, nil)
 	var ids []string
 	for i := 0; i < 5; i++ {
 		ids = append(ids, enqueueMessage(t, st, sp, "m365"))
@@ -997,8 +983,8 @@ func TestJournalFailuresAreStatedOnThePage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	reg := metrics.New(metrics.ConfigExpiry(cfg), sp, []string{"m365"}, nil, nil)
-	srv, err := New(cfg, sp, st, reg, "test", discardLog())
+	reg := metrics.New(expiry.Items(cfg, nil), sp, []string{"m365"}, nil, nil)
+	srv, err := New(cfg, sp, st, reg, nil, "test", discardLog())
 	if err != nil {
 		t.Fatal(err)
 	}

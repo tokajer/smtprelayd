@@ -24,24 +24,25 @@ import (
 	"github.com/tokajer/smtprelayd/internal/mailaddr"
 )
 
-// Rewrite modes, mirroring config.Rewrite.Mode.
+// Rewrite modes and the header_from/reply_to vocabulary, re-exported from
+// config's shared vocabulary under the names this package's own callers use.
 const (
-	ModeOff            = "off"
-	ModeIfUnauthorized = "if_unauthorized"
-	ModeForce          = "force"
+	ModeOff            = config.RewriteOff
+	ModeIfUnauthorized = config.RewriteIfUnauthorized
+	ModeForce          = config.RewriteForce
 
 	// HeaderFromKeep leaves the client's From header in place, provided it is
 	// aligned with the rewritten envelope sender. A misaligned From is
 	// replaced anyway, because SPF checks the envelope and DMARC the header:
 	// keeping a foreign From would produce a message the smarthost rejects.
-	HeaderFromKeep = "keep"
+	HeaderFromKeep = config.HeaderFromKeep
 )
 
 // Reply-To dispositions.
 const (
-	replyPreserve = "preserve"
-	replyDrop     = "drop"
-	replyFixed    = "fixed"
+	replyPreserve = config.ReplyToPreserve
+	replyDrop     = config.ReplyToDrop
+	replyFixed    = config.ReplyToFixed
 )
 
 var (
@@ -125,19 +126,10 @@ func Compile(r config.Rewrite) (*Rules, error) {
 		return nil, errors.New("rewrite: mode if_unauthorized requires allowed_senders")
 	}
 
-	switch rt := strings.TrimSpace(r.ReplyTo); {
-	case rt == "" || rt == replyPreserve:
-		out.replyTo = replyPreserve
-	case rt == replyDrop:
-		out.replyTo = replyDrop
-	case strings.HasPrefix(rt, "fixed:"):
-		addr := strings.TrimSpace(strings.TrimPrefix(rt, "fixed:"))
-		if !mailaddr.ValidAddress(addr) {
-			return nil, fmt.Errorf("rewrite: reply_to fixed address %q is not valid", addr)
-		}
-		out.replyTo, out.replyFixed = replyFixed, addr
-	default:
-		return nil, fmt.Errorf("rewrite: unknown reply_to %q", r.ReplyTo)
+	var err error
+	out.replyTo, out.replyFixed, err = config.ParseReplyTo(r.ReplyTo)
+	if err != nil {
+		return nil, fmt.Errorf("rewrite: %w", err)
 	}
 	return out, nil
 }

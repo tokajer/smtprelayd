@@ -224,3 +224,70 @@ func TestDispatchHoldsASaturatedRouteAndMovesOn(t *testing.T) {
 		t.Fatalf("the spool holds %d messages, want all 20 kept", n)
 	}
 }
+
+// The slot and the rate-limit token are separate budgets, acquired in that
+// order (see the comment in dispatchOne on why). A message the rate limiter
+// refuses must still hand its worker slot back, or the next call on this
+// route finds no room even though nothing is actually being sent.
+func TestDispatchOneReturnsTheSlotWhenTheRateLimiterRefuses(t *testing.T) {
+	f := startFakeSmarthost(t, "250 2.0.0 accepted")
+	host, port := f.hostPort(t)
+	cfg := &config.Config{
+		Service: config.Service{Hostname: "relay.test"},
+		Queue:   config.Queue{MaxLifetimeHours: 96, RetryScheduleMin: []int{1}},
+		Limits:  config.Limits{DeliveryTimeoutSec: 20},
+		Bounce:  config.Bounce{DigestMinutes: 15, MaxPerHour: 10},
+		Routes: []config.Route{{
+			// One slot and one send per minute: the first message consumes
+			// both, so the second finds the slot free again but the token gone.
+			Name: "smarthost", Host: host, Port: port,
+			TLS: "none", Auth: "none", MaxConcurrent: 1, RateLimitPerMin: 1,
+		}},
+	}
+	sp, err := spool.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, err := store.Open(filepath.Join(t.TempDir(), "history.db"), discardLog(), 90, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	reg := testRegistry(cfg, sp)
+	m := New(cfg, sp, st, reg, nil, bounce.New(cfg, sp, st, reg, discardLog()), discardLog())
+
+	claimOne := func() *spool.Meta {
+		t.Helper()
+		env := spool.Envelope{From: "device@example.at", To: []string{"ops@example.net"},
+			Origin: "printers", Route: "smarthost", Received: time.Now().UTC()}
+		if _, err := sp.Enqueue(env, strings.NewReader("Subject: t\r\n\r\nbody\r\n"), 0, time.Hour); err != nil {
+			t.Fatal(err)
+		}
+		meta, ok := sp.Claim(time.Now())
+		if !ok {
+			t.Fatal("nothing to claim")
+		}
+		return meta
+	}
+
+	saturated := map[string]bool{}
+	if !m.dispatchOne(context.Background(), claimOne(), saturated) {
+		t.Fatal("dispatchOne reported cancellation on a live context")
+	}
+	// The first message is delivered by a real (fake, loopback) smarthost in
+	// its own goroutine; wait for it to finish and free its slot before the
+	// second call, or the second would be refused for the wrong reason (no
+	// slot) instead of the one this test is about (no token).
+	m.wg.Wait()
+
+	if !m.dispatchOne(context.Background(), claimOne(), saturated) {
+		t.Fatal("dispatchOne reported cancellation on a live context")
+	}
+
+	if n := len(m.routes["smarthost"]); n != 0 {
+		t.Errorf("route budget holds %d slot(s) after a rate-limit refusal, want 0", n)
+	}
+	if !saturated["smarthost"] {
+		t.Error(`saturated["smarthost"] = false, want true after a rate-limit refusal`)
+	}
+}

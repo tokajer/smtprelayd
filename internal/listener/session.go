@@ -509,12 +509,20 @@ func (s *session) commitCopies(staged *spool.Staged, res rewrite.Result, groups 
 // withdraw un-queues the copies made before a later one failed. A partial
 // accept would be delivered once and then again when the client retries the
 // whole message, so nothing may stay queued for a transaction the client is
-// about to be told was not accepted.
+// about to be told was not accepted. A copy is claimable the instant Commit
+// returns, so its "message accepted" row is written before this can run; the
+// history row is updated to removed rather than left listing a copy the spool
+// no longer backs.
 func (s *session) withdraw(committed []spool.ID) {
 	for _, done := range committed {
 		if err := s.srv.spool.Remove(done); err != nil {
 			s.log.Error("could not withdraw a partially queued copy",
 				"queue_id", done.String(), "error", err)
+			continue
+		}
+		if err := s.srv.store.RecordRemoval(done.String()); err != nil {
+			s.log.Warn("history journal write failed", "queue_id", done.String(), "error", err)
+			s.srv.metrics.JournalWriteFailure()
 		}
 	}
 }

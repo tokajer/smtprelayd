@@ -7,10 +7,14 @@ import (
 	"bufio"
 	"errors"
 	"io"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 	"unicode/utf8"
+
+	"github.com/tokajer/smtprelayd/internal/spool"
+	"github.com/tokajer/smtprelayd/internal/store"
 )
 
 // TestReadDeadlineClampedToSession covers the unmatched-source path: the per
@@ -131,5 +135,69 @@ func TestDotReaderFlagsNonConformingEndOfData(t *testing.T) {
 				t.Fatalf("trailing input = %q, %v", rest, err)
 			}
 		})
+	}
+}
+
+// withdraw un-queues copies committed earlier in the same transaction. A copy
+// is claimable the instant Commit returns, so by the time a later copy fails
+// and withdraw runs, the withdrawn copy's own history row already exists and
+// must be updated to removed -- left as "queued" it would stay listed forever
+// for a message the spool no longer holds.
+func TestWithdrawMarksSpoolCopiesRemoved(t *testing.T) {
+	sp, err := spool.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, err := store.Open(filepath.Join(t.TempDir(), "history.db"), discardLog(), 90, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+
+	s := &session{srv: &Server{spool: sp, store: st}, log: discardLog()}
+
+	staged, err := sp.Stage(strings.NewReader("Subject: t\r\n\r\nbody\r\n"), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer staged.Discard()
+
+	var ids []spool.ID
+	for i := 0; i < 2; i++ {
+		now := time.Now().UTC()
+		env := spool.Envelope{
+			From: "device@example.at", To: []string{"ops@example.net"},
+			Origin: "printers", Route: "r", Received: now,
+		}
+		id, err := sp.Commit(staged, env, time.Hour, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := st.RecordMessage(store.MessageRecord{
+			QueueID: id.String(), Client: "printers", Route: "r",
+			EnvelopeFrom: "device@example.at", Recipients: []string{"ops@example.net"},
+			Listener: "l", RemoteAddr: "127.0.0.1", ReceivedAt: now, ExpiresAt: now.Add(time.Hour),
+		}); err != nil {
+			t.Fatal(err)
+		}
+		ids = append(ids, id)
+	}
+
+	s.withdraw(ids)
+
+	if n := sp.Len(); n != 0 {
+		t.Errorf("sp.Len() = %d after withdraw, want 0", n)
+	}
+	for _, id := range ids {
+		msg, err := st.FindMessageByID(id.String())
+		if err != nil {
+			t.Fatalf("FindMessageByID(%s): %v", id, err)
+		}
+		if msg == nil {
+			t.Fatalf("no history row for %s", id)
+		}
+		if msg.Status != store.StatusRemoved {
+			t.Errorf("%s: Status = %q, want %q", id, msg.Status, store.StatusRemoved)
+		}
 	}
 }

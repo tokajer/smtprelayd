@@ -4,6 +4,7 @@
 package store
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"io"
@@ -210,7 +211,7 @@ func TestFindBounces(t *testing.T) {
 
 	testCases := []struct {
 		id    string
-		class string
+		class Class
 	}{
 		{"BOUNCE-1", "permanent"},
 		{"BOUNCE-2", "permanent"},
@@ -251,7 +252,7 @@ func TestRetentionCleanupCascadesAttempts(t *testing.T) {
 
 	// A cutoff a day past the retention window, so the row just written is
 	// older than it.
-	s.retentionCleanup(now.Add(s.retentionTTL + 24*time.Hour))
+	s.retentionCleanup(context.Background(), now.Add(s.retentionTTL+24*time.Hour))
 	m, err := s.FindMessageByID("CASCADE-TEST")
 	if err != nil {
 		t.Fatal(err)
@@ -317,7 +318,7 @@ func TestReconcileRemovedClearsAnActiveRow(t *testing.T) {
 
 	for _, tc := range []struct {
 		id    string
-		class string // "" means no attempt at all, i.e. status queued
+		class Class // "" means no attempt at all, i.e. status queued
 	}{
 		{"GHOST-QUEUED", ""},
 		{"GHOST-DEFERRED", "temporary"},
@@ -351,7 +352,11 @@ func TestReconcileRemovedLeavesFinishedRowsAlone(t *testing.T) {
 	s := testStore(t)
 	now := time.Now()
 
-	for _, tc := range []struct{ id, class, want string }{
+	for _, tc := range []struct {
+		id    string
+		class Class
+		want  string
+	}{
 		{"DONE-DELIVERED", "delivered", "delivered"},
 		{"DONE-BOUNCED", "permanent", "bounced"},
 		{"DONE-REMOVED", "removed", "removed"},
@@ -761,7 +766,10 @@ func TestFindBouncesFiltersByClass(t *testing.T) {
 	now := time.Now()
 	expires := now.Add(96 * time.Hour)
 
-	for i, tc := range []struct{ id, class string }{
+	for i, tc := range []struct {
+		id    string
+		class Class
+	}{
 		{"PERM-1", "permanent"},
 		{"PERM-2", "permanent"},
 		{"EXPIRED-1", "expired"},
@@ -1107,7 +1115,7 @@ func TestRetentionSweepRemovesEverythingPastTheWindow(t *testing.T) {
 	s.lastCleanup = old
 	s.mu.Unlock()
 
-	deleted := s.RetentionSweep(time.Now())
+	deleted := s.RetentionSweep(context.Background(), time.Now())
 	if deleted != rows {
 		t.Errorf("sweep deleted %d rows, want all %d: the chunk loop stopped early", deleted, rows)
 	}
@@ -1129,7 +1137,7 @@ func TestRetentionSweepRemovesEverythingPastTheWindow(t *testing.T) {
 		old.Format(time.RFC3339), old.Format(time.RFC3339), 0, old.Format(time.RFC3339)); err != nil {
 		t.Fatal(err)
 	}
-	if again := s.RetentionSweep(time.Now()); again != 0 {
+	if again := s.RetentionSweep(context.Background(), time.Now()); again != 0 {
 		t.Errorf("a second sweep within the hour deleted %d rows; the gate is not holding", again)
 	}
 	if err := s.db.QueryRow(`SELECT COUNT(*) FROM messages`).Scan(&left); err != nil {
@@ -1157,7 +1165,7 @@ func TestAttemptSummaryMatchesTheAttemptsTable(t *testing.T) {
 	for i, a := range []struct {
 		code  int
 		resp  string
-		class string
+		class Class
 	}{
 		{451, "4.3.0 try later", "temporary"},
 		{451, "4.3.0 try later", "temporary"},

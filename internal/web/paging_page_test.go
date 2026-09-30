@@ -58,7 +58,7 @@ func pager(t *testing.T, h http.Handler, target string) string {
 }
 
 func TestPagerOffersTheNextPageAndThenBack(t *testing.T) {
-	srv, st, _ := testServer(t, testConfig(t, ""))
+	srv, st, _ := testServer(t, testConfig(t, ""), nil)
 	seedMessages(t, st, pageSize+1)
 
 	for _, path := range []string{"/queue", "/search"} {

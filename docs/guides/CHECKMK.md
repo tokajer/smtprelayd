@@ -28,7 +28,6 @@ text exposition format:
 | `smtprelayd_canary_last_delivery_time` | gauge | `name` | Unix timestamp of that canary's last successful delivery; absent until its first one, or if no `[[canary]]` with that name is configured. Alert on this going stale, not on the counter below — a route can stop delivering silently while its canary keeps being queued |
 | `smtprelayd_canary_failures_total` | counter | `name` | That canary's delivery attempts that failed, permanently, by expiry, or deferred for retry |
 | `smtprelayd_expiry_seconds` | gauge | `item` | Seconds until the listener TLS certificate (`item="tls-certificate"`) or a Microsoft 365 client secret (`item="oauth2-secret:<route>"`) expires. **Negative once it has.** A secret only appears when `oauth2.secret_expires` is set for that route |
-| `smtprelayd_expiry_read_errors` | gauge | — | `1` when the configured `tls.cert_file` could not be read, so its deadline is unknown. Absent otherwise |
 
 Every route configured at startup is seeded with zero counters, so a route
 that has never delivered still appears rather than being silently absent.
@@ -157,11 +156,9 @@ is nothing yet to compare against.
   monitoring without depending on mail delivery, which is precisely what an
   expired credential breaks.
 
-- **`smtprelayd_expiry_read_errors`** — alert on it being present at all. It
-  means the certificate file changed under a running service, since the
-  listener would not have started on an unreadable one. It is a separate
-  gauge rather than a magic value in the one above, so a deadline that cannot
-  be read is never mistaken for a deadline far away.
+  The certificate deadline is that of the certificate the service loaded at
+  startup, which is the one it serves. Replacing `tls.cert_file` takes effect,
+  here and on the listeners, at the next restart.
 
 - **`smtprelayd_last_delivery_time`** is reported as an informational age
   with no default threshold: an idle route is not necessarily a broken one,

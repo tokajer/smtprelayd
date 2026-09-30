@@ -39,7 +39,7 @@ func (s *Server) handleQueue(w http.ResponseWriter, r *http.Request) {
 	offset := parseOffset(q.Get("offset"))
 
 	msgs, hasMore, err := s.store.FindMessages(store.MessageFilter{
-		Status: "active", Sort: sortCol, Order: order, Limit: pageSize, Offset: offset,
+		Status: store.StatusActive, Sort: sortCol, Order: order, Limit: pageSize, Offset: offset,
 	})
 	if err != nil {
 		s.serverError(w, "queue", err)
@@ -178,7 +178,7 @@ func (s *Server) handleBounces(w http.ResponseWriter, r *http.Request) {
 	offset := parseOffset(q.Get("offset"))
 	class := q.Get("class")
 	filterErrClass := ""
-	if class != "" && class != "permanent" && class != "expired" {
+	if !store.ValidBounceClass(class) {
 		filterErrClass = "class must be permanent or expired"
 		class = ""
 	}
@@ -270,14 +270,11 @@ func (s *Server) handleRoutes(w http.ResponseWriter, r *http.Request) {
 
 // expiryRows renders what is going to stop working. It lists every deadline,
 // not only the ones inside the warning window: an operator checking whether
-// the certificate is healthy needs to see it while it still is.
-func (s *Server) expiryRows(now time.Time) (rows []expiryRow, certErr string) {
-	items, err := expiry.Items(s.cfg)
-	if err != nil {
-		certErr = err.Error()
-	}
+// the certificate is healthy needs to see it while it still is. deadlines
+// are computed once in cmd/smtprelayd.
+func (s *Server) expiryRows(now time.Time) (rows []expiryRow) {
 	window := expiry.WarnWindow(s.cfg)
-	for _, it := range items {
+	for _, it := range s.deadlines {
 		row := expiryRow{
 			What: it.What, Detail: it.Detail, Expires: it.Expires,
 			Days: expiry.DaysUntil(it.Expires, now), State: "ok",
@@ -290,15 +287,14 @@ func (s *Server) expiryRows(now time.Time) (rows []expiryRow, certErr string) {
 		}
 		rows = append(rows, row)
 	}
-	return rows, certErr
+	return rows
 }
 
 func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
-	rows, certErr := s.expiryRows(time.Now())
+	rows := s.expiryRows(time.Now())
 	data := struct {
 		baseData
 		Expiry        []expiryRow
-		ExpiryError   string
 		WarnDays      int
 		ListenersText string
 		ClientsText   string
@@ -307,7 +303,6 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 	}{
 		baseData:      s.base("config", r),
 		Expiry:        rows,
-		ExpiryError:   certErr,
 		WarnDays:      s.cfg.Expiry.WarnDays,
 		ListenersText: formatListeners(s.cfg.Listeners),
 		ClientsText:   formatClients(s.cfg.Clients),

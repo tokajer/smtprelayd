@@ -218,13 +218,17 @@ func renameRetry(src, dst string) error {
 	return err
 }
 
-// Fail moves a permanently undeliverable message aside. Phase 5 turns these
-// into DSNs; until then they are kept so that nothing is silently lost.
+// Fail moves a permanently undeliverable message aside. They are kept here,
+// rather than deleted, so that nothing is silently lost: the bounce digest
+// reports them and an operator can inspect or requeue one.
 func (s *Spool) Fail(m *Meta, reason string) error {
 	m.LastError = reason
-	if err := s.writeMeta(m); err != nil {
-		return err
-	}
+	// A failed write here must not stop the move to spool/failed: the message
+	// belongs there regardless, and leaving it live would keep offering it to
+	// the smarthost forever. The only loss is LastError in the spool copy,
+	// which the history row carries anyway.
+	_ = s.writeMeta(m)
+
 	s.mu.Lock()
 	s.dropLocked(m.ID)
 	delete(s.leased, m.ID)

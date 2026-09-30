@@ -14,12 +14,13 @@ import (
 	"strings"
 
 	"github.com/tokajer/smtprelayd/internal/config"
+	"github.com/tokajer/smtprelayd/internal/ostrust"
 )
 
 // verifyDataDirSecurity checks that the data directory has the ACL set by the
 // installer on Windows.
 func verifyDataDirSecurity(dataDir string) error {
-	return config.CheckDataDirACL(dataDir)
+	return ostrust.CheckDataDirACL(dataDir)
 }
 
 // resolveDataDir is where both data-directory commands get their target: the
@@ -121,7 +122,7 @@ func secureDataDir(configPath string) error {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
-	if err := config.SecureDataDir(dir); err != nil {
+	if err := ostrust.SecureDataDir(dir); err != nil {
 		return err
 	}
 	fmt.Printf("smtprelayd: data directory ACL set on %s\n", dir)
@@ -143,7 +144,7 @@ func secureDataDir(configPath string) error {
 // confirmation, so a wrong resolution here must fail closed rather than
 // remove whatever it computed.
 //
-// It also runs the same config.CheckDir symlink/reparse-point refusal
+// It also runs the same ostrust.CheckDir symlink/reparse-point refusal
 // secureDataDir already runs through SecureDataDir, for the same reason
 // docs/dev/EXPLOIT-SURFACE.md §1 gives for checking it at startup: this is the
 // one function in the tree that recurses into the data directory instead of
@@ -157,7 +158,7 @@ func purgeDataDir(configPath string) error {
 	if !filepath.IsAbs(dir) || !strings.EqualFold(filepath.Base(dir), "SMTPRelayd") {
 		return fmt.Errorf("refusing to remove %q: does not look like the smtprelayd data directory", dir)
 	}
-	if err := config.CheckDir(dir); err != nil {
+	if err := ostrust.CheckDir(dir); err != nil {
 		if os.IsNotExist(err) {
 			return nil
 		}
@@ -197,7 +198,7 @@ func protectSecret(outPath string) error {
 	if line == "" {
 		return fmt.Errorf("protect-secret: no secret read from stdin")
 	}
-	ciphertext, err := config.ProtectMachineSecret([]byte(line))
+	ciphertext, err := ostrust.ProtectMachineSecret([]byte(line))
 	if err != nil {
 		return fmt.Errorf("protect-secret: %w", err)
 	}

@@ -168,7 +168,7 @@ type Attempt struct {
 	AtTime     time.Time  `json:"at_time"`
 	SMTPCode   int        `json:"smtp_code,omitempty"`
 	SMTPResp   string     `json:"smtp_response,omitempty"`
-	Class      string     `json:"class"`
+	Class      Class      `json:"class"`
 	NextAt     *time.Time `json:"next_attempt_at,omitempty"`
 }
 
@@ -207,16 +207,6 @@ var messageSortColumns = map[string]string{
 	// here, never influenced by request input, so this is as safe to
 	// interpolate as any other allowlisted column.
 	"status": `CASE WHEN m.last_class IS NULL THEN 0 WHEN m.last_class = 'temporary' THEN 1 WHEN m.last_class = 'delivered' THEN 2 ELSE 3 END`,
-}
-
-// statusClasses maps a display status onto the attempt classes that produce
-// it. "queued" has no rows in attempts at all, which the query below handles
-// separately from this list.
-var statusClasses = map[string][]string{
-	"deferred":  {"temporary"},
-	"delivered": {"delivered"},
-	"bounced":   {"permanent", "expired"},
-	"removed":   {"removed"},
 }
 
 // BounceFilter specifies query parameters for FindBounces.
@@ -361,11 +351,14 @@ func (s *Store) FindMessageByID(queueID string) (*Message, error) {
 	m := sc.message(s)
 
 	// Fetch all attempts for this message.
+	// at_time has only one-second resolution, so two attempts in the same
+	// second sorted by it alone in whatever order SQLite happens to return
+	// them; id, the table's own insertion-ordered primary key, breaks the tie.
 	rows, err := s.db.Query(`
 		SELECT attempt_num, at_time, smtp_code, smtp_response, class, next_attempt_at
 		FROM attempts
 		WHERE queue_id = ?
-		ORDER BY at_time ASC
+		ORDER BY at_time ASC, id ASC
 	`, queueID)
 	if err != nil {
 		return nil, fmt.Errorf("store: query attempts: %w", err)
@@ -485,9 +478,9 @@ func (s *Store) FindMessages(filter MessageFilter) ([]*Message, bool, error) {
 	switch filter.Status {
 	case "":
 		// No filter.
-	case "queued":
+	case StatusQueued:
 		b.where("m.last_class IS NULL")
-	case "active":
+	case StatusActive:
 		b.where("(m.last_class IS NULL OR m.last_class = 'temporary')")
 	default:
 		classes, ok := statusClasses[filter.Status]
@@ -534,7 +527,7 @@ func (s *Store) FindMessages(filter MessageFilter) ([]*Message, bool, error) {
 		m.LastCode = int(latestCode.Int64)
 		m.LastErr = latestResp.String
 		m.AttemptCount = int(attemptCount.Int64)
-		m.Status = classToStatus(latestClass.String, latestClass.Valid)
+		m.Status = classToStatus(Class(latestClass.String), latestClass.Valid)
 
 		messages = append(messages, m)
 	}
@@ -544,25 +537,6 @@ func (s *Store) FindMessages(filter MessageFilter) ([]*Message, bool, error) {
 
 	messages, hasMore := splitPage(messages, filter.Limit)
 	return messages, hasMore, nil
-}
-
-// classToStatus applies the same class-to-status mapping deriveStatus uses,
-// starting from a nullable "latest attempt class" column instead of a slice
-// of attempts.
-func classToStatus(class string, hasAttempt bool) string {
-	if !hasAttempt {
-		return "queued"
-	}
-	switch class {
-	case "delivered":
-		return "delivered"
-	case "permanent", "expired":
-		return "bounced"
-	case "removed":
-		return "removed"
-	default:
-		return "deferred"
-	}
 }
 
 // FindBounces queries messages that failed (permanent or expired).
@@ -609,7 +583,7 @@ func (s *Store) FindBounces(filter BounceFilter) ([]*Message, bool, error) {
 		m.LastCode = int(lastCode.Int64)
 		m.LastErr = lastResp.String
 		m.AttemptCount = int(attemptCount.Int64)
-		m.Status = "bounced"
+		m.Status = StatusBounced
 
 		messages = append(messages, m)
 	}
