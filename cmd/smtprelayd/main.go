@@ -35,6 +35,7 @@ import (
 	"github.com/tokajer/smtprelayd/internal/canary"
 	"github.com/tokajer/smtprelayd/internal/config"
 	"github.com/tokajer/smtprelayd/internal/delivery"
+	"github.com/tokajer/smtprelayd/internal/delivery/smarthost"
 	"github.com/tokajer/smtprelayd/internal/httpx"
 	"github.com/tokajer/smtprelayd/internal/listener"
 	"github.com/tokajer/smtprelayd/internal/logging"
@@ -187,7 +188,12 @@ func serve(ctx context.Context, configPath string, console bool, ready chan<- er
 		log.Error("spool: failed to open", "error", err)
 		return err
 	}
-	st, err := store.Open(cfg.Service.DataDir, log, cfg.History.RetentionDays, cfg.History.RetainSubjects)
+	// The database sits under spool/, not directly in the data directory: the
+	// composition root owns the data-directory layout, and spool/ already
+	// carries the restrictive ACL a database holding every sender, recipient
+	// and -- with history.retain_subjects on, the default -- subject needs.
+	st, err := store.Open(filepath.Join(cfg.Service.DataDir, "spool", "history.db"),
+		log, cfg.History.RetentionDays, cfg.History.RetainSubjects)
 	if err != nil {
 		log.Error("store: failed to open", "error", err)
 		return err
@@ -205,7 +211,7 @@ func serve(ctx context.Context, configPath string, console bool, ready chan<- er
 	// composition in a worker and left the listener with nothing to count on.
 	reg := metrics.New(metrics.ConfigExpiry(cfg), sp, routeNames(cfg), canaryNames(cfg), nil)
 
-	set, err := listener.New(cfg, sp, log, st, reg)
+	set, err := listener.New(cfg, sp, st, reg, log)
 	if err != nil {
 		log.Error("listener: failed to start", "error", err)
 		return err
@@ -227,16 +233,17 @@ func serve(ctx context.Context, configPath string, console bool, ready chan<- er
 		bg.Wait()
 	}()
 
-	notifier := bounce.New(cfg, sp, st, log)
-	dm, err := delivery.New(cfg, sp, log, st, reg, notifier)
+	notifier := bounce.New(cfg, sp, st, reg, log)
+	tokens, err := buildTokenSources(cfg, reg)
 	if err != nil {
 		log.Error("delivery: failed to start", "error", err)
 		return err
 	}
+	dm := delivery.New(cfg, sp, st, reg, tokens, notifier, log)
 	if err := verifyTokens(ctx, dm, log); err != nil {
 		return err
 	}
-	done := startWorkers(ctx, &bg, cfg, sp, st, log, dm, notifier)
+	done := startWorkers(ctx, &bg, cfg, sp, st, reg, log, dm, notifier)
 
 	// Both HTTP sockets are bound here, synchronously, for the reason
 	// set.Bind is separate from set.Run: a port already in use used to be a
@@ -333,6 +340,32 @@ func checkEnvironment(cfg *config.Config) error {
 	return nil
 }
 
+// buildTokenSources constructs one authms365.TokenSource per xoauth2 route
+// and registers each with reg's token-age gauge. It lives in the composition
+// root, not in internal/delivery, because the token sources are Microsoft
+// 365-specific and the delivery manager only needs the resulting
+// smarthost.TokenSource interface.
+func buildTokenSources(cfg *config.Config, reg *metrics.Registry) (map[string]smarthost.TokenSource, error) {
+	tokens := map[string]smarthost.TokenSource{}
+	for _, r := range cfg.Routes {
+		if !r.UsesOAuth2() {
+			continue
+		}
+		ts, err := authms365.New(authms365.Options{
+			TenantID: r.OAuth2.TenantID,
+			ClientID: r.OAuth2.ClientID,
+			Secret:   r.OAuth2.ClientSecret.Value(),
+			Scope:    r.OAuth2.Scope,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("route %s: %w", r.Name, err)
+		}
+		tokens[r.Name] = ts
+		reg.RegisterTokenAger(r.Name, ts)
+	}
+	return tokens, nil
+}
+
 // verifyTokens fetches an OAuth2 token for every xoauth2 route at startup
 // and decides whether a failure is fatal.
 //
@@ -403,17 +436,20 @@ func openSpool(cfg *config.Config) (*spool.Spool, error) {
 // stopped. The caller waits on it only to take an accurate final queue
 // count; shutdown itself is bg.Wait.
 func startWorkers(ctx context.Context, bg *sync.WaitGroup, cfg *config.Config,
-	sp *spool.Spool, st *store.Store, log *slog.Logger,
+	sp *spool.Spool, st *store.Store, reg *metrics.Registry, log *slog.Logger,
 	dm *delivery.Manager, notifier *bounce.Notifier) <-chan struct{} {
 	done := make(chan struct{})
 	bg.Go(func() {
 		dm.Run(ctx)
 		close(done)
 	})
+	// See the note on delivery.Housekeeper for why this runs apart from dm.Run.
+	hk := delivery.NewHousekeeper(sp, st, log)
+	bg.Go(func() { hk.Run(ctx) })
 	bg.Go(func() { notifier.Run(ctx) })
 	lifetime := time.Duration(cfg.Queue.MaxLifetimeHours) * time.Hour
 	for _, c := range cfg.Canaries {
-		r := canary.New(c, cfg.Service.Hostname, lifetime, sp, st, log)
+		r := canary.New(c, cfg.Service.Hostname, lifetime, sp, st, reg, log)
 		bg.Go(func() { r.Run(ctx) })
 	}
 	// Started unconditionally: it reports through the notifier, which
@@ -446,12 +482,12 @@ func startHTTP(ctx context.Context, bg *sync.WaitGroup, cfg *config.Config,
 		return nil
 	}
 
-	ws, err := web.New(cfg, st, sp, reg, version, log)
+	ws, err := web.New(cfg, sp, st, reg, version, log)
 	if err != nil {
 		log.Error("web: failed to start", "error", err)
 		return err
 	}
-	as := api.New(cfg, st, sp, reg, version, log)
+	as := api.New(cfg, sp, st, reg, version, log)
 
 	ln, err := web.Listen(cfg)
 	if err != nil {

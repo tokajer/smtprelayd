@@ -31,10 +31,10 @@ type Server struct {
 	spool *spool.Spool
 	store *store.Store
 
-	// metrics may be nil: the counters it feeds (session panics, journal
-	// write failures) are then simply not kept, which is what a test that
-	// does not care about them wants. cmd/smtprelayd always passes one; see
-	// the note on metrics.Registry.
+	// metrics may be nil: every method on it is nil-safe, so the counters it
+	// feeds (session panics, journal write failures) are then simply not
+	// kept, which is what a test that does not care about them wants.
+	// cmd/smtprelayd always passes one; see the note on metrics.Registry.
 	metrics *metrics.Registry
 
 	tlsConf *tls.Config
@@ -65,8 +65,8 @@ type Set struct {
 
 // New builds all listeners from the configuration. The TLS material and the
 // client matcher are shared, so a certificate problem fails before any socket
-// is bound. reg may be nil; see Server.metrics.
-func New(cfg *config.Config, sp *spool.Spool, log *slog.Logger, st *store.Store, reg *metrics.Registry) (*Set, error) {
+// is bound. reg is nil-safe; see Server.metrics.
+func New(cfg *config.Config, sp *spool.Spool, st *store.Store, reg *metrics.Registry, log *slog.Logger) (*Set, error) {
 	match, err := NewMatcher(cfg.Clients)
 	if err != nil {
 		return nil, err
@@ -110,7 +110,8 @@ func New(cfg *config.Config, sp *spool.Spool, log *slog.Logger, st *store.Store,
 			if cert == nil {
 				return nil, fmt.Errorf("listener %s: tls %s requires a certificate", lc.Name, lc.TLS)
 			}
-			min, err := config.ParseTLSVersion(orDefault(lc.MinTLS, "1.2"))
+			// config.Normalize has already settled min_tls to a non-empty value.
+			min, err := config.ParseTLSVersion(lc.MinTLS)
 			if err != nil {
 				return nil, err
 			}
@@ -251,9 +252,7 @@ func (s *Server) accept(ctx context.Context) {
 				if r := recover(); r != nil {
 					s.log.Error("session panic", "panic", fmt.Sprint(r),
 						"remote", conn.RemoteAddr().String())
-					if s.metrics != nil {
-						s.metrics.SessionPanic()
-					}
+					s.metrics.SessionPanic()
 				}
 				<-s.sem
 				s.wg.Done()
@@ -261,11 +260,4 @@ func (s *Server) accept(ctx context.Context) {
 			s.handle(ctx, conn)
 		}()
 	}
-}
-
-func orDefault(v, def string) string {
-	if v == "" {
-		return def
-	}
-	return v
 }

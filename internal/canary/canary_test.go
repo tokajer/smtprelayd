@@ -7,6 +7,7 @@ import (
 	"context"
 	"io"
 	"log/slog"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -26,12 +27,12 @@ func testRunner(t *testing.T, cfg *config.Config, c config.Canary) (*Runner, *sp
 	if err != nil {
 		t.Fatal(err)
 	}
-	st, err := store.Open(t.TempDir(), discardLog(), 90, true)
+	st, err := store.Open(filepath.Join(t.TempDir(), "history.db"), discardLog(), 90, true)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = st.Close() })
-	return New(c, cfg.Service.Hostname, time.Duration(cfg.Queue.MaxLifetimeHours)*time.Hour, sp, st, discardLog()), sp, st
+	return New(c, cfg.Service.Hostname, time.Duration(cfg.Queue.MaxLifetimeHours)*time.Hour, sp, st, nil, discardLog()), sp, st
 }
 
 func baseCfg() *config.Config {
@@ -135,14 +136,14 @@ func TestSendDistinguishesTwoCanariesByName(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	st, err := store.Open(t.TempDir(), discardLog(), 90, true)
+	st, err := store.Open(filepath.Join(t.TempDir(), "history.db"), discardLog(), 90, true)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = st.Close() })
 
-	a := New(config.Canary{Name: "m365-daily", Sender: "canary@example.at", Recipient: "ops@example.at", Route: "m365", IntervalMinutes: 1440}, cfg.Service.Hostname, time.Hour, sp, st, discardLog())
-	b := New(config.Canary{Name: "legacy-daily", Sender: "canary@example.at", Recipient: "ops@example.at", Route: "legacy", IntervalMinutes: 1440}, cfg.Service.Hostname, time.Hour, sp, st, discardLog())
+	a := New(config.Canary{Name: "m365-daily", Sender: "canary@example.at", Recipient: "ops@example.at", Route: "m365", IntervalMinutes: 1440}, cfg.Service.Hostname, time.Hour, sp, st, nil, discardLog())
+	b := New(config.Canary{Name: "legacy-daily", Sender: "canary@example.at", Recipient: "ops@example.at", Route: "legacy", IntervalMinutes: 1440}, cfg.Service.Hostname, time.Hour, sp, st, nil, discardLog())
 
 	if err := a.send(time.Now()); err != nil {
 		t.Fatal(err)

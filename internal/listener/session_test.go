@@ -42,15 +42,6 @@ func TestReadDeadlineUsesSessionLimitWhenShorter(t *testing.T) {
 	}
 }
 
-func TestTimeoutFallsBackOnNonPositiveValues(t *testing.T) {
-	s := &session{}
-	for _, sec := range []int{0, -1} {
-		if d := s.timeout(sec); d != 60*time.Second {
-			t.Errorf("timeout(%d) = %v, want the 60s fallback", sec, d)
-		}
-	}
-}
-
 func TestSanitizeSubjectStripsControlCharsAndTruncates(t *testing.T) {
 	if got := sanitizeSubject("Invoice\x00\x07 due"); got != "Invoice due" {
 		t.Errorf("got %q, want control characters stripped", got)

@@ -5,7 +5,6 @@ package delivery
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"strings"
 	"testing"
@@ -29,13 +28,9 @@ func queueList(t *testing.T, sp *spool.Spool, st *store.Store, to ...string) (sp
 	if err != nil {
 		t.Fatal(err)
 	}
-	recipients, err := json.Marshal(to)
-	if err != nil {
-		t.Fatal(err)
-	}
 	if err := st.RecordMessage(store.MessageRecord{
 		QueueID: id.String(), Client: "printers", Route: "smarthost",
-		EnvelopeFrom: "device@example.at", Recipients: string(recipients),
+		EnvelopeFrom: "device@example.at", Recipients: to,
 		Listener: "l", RemoteAddr: "127.0.0.1", ReceivedAt: now, ExpiresAt: now.Add(time.Hour),
 	}); err != nil {
 		t.Fatal(err)

@@ -21,7 +21,7 @@ const tokenBytes = 32
 //
 // The token itself is never stored anywhere by this command and never
 // reaches the configuration: only its SHA-256 digest does, which is what
-// config.MatchToken compares against. That is the whole point of the
+// httpx.MatchToken compares against. That is the whole point of the
 // arrangement — a configuration file that leaks does not hand over a working
 // credential — and it is why the token is printed once and cannot be
 // recovered afterwards.

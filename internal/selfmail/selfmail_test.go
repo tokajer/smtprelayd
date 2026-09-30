@@ -6,10 +6,12 @@ package selfmail
 import (
 	"io"
 	"log/slog"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/tokajer/smtprelayd/internal/metrics"
 	"github.com/tokajer/smtprelayd/internal/spool"
 	"github.com/tokajer/smtprelayd/internal/store"
 )
@@ -21,7 +23,7 @@ func testDeps(t *testing.T) (*spool.Spool, *store.Store, *slog.Logger) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	st, err := store.Open(t.TempDir(), log, 90, true)
+	st, err := store.Open(filepath.Join(t.TempDir(), "history.db"), log, 90, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -53,7 +55,7 @@ func spooled(t *testing.T, sp *spool.Spool) (*spool.Meta, string) {
 // cannot produce another notification.
 func TestHeaderFromAndEnvelopeFromAreIndependent(t *testing.T) {
 	sp, st, log := testDeps(t)
-	_, err := New(sp, st, log).Send(Message{
+	_, err := New(sp, st, nil, log).Send(Message{
 		HeaderFrom:   "postmaster@example.at",
 		EnvelopeFrom: "",
 		To:           []string{"ops@example.at"},
@@ -88,7 +90,7 @@ func TestHeaderFromAndEnvelopeFromAreIndependent(t *testing.T) {
 // bounce digest.
 func TestCanaryKeepsARealSenderAndIsNotANotification(t *testing.T) {
 	sp, st, log := testDeps(t)
-	_, err := New(sp, st, log).Send(Message{
+	_, err := New(sp, st, nil, log).Send(Message{
 		HeaderFrom:   "canary@example.at",
 		EnvelopeFrom: "canary@example.at",
 		To:           []string{"probe@example.at"},
@@ -123,7 +125,7 @@ func TestCanaryKeepsARealSenderAndIsNotANotification(t *testing.T) {
 func TestHeaderBlockIsTerminatedAndComplete(t *testing.T) {
 	sp, st, log := testDeps(t)
 	now := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
-	if _, err := New(sp, st, log).Send(Message{
+	if _, err := New(sp, st, nil, log).Send(Message{
 		HeaderFrom: "a@example.at", EnvelopeFrom: "a@example.at",
 		To: []string{"b@example.at", "c@example.at"}, Subject: "s", Body: "the body\r\n",
 		Origin: "x", Route: "r", Listener: "l",
@@ -156,7 +158,7 @@ func TestHeaderBlockIsTerminatedAndComplete(t *testing.T) {
 // dashboard reads it rather than the message.
 func TestJournalRecordsWhatWasSpooled(t *testing.T) {
 	sp, st, log := testDeps(t)
-	id, err := New(sp, st, log).Send(Message{
+	id, err := New(sp, st, nil, log).Send(Message{
 		HeaderFrom: "a@example.at", EnvelopeFrom: "a@example.at",
 		To: []string{"b@example.at"}, Subject: "recorded", Body: "x\r\n",
 		Origin: "canary-1", Route: "m365", Listener: "canary", Kind: spool.KindCanary,
@@ -187,5 +189,31 @@ func TestJournalRecordsWhatWasSpooled(t *testing.T) {
 	// Five headers were written; a zero would mean the block was not parsed.
 	if m.HeaderCount != 5 {
 		t.Errorf("HeaderCount = %d, want 5", m.HeaderCount)
+	}
+}
+
+// A relay-composed message must still be spooled and handed back a queue ID
+// even when the journal write fails: the write is best-effort, so the
+// failure has to surface as a counter rather than a returned error.
+func TestJournalWriteFailureIsCounted(t *testing.T) {
+	sp, st, log := testDeps(t)
+	if err := st.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reg := metrics.New(nil, nil, nil, nil, nil)
+
+	id, err := New(sp, st, reg, log).Send(Message{
+		HeaderFrom: "a@example.at", EnvelopeFrom: "a@example.at",
+		To: []string{"b@example.at"}, Subject: "s", Body: "x\r\n",
+		Origin: "x", Route: "r", Listener: "l",
+	}, time.Hour, time.Now())
+	if err != nil {
+		t.Fatalf("Send failed even though the journal write is best-effort: %v", err)
+	}
+	if id == "" {
+		t.Fatal("no queue ID returned")
+	}
+	if got := reg.JournalWriteFailures(); got != 1 {
+		t.Fatalf("JournalWriteFailures() = %d, want 1", got)
 	}
 }

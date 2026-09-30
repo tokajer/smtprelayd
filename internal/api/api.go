@@ -37,10 +37,9 @@ type Server struct {
 	actions *queueaction.Actor
 }
 
-// New builds an API server. reg may be nil, in which case uptime reports
-// zero and route health omits token age -- that is for tests, not a mode the
-// service runs in; see the note on metrics.Registry.
-func New(cfg *config.Config, st *store.Store, sp *spool.Spool, reg *metrics.Registry, version string, log *slog.Logger) *Server {
+// New builds an API server. reg is nil-safe; see the note on
+// metrics.Registry.
+func New(cfg *config.Config, sp *spool.Spool, st *store.Store, reg *metrics.Registry, version string, log *slog.Logger) *Server {
 	return &Server{
 		cfg: cfg, store: st, spool: sp, metrics: reg, version: version,
 		log: log.With("component", "api"), fails: newFailLimiter(),
@@ -93,9 +92,7 @@ func (s *Server) auth(need string, next http.HandlerFunc) http.HandlerFunc {
 		info, ok := checkToken(s.cfg, httpx.BearerToken(r))
 		if !ok {
 			s.fails.recordFailure(source, now)
-			if s.metrics != nil {
-				s.metrics.APIAuthFailure()
-			}
+			s.metrics.APIAuthFailure()
 			s.log.Warn("api auth failed", "source", source, "path", r.URL.Path)
 			writeJSONError(w, http.StatusUnauthorized, "missing or invalid bearer token")
 			return

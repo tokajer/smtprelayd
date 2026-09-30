@@ -19,6 +19,9 @@ package httpx
 
 import (
 	"context"
+	"crypto/sha256"
+	"crypto/subtle"
+	"encoding/hex"
 	"errors"
 	"log/slog"
 	"net"
@@ -29,6 +32,36 @@ import (
 
 	"github.com/tokajer/smtprelayd/internal/config"
 )
+
+// MatchToken compares a presented bearer token against every configured
+// digest in constant time and returns the token it matched. Every candidate
+// is compared, not just until the first match, so the time taken does not
+// reveal how many tokens were tried before one (if any) succeeded.
+//
+// This lives in httpx because both the JSON API and the metrics endpoint
+// authenticate against the same list. Two implementations of one
+// constant-time comparison is how one of them eventually stops being
+// constant-time.
+func MatchToken(tokens []config.Token, presented string) (config.Token, bool) {
+	if presented == "" {
+		return config.Token{}, false
+	}
+	sum := sha256.Sum256([]byte(presented))
+	digest := []byte(strings.ToLower(hex.EncodeToString(sum[:])))
+
+	var found config.Token
+	ok := false
+	for _, t := range tokens {
+		want := []byte(strings.ToLower(t.SHA256))
+		if len(want) != len(digest) {
+			continue
+		}
+		if subtle.ConstantTimeCompare(digest, want) == 1 {
+			found, ok = t, true
+		}
+	}
+	return found, ok
+}
 
 // BearerToken returns the credential from an Authorization header, or "" when
 // the header is absent or is not a bearer scheme. The value is returned

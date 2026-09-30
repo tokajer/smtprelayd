@@ -83,7 +83,7 @@ func TestLoadThroughputVersusSpoolSize(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			st, err := store.Open(dir, discardLog(), 90, true)
+			st, err := store.Open(filepath.Join(dir, "history.db"), discardLog(), 90, true)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -96,7 +96,7 @@ func TestLoadThroughputVersusSpoolSize(t *testing.T) {
 			cfg.Limits.MaxConnections = 450
 			cfg.Clients[0].MaxConnections = 0
 			cfg.Listeners[0].Address = "127.0.0.1:0"
-			set, err := New(cfg, sp, discardLog(), st, nil)
+			set, err := New(cfg, sp, st, nil, discardLog())
 			if err != nil {
 				t.Fatal(err)
 			}

@@ -45,7 +45,7 @@ func (r *Registry) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 // failures are logged and counted instead.
 func requireToken(cfg *config.Config, next http.Handler, log *slog.Logger) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		t, ok := cfg.MatchToken(httpx.BearerToken(r))
+		t, ok := httpx.MatchToken(cfg.Web.Tokens, httpx.BearerToken(r))
 		if !ok || !config.ScopeSatisfies(t.Scope, "read") {
 			// The source address is logged, never made a metric label:
 			// an address chosen by whoever is failing to authenticate

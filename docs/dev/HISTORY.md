@@ -13,6 +13,12 @@ are appended at the end.
 
 ## Session log (newest first)
 
+**Previous session**: 2026-09-29 — the last two field verifications of phase 5.
+A Windows service start with a configured listener port already bound fails
+visibly and logs the bind error instead of reporting running. The unsigned
+`setup.exe` draws exactly the same SmartScreen prompt as the unsigned `.msi`.
+`PROGRESS.md` was cut down; everything moved is in `docs/dev/HISTORY.md`.
+
 
 **Phase**: 4e — `internal/bounce` (digest notification) implemented and
 manually verified end to end in the eleventh session, **completing phase 4 in

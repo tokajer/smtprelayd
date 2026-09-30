@@ -23,7 +23,7 @@ func seedMessages(t *testing.T, st *store.Store, n int) {
 		id := fmt.Sprintf("QPAGE%021d", i)
 		if err := st.RecordMessage(store.MessageRecord{
 			QueueID: id, Client: "printers", Route: "m365",
-			EnvelopeFrom: "device@example.at", Recipients: `["x@example.net"]`,
+			EnvelopeFrom: "device@example.at", Recipients: []string{"x@example.net"},
 			Listener: "smtp", RemoteAddr: "10.10.5.9",
 			ReceivedAt: now.Add(-time.Duration(i) * time.Minute),
 			ExpiresAt:  now.Add(time.Hour),

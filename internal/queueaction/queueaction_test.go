@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -22,7 +23,7 @@ func testActor(t *testing.T) (*Actor, *spool.Spool, *store.Store) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	st, err := store.Open(dir, slog.New(slog.NewTextHandler(io.Discard, nil)), 90, true)
+	st, err := store.Open(filepath.Join(dir, "history.db"), slog.New(slog.NewTextHandler(io.Discard, nil)), 90, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -44,7 +45,7 @@ func queued(t *testing.T, sp *spool.Spool, st *store.Store) spool.ID {
 	}
 	if err := st.RecordMessage(store.MessageRecord{
 		QueueID: id.String(), Client: "printers", Route: "m365",
-		EnvelopeFrom: "device@example.at", Recipients: `["ops@example.net"]`,
+		EnvelopeFrom: "device@example.at", Recipients: []string{"ops@example.net"},
 		Listener: "smtp", RemoteAddr: "10.10.5.9",
 		ReceivedAt: now, ExpiresAt: now.Add(time.Hour),
 	}); err != nil {

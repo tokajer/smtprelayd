@@ -7,10 +7,10 @@
 // Two things in this service expire on a date nobody is watching: the
 // listener's own TLS certificate, and a Microsoft 365 client secret. Both
 // were previously announced only in the log — the certificate not at all,
-// the secret once at startup by delivery.warnSecretExpiry, which a service
-// running for months never repeats. A log line nobody reads is not a
-// warning, and both failures are total: an expired certificate refuses every
-// TLS submission, an expired secret fails every delivery on that route.
+// the secret once at startup, in a line a service running for months never
+// repeats. A log line nobody reads is not a warning, and both failures are
+// total: an expired certificate refuses every TLS submission, an expired
+// secret fails every delivery on that route.
 //
 // This package only answers "what expires and when". Deciding whether that
 // is worth a mail, and sending one, is bounce.ExpiryWatcher's job -- keeping
@@ -31,11 +31,10 @@ import (
 )
 
 // WarnWindow is how far ahead an expiry is announced, from
-// expiry.warn_days. The default is thirty days, matching what
-// delivery.warnSecretExpiry already logs at, because renewing either of these
-// needs a person with rights they may not have today: a CA or an internal PKI
-// for the certificate, a directory administrator for the client secret. Zero
-// switches the warnings off.
+// expiry.warn_days. The default is 30 days, because renewing either of
+// these needs a person with rights they may not have today: a CA or an
+// internal PKI for the certificate, a directory administrator for the
+// client secret. Zero switches the warnings off.
 func WarnWindow(cfg *config.Config) time.Duration {
 	return time.Duration(cfg.Expiry.WarnDays) * 24 * time.Hour
 }
@@ -76,7 +75,7 @@ func Items(cfg *config.Config) (items []Item, certErr error) {
 	}
 
 	for _, r := range cfg.Routes {
-		if r.Auth != config.AuthXOAUTH2 {
+		if !r.UsesOAuth2() {
 			continue
 		}
 		exp, ok := r.OAuth2.SecretExpiry()

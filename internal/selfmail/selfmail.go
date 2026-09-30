@@ -13,12 +13,12 @@
 package selfmail
 
 import (
-	"encoding/json"
 	"fmt"
 	"log/slog"
 	"strings"
 	"time"
 
+	"github.com/tokajer/smtprelayd/internal/metrics"
 	"github.com/tokajer/smtprelayd/internal/rewrite"
 	"github.com/tokajer/smtprelayd/internal/spool"
 	"github.com/tokajer/smtprelayd/internal/store"
@@ -61,19 +61,20 @@ type Message struct {
 	Kind spool.Kind
 }
 
-// Mailer spools relay-composed mail. The spool, the store and the logger are
-// the same three for every message this process writes, so they are held
-// once here rather than passed at each of the three call sites alongside the
-// message itself.
+// Mailer spools relay-composed mail. The spool, the store, the registry and
+// the logger are the same four for every message this process writes, so
+// they are held once here rather than passed at each of the three call sites
+// alongside the message itself.
 type Mailer struct {
-	spool *spool.Spool
-	store *store.Store
-	log   *slog.Logger
+	spool   *spool.Spool
+	store   *store.Store
+	metrics *metrics.Registry
+	log     *slog.Logger
 }
 
-// New builds a Mailer.
-func New(sp *spool.Spool, st *store.Store, log *slog.Logger) *Mailer {
-	return &Mailer{spool: sp, store: st, log: log}
+// New builds a Mailer. reg is nil-safe; see the note on metrics.Registry.
+func New(sp *spool.Spool, st *store.Store, reg *metrics.Registry, log *slog.Logger) *Mailer {
+	return &Mailer{spool: sp, store: st, metrics: reg, log: log}
 }
 
 // Send renders msg, spools it and records it in the journal. The journal
@@ -106,13 +107,12 @@ func (m *Mailer) Send(msg Message, lifetime time.Duration, now time.Time) (spool
 		return "", fmt.Errorf("selfmail: enqueue: %w", err)
 	}
 
-	recipientsJSON, _ := json.Marshal(msg.To)
 	if rerr := m.store.RecordMessage(store.MessageRecord{
 		QueueID:      id.String(),
 		Client:       msg.Origin,
 		Route:        msg.Route,
 		EnvelopeFrom: msg.EnvelopeFrom,
-		Recipients:   string(recipientsJSON),
+		Recipients:   msg.To,
 		Subject:      msg.Subject,
 		Listener:     msg.Listener,
 		RemoteAddr:   "internal",
@@ -124,6 +124,7 @@ func (m *Mailer) Send(msg Message, lifetime time.Duration, now time.Time) (spool
 	}); rerr != nil {
 		m.log.Warn("recording a relay-composed message in history failed",
 			"queue_id", id.String(), "listener", msg.Listener, "error", rerr)
+		m.metrics.JournalWriteFailure()
 	}
 	return id, nil
 }

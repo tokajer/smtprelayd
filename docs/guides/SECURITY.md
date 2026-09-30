@@ -281,7 +281,7 @@ attacker-influenced values and writes them into a message.
   be polled continuously, and locking a monitoring system out after five bad
   requests would turn a credential mistake into an alerting outage.
 - Bearer tokens compared in constant time against stored hashes, in one place
-  (`config.MatchToken`) shared by the API and the metrics endpoint. Scopes
+  (`httpx.MatchToken`) shared by the API and the metrics endpoint. Scopes
   `read` and `admin`; every destructive action requires `admin`.
 - Failed authentication is rate limited per source address with exponential
   backoff, logged, and exposed as a metric.

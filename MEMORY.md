@@ -58,6 +58,43 @@ libraries that do not exist understated it in the one direction that matters.
 
 ## 3. Component layout
 
+**Amended 2026-09-29.** Five restructurings from an architectural review,
+all behaviour-preserving except where noted below. `internal/mailaddr` is
+new: a stdlib-only leaf package holding the address and domain syntax that
+`internal/config` and `internal/rewrite` both need, so the rules have one
+home independent of the configuration schema. `httpx.MatchToken` replaces
+`config.MatchToken` for the same reason `internal/httpx` exists at all: the
+JSON API and the metrics endpoint share one bearer-token check.
+`config.ScopeSatisfies` stays in `internal/config` -- moving it too would
+have `internal/httpx` import `internal/config` for `HasReadableToken` while
+`internal/config` would need `internal/httpx` for the scope check, a cycle.
+`delivery.Housekeeper` is new: the spool/failed sweep, the history retention
+sweep and the quota warning moved off `Manager.Run`'s dispatch loop onto
+their own goroutine, because a slow retention DELETE (15.6s measured at a
+million rows) or the hourly spool/failed sweep used to delay the next
+dispatch tick, and in the other direction a dispatch pass over a deep queue
+used to delay both sweeps and the quota warning. The OAuth2 token sources for
+xoauth2 routes are now built in the composition root (`cmd/smtprelayd`'s
+`buildTokenSources`) instead of inside `delivery.New`, which is why
+`internal/delivery` no longer imports `internal/authms365`. `config.Normalize`
+is now the single home for every per-element default -- session timeouts, a
+client's `max_recipients`, the inbound and outbound TLS floor, the OAuth2
+scope -- that used to be scattered across the listener and validate.go.
+
+Observable consequences: a zero or negative `data_timeout_sec` now settles to
+300 seconds rather than the listener's old 60-second fallback. The
+dashboard's Configuration page now shows the normalized values -- a
+listener's `min_tls` as `1.2` rather than empty, a client's `max_recipients`
+as `100` rather than `0` -- instead of the unset value it used to display. A
+journal write failure for relay-composed mail (a bounce digest, an expiry
+warning, a canary probe) now counts in `smtprelayd_journal_write_failures`,
+where before only the listener's and the delivery manager's own writes did.
+The startup "client secret has expired" / "expires soon" log lines are gone;
+`bounce.ExpiryWatcher`'s daily "expiry deadline has passed" / "expiry
+deadline approaching" lines replace them, cover the TLS certificate as well
+as a client secret, and honour `expiry.warn_days` instead of a fixed thirty
+days.
+
 **Amended 2026-09-21.** `internal/ratelimit` is new, and is the one
 restructuring so far taken out of the fifty-third session's architectural
 review. The per-minute token bucket existed twice — `listener.rateLimiter`
@@ -121,9 +158,11 @@ decision that starts with those consumers, not with the loader.
 ```
 cmd/smtprelayd/        service wrapper, CLI (run, install, uninstall, queue)
 internal/config       TOML load and validation
-internal/listener     ports 25 / 587 / 465, STARTTLS, SASL, client matching,
-                      per-client connection caps
+internal/listener     ports 25 / 587 / 465, STARTTLS, client matching by
+                      source address, per-client connection caps -- no
+                      inbound AUTH is offered
 internal/spool        durable on-disk queue, failed-message mirror, quota ledger
+internal/mailaddr     address and domain syntax, shared by config and rewrite
 internal/rewrite      per-client sender rewriting, header-block parser
 internal/router       recipient domain -> route
 internal/ratelimit    per-minute token bucket, shared by listener and delivery
@@ -141,9 +180,9 @@ internal/selfmail     spools mail the relay composed itself (digest, warning,
                       canary), so the three cannot drift apart
 internal/canary       periodic synthetic message per [[canary]] entry
 internal/queueaction  requeue and delete, shared by the dashboard and the API
-internal/httpx        bearer token, source address, loopback Host check,
-                      HTTP serve-and-drain -- the primitives more than one of
-                      the three HTTP surfaces needs
+internal/httpx        bearer-token matching, source address, loopback Host
+                      check, HTTP serve-and-drain -- the primitives more than
+                      one of the three HTTP surfaces needs
 internal/logging      structured JSON logging, rotation, central redaction
 internal/certgen      self-signed certificate for an internal listener
 internal/selftest     active open-relay check against the running instance

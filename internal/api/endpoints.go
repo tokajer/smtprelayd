@@ -9,7 +9,6 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/tokajer/smtprelayd/internal/config"
 	"github.com/tokajer/smtprelayd/internal/httpx"
 	"github.com/tokajer/smtprelayd/internal/metrics"
 	"github.com/tokajer/smtprelayd/internal/queueaction"
@@ -32,10 +31,8 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	}
 
 	statusByRoute := map[string]metrics.RouteStatus{}
-	if s.metrics != nil {
-		for _, st := range s.metrics.Status() {
-			statusByRoute[st.Route] = st
-		}
+	for _, st := range s.metrics.Status() {
+		statusByRoute[st.Route] = st
 	}
 
 	type healthRoute struct {
@@ -46,16 +43,13 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	routes := make([]healthRoute, 0, len(s.cfg.Routes))
 	for _, rt := range s.cfg.Routes {
 		authenticated := true
-		if rt.Auth == config.AuthXOAUTH2 {
+		if rt.UsesOAuth2() {
 			authenticated = statusByRoute[rt.Name].HasToken
 		}
 		routes = append(routes, healthRoute{Name: rt.Name, Auth: rt.Auth, Authenticated: authenticated})
 	}
 
-	var uptime time.Duration
-	if s.metrics != nil {
-		uptime = s.metrics.Uptime()
-	}
+	uptime := s.metrics.Uptime()
 
 	writeJSON(w, http.StatusOK, struct {
 		Status        string        `json:"status"`
@@ -181,26 +175,24 @@ func (s *Server) handleQueue(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var routes []routeState
-	if s.metrics != nil {
-		for _, st := range s.metrics.Status() {
-			row := routeState{
-				Route: st.Route, Queued: st.Queued, Deferred: st.Deferred,
-				DeliveredTotal:    st.Delivered,
-				BouncedTotal:      st.Bounced,
-				DeferredTotal:     st.DeferredTotal,
-				AuthFailuresTotal: st.AuthFailures,
-				RecipientsRefused: st.RecipientsRefused,
-			}
-			if !st.OldestQueued.IsZero() {
-				t := st.OldestQueued
-				row.OldestQueued = &t
-			}
-			if !st.LastDelivery.IsZero() {
-				t := st.LastDelivery
-				row.LastDelivery = &t
-			}
-			routes = append(routes, row)
+	for _, st := range s.metrics.Status() {
+		row := routeState{
+			Route: st.Route, Queued: st.Queued, Deferred: st.Deferred,
+			DeliveredTotal:    st.Delivered,
+			BouncedTotal:      st.Bounced,
+			DeferredTotal:     st.DeferredTotal,
+			AuthFailuresTotal: st.AuthFailures,
+			RecipientsRefused: st.RecipientsRefused,
 		}
+		if !st.OldestQueued.IsZero() {
+			t := st.OldestQueued
+			row.OldestQueued = &t
+		}
+		if !st.LastDelivery.IsZero() {
+			t := st.LastDelivery
+			row.LastDelivery = &t
+		}
+		routes = append(routes, row)
 	}
 	writeJSON(w, http.StatusOK, struct {
 		Routes []routeState `json:"routes"`

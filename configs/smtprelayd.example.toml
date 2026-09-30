@@ -261,6 +261,10 @@ enabled = true
 #danger      = "#b02a2a"   # bounced
 
 # Bearer tokens for /api/v1. Scope is "read" or "admin".
+# The same tokens also authorize the metrics endpoint below, whenever
+# [metrics].address binds beyond loopback: it then requires a read-scope (or
+# admin-scope) token from this same list, checked against the same digests.
+# On loopback the metrics endpoint stays open and needs no token.
 # Generate with: smtprelayd token new          (scope read)
 #                smtprelayd -scope admin token new
 # The flag goes before the command, as with -config; after it, it is not read.

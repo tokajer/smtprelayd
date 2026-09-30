@@ -22,7 +22,7 @@ func TestAttemptSummaryReflectsTheLatestAttemptWithinOneSecond(t *testing.T) {
 
 	if err := s.RecordMessage(MessageRecord{
 		QueueID: "CLOCKORDERAAAAAA", Client: "printers", Route: "m365",
-		EnvelopeFrom: "device@example.at", Recipients: `["ops@example.at"]`,
+		EnvelopeFrom: "device@example.at", Recipients: []string{"ops@example.at"},
 		Listener: "submission", RemoteAddr: "192.0.2.10",
 		ReceivedAt: at, ExpiresAt: at.Add(96 * time.Hour),
 	}); err != nil {

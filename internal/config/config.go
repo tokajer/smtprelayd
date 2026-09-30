@@ -121,6 +121,9 @@ type OAuth2 struct {
 	Mailbox       string `toml:"mailbox"`
 }
 
+// UsesOAuth2 reports whether the route authenticates with XOAUTH2.
+func (r Route) UsesOAuth2() bool { return r.Auth == AuthXOAUTH2 }
+
 // SecretExpiry returns the configured client secret expiry date. The format
 // has already been validated, so a parse failure here means the field was
 // never set.
@@ -481,8 +484,8 @@ func Defaults() *Config {
 		Limits: Limits{
 			MaxMessageMB: 50,
 			MaxHops:      25, MaxHeaders: 200, MaxHeaderBytes: 262144,
-			MaxConnections: 200, ReadTimeoutSec: 60, WriteTimeoutSec: 60,
-			DataTimeoutSec: 300, DeliveryTimeoutSec: 600,
+			MaxConnections: 200, ReadTimeoutSec: defaultReadTimeoutSec, WriteTimeoutSec: defaultWriteTimeoutSec,
+			DataTimeoutSec: defaultDataTimeoutSec, DeliveryTimeoutSec: 600,
 			SpoolMaxGB: 10, SpoolWarnPercent: 80,
 		},
 	}

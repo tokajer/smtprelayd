@@ -4,13 +4,13 @@
 package delivery
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/textproto"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -45,7 +45,11 @@ func testRegistry(cfg *config.Config, sp *spool.Spool) *metrics.Registry {
 // than read off the manager afterwards: a test that reaches into m.fails and
 // type-asserts it back to a *bounce.Notifier is pinned to how the manager
 // stores its dependency, not to what it does with it.
-func testManager(t *testing.T) (*Manager, *spool.Spool, *bounce.Notifier, *metrics.Registry) {
+//
+// tokens is passed straight through to New, the way cmd/smtprelayd's
+// buildTokenSources hands it a map it built; nil is the common case, since
+// most tests here have no xoauth2 route to fetch a token for.
+func testManager(t *testing.T, tokens map[string]smarthost.TokenSource) (*Manager, *spool.Spool, *bounce.Notifier, *metrics.Registry) {
 	t.Helper()
 	cfg := &config.Config{
 		Queue: config.Queue{MaxLifetimeHours: 96, RetryScheduleMin: []int{1}},
@@ -59,17 +63,14 @@ func testManager(t *testing.T) (*Manager, *spool.Spool, *bounce.Notifier, *metri
 	if err != nil {
 		t.Fatal(err)
 	}
-	st, err := store.Open(t.TempDir(), discardLog(), 90, true)
+	st, err := store.Open(filepath.Join(t.TempDir(), "history.db"), discardLog(), 90, true)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = st.Close() })
 	reg := testRegistry(cfg, sp)
-	notifier := bounce.New(cfg, sp, st, discardLog())
-	m, err := New(cfg, sp, discardLog(), st, reg, notifier)
-	if err != nil {
-		t.Fatal(err)
-	}
+	notifier := bounce.New(cfg, sp, st, reg, discardLog())
+	m := New(cfg, sp, st, reg, tokens, notifier, discardLog())
 	return m, sp, notifier, reg
 }
 
@@ -80,7 +81,7 @@ func testManager(t *testing.T) (*Manager, *spool.Spool, *bounce.Notifier, *metri
 // notification message's own delivery failure, which is exactly how a
 // notification loop would start.
 func TestFailRecordsRealClientFailureButNotANotificationsOwn(t *testing.T) {
-	m, sp, notifier, _ := testManager(t)
+	m, sp, notifier, _ := testManager(t, nil)
 
 	env := spool.Envelope{From: "a@example.at", To: []string{"b@example.net"}, Route: "m365", Origin: "printers", Received: time.Now()}
 	if _, err := sp.Enqueue(env, strings.NewReader("x"), 0, time.Hour); err != nil {
@@ -118,7 +119,7 @@ func TestFailRecordsRealClientFailureButNotANotificationsOwn(t *testing.T) {
 // route-level metrics attribution treats Canary like Notification; the
 // RecordFail gate in fail() checks Notification alone, deliberately.
 func TestFailRecordsACanarysOwnFailureUnlikeANotifications(t *testing.T) {
-	m, sp, notifier, _ := testManager(t)
+	m, sp, notifier, _ := testManager(t, nil)
 
 	env := spool.Envelope{From: "canary@example.at", To: []string{"ops@example.at"}, Route: "m365", Origin: "smtprelayd-canary", Received: time.Now(), Canary: true}
 	if _, err := sp.Enqueue(env, strings.NewReader("x"), 0, time.Hour); err != nil {
@@ -148,25 +149,25 @@ func (f fakeTokenSource) Token(context.Context) (string, error) {
 }
 
 func TestVerifyTokensSkipsRoutesWithNoCachedSource(t *testing.T) {
-	// testManager's one route has Auth: "none", so New never populated
-	// m.tokens for it; VerifyTokens must not treat that as a failure.
-	m, _, _, _ := testManager(t)
+	// testManager's one route has Auth: "none", so no token source is built
+	// for it; VerifyTokens must not treat that as a failure.
+	m, _, _, _ := testManager(t, nil)
 	if err := m.VerifyTokens(context.Background()); err != nil {
 		t.Fatalf("VerifyTokens: %v", err)
 	}
 }
 
 func TestVerifyTokensPassesWhenEveryRouteTokenFetchSucceeds(t *testing.T) {
-	m, _, _, _ := testManager(t)
-	m.tokens["m365"] = fakeTokenSource{}
+	tokens := map[string]smarthost.TokenSource{"m365": fakeTokenSource{}}
+	m, _, _, _ := testManager(t, tokens)
 	if err := m.VerifyTokens(context.Background()); err != nil {
 		t.Fatalf("VerifyTokens: %v", err)
 	}
 }
 
 func TestVerifyTokensFailsStartupOnRejectedCredential(t *testing.T) {
-	m, _, _, _ := testManager(t)
-	m.tokens["m365"] = fakeTokenSource{err: errors.New("invalid_client")}
+	tokens := map[string]smarthost.TokenSource{"m365": fakeTokenSource{err: errors.New("invalid_client")}}
+	m, _, _, _ := testManager(t, tokens)
 
 	err := m.VerifyTokens(context.Background())
 	if err == nil {
@@ -175,46 +176,6 @@ func TestVerifyTokensFailsStartupOnRejectedCredential(t *testing.T) {
 	if !strings.Contains(err.Error(), "m365") || !strings.Contains(err.Error(), "invalid_client") {
 		t.Fatalf("unexpected error: %v", err)
 	}
-}
-
-// TestReportQuotaLogsOnlyOnTransition drives reportQuota through a rising
-// edge, staying over, a falling edge, and staying under, asserting a log
-// line is emitted only on the two transitions -- the entire point of the
-// edge-trigger. It also covers the division guard with a zero quota.
-func TestReportQuotaLogsOnlyOnTransition(t *testing.T) {
-	var buf bytes.Buffer
-	m := &Manager{log: slog.New(slog.NewTextHandler(&buf, nil))}
-
-	m.reportQuota(900, 1000, true)
-	if out := buf.String(); !strings.Contains(out, "spool is filling up") {
-		t.Fatalf("rising edge: want log containing %q, got %q", "spool is filling up", out)
-	}
-	if out := buf.String(); !strings.Contains(out, "percent=90") {
-		t.Fatalf("rising edge: want percent=90, got %q", out)
-	}
-
-	buf.Reset()
-	m.reportQuota(950, 1000, true)
-	if out := buf.String(); out != "" {
-		t.Fatalf("still over: want no log, got %q", out)
-	}
-
-	buf.Reset()
-	m.reportQuota(700, 1000, false)
-	if out := buf.String(); !strings.Contains(out, "spool is back below the quota warning threshold") {
-		t.Fatalf("falling edge: want log containing %q, got %q", "spool is back below the quota warning threshold", out)
-	}
-
-	buf.Reset()
-	m.reportQuota(600, 1000, false)
-	if out := buf.String(); out != "" {
-		t.Fatalf("still under: want no log, got %q", out)
-	}
-
-	// Fresh manager so quotaWarned starts false and the rising edge fires,
-	// reaching the used*100/quota computation with quota == 0.
-	zero := &Manager{log: slog.New(slog.NewTextHandler(io.Discard, nil))}
-	zero.reportQuota(0, 0, true)
 }
 
 // Compile-time assertion that fakeTokenSource satisfies the interface
@@ -320,7 +281,7 @@ func TestExtractSMTPError(t *testing.T) {
 // lifetime. Break that and a paced message runs out of attempts, or expires,
 // for reasons that have nothing to do with the smarthost.
 func TestHoldDoesNotConsumeTheRetryBudget(t *testing.T) {
-	m, sp, _, _ := testManager(t)
+	m, sp, _, _ := testManager(t, nil)
 	env := spool.Envelope{From: "a@example.at", To: []string{"b@example.net"},
 		Route: "m365", Origin: "printers", Received: time.Now()}
 	if _, err := sp.Enqueue(env, strings.NewReader("x"), 0, time.Hour); err != nil {
@@ -359,7 +320,7 @@ func TestHoldDoesNotConsumeTheRetryBudget(t *testing.T) {
 // would leave a message that can never be tried again yet is not expired
 // either, so nothing would ever clear it.
 func TestHoldNeverDefersPastExpiry(t *testing.T) {
-	m, sp, _, _ := testManager(t)
+	m, sp, _, _ := testManager(t, nil)
 	env := spool.Envelope{From: "a@example.at", To: []string{"b@example.net"},
 		Route: "m365", Origin: "printers", Received: time.Now()}
 	if _, err := sp.Enqueue(env, strings.NewReader("x"), 0, 2*time.Minute); err != nil {
@@ -377,5 +338,37 @@ func TestHoldNeverDefersPastExpiry(t *testing.T) {
 	}
 	if !meta.NextAttempt.Equal(meta.Expires) {
 		t.Errorf("next attempt %v, want it pinned to the expiry %v", meta.NextAttempt, meta.Expires)
+	}
+}
+
+// failingJournal always refuses the write, standing in for a *store.Store
+// backed by a database that has stopped accepting writes -- not a state a
+// real SQLite file can be put into on demand.
+type failingJournal struct{}
+
+func (failingJournal) RecordAttempt(string, int, int, string, string, *time.Time) error {
+	return errors.New("history store unavailable")
+}
+
+// A journal write failure must be counted, not just logged: a broken
+// database otherwise shows up only as a dashboard that slowly stops agreeing
+// with the spool, which nobody reports on its own.
+func TestJournalWriteFailureIsCounted(t *testing.T) {
+	cfg := &config.Config{Routes: []config.Route{{Name: "m365", Auth: "none", MaxConcurrent: 1}}}
+	sp, err := spool.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	reg := testRegistry(cfg, sp)
+	m := New(cfg, sp, failingJournal{}, reg, nil, nil, discardLog())
+
+	id, err := spool.NewID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := reg.JournalWriteFailures()
+	m.journal(discardLog(), &spool.Meta{ID: id}, 0, "", "delivered", nil)
+	if got := reg.JournalWriteFailures(); got != before+1 {
+		t.Fatalf("JournalWriteFailures() = %d, want %d", got, before+1)
 	}
 }

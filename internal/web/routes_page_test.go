@@ -6,6 +6,7 @@ package web
 import (
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -21,7 +22,7 @@ import (
 // recipients that the dashboard did not show anywhere.
 func TestRoutesPageShowsEveryRouteCounter(t *testing.T) {
 	cfg := testConfig(t, "")
-	st, err := store.Open(t.TempDir(), discardLog(), 90, true)
+	st, err := store.Open(filepath.Join(t.TempDir(), "history.db"), discardLog(), 90, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -35,7 +36,7 @@ func TestRoutesPageShowsEveryRouteCounter(t *testing.T) {
 	reg.Delivered("m365")
 	reg.RecipientsRefused("m365", 7)
 
-	srv, err := New(cfg, st, sp, reg, "test", discardLog())
+	srv, err := New(cfg, sp, st, reg, "test", discardLog())
 	if err != nil {
 		t.Fatal(err)
 	}

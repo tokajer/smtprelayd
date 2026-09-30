@@ -1,13 +1,17 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Tokajer
 
-package config
+// Package mailaddr validates the address syntax the relay accepts.
+//
+// It is a stdlib-only leaf package: internal/config uses it to validate
+// addresses written into the configuration file, and internal/rewrite uses
+// it to validate and reconstruct addresses in the mail it rewrites. The
+// syntax rules have one home here, independent of the configuration schema.
+package mailaddr
 
 import "strings"
 
-// RFC 5321 section 4.5.3.1 length limits, repeated here because the rewriter
-// validates configured addresses before they reach a header and must not
-// depend on the listener package.
+// RFC 5321 section 4.5.3.1 length limits.
 const (
 	maxLocalPart = 64
 	maxDomainLen = 255

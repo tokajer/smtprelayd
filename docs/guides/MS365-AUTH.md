@@ -273,8 +273,10 @@ simply overwrites the old file; nothing else in the configuration changes.
   says something about the relay's credentials, never about the message;
   treating it as permanent would move the entire queue to `spool/failed` the
   moment a secret expires.
-- `oauth2.secret_expires` is validated as `YYYY-MM-DD` and logged as a warning
-  at startup within thirty days of expiry. Phase 4 turns it into a metric.
+- `oauth2.secret_expires` is validated as `YYYY-MM-DD`. The relay logs a
+  daily warning once the deadline is within `expiry.warn_days` (30 by
+  default), and mails it too if `bounce.notify` is configured; see
+  `docs/guides/CONFIGURATION.md`.
 
 Outbound pacing is per route: `rate_limit_per_min` is enforced in
 `internal/delivery` before a worker slot is taken, and a paced message is

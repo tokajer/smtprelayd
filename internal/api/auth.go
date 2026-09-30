@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/tokajer/smtprelayd/internal/config"
+	"github.com/tokajer/smtprelayd/internal/httpx"
 )
 
 // tokenInfo is what a successfully matched bearer token tells the caller
@@ -18,10 +19,10 @@ type tokenInfo struct {
 }
 
 // checkToken validates a bearer token against the configured digests. The
-// constant-time comparison itself lives in config.MatchToken, which the
+// constant-time comparison itself lives in httpx.MatchToken, which the
 // metrics endpoint authenticates against too.
 func checkToken(cfg *config.Config, presented string) (tokenInfo, bool) {
-	t, ok := cfg.MatchToken(presented)
+	t, ok := httpx.MatchToken(cfg.Web.Tokens, presented)
 	if !ok {
 		return tokenInfo{}, false
 	}

@@ -15,6 +15,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/tokajer/smtprelayd/internal/mailaddr"
 )
 
 // DefaultScope is the Exchange Online resource scope for the client
@@ -92,6 +94,19 @@ const (
 	defaultRoutePort        = 587
 	defaultRouteTLS         = TLSStartTLS
 	defaultRouteConcurrency = 4
+	defaultMinTLS           = "1.2"
+
+	// defaultClientMaxRecipients is what a client with no max_recipients of
+	// its own is held to; applied only when the field is exactly zero, never
+	// merely non-positive, since a negative value is clients()'s to reject.
+	defaultClientMaxRecipients = 100
+
+	// defaultReadTimeoutSec, defaultWriteTimeoutSec and defaultDataTimeoutSec
+	// are the [limits] fallbacks, applied to any of the three left at zero or
+	// negative; also used directly by Defaults().
+	defaultReadTimeoutSec  = 60
+	defaultWriteTimeoutSec = 60
+	defaultDataTimeoutSec  = 300
 )
 
 // owned pairs a CIDR prefix with the client or route name that claims it, so
@@ -126,42 +141,59 @@ func (v *validator) add(format string, a ...any) {
 	v.errs = append(v.errs, fmt.Sprintf(format, a...))
 }
 
-// Normalize applies the per-element defaults that Defaults cannot: they
-// belong to slice entries that do not exist until the file has been decoded.
-// It runs before validation so that the checks below read one settled value
-// rather than "the configured value, or the default if empty", and it is
-// exported so that a caller building a Config by hand -- a test, or a future
-// in-memory configuration -- can settle the same defaults without running
-// the whole validation, which used to be the only way to reach them and left
-// listener.New compensating with a default of its own. It is idempotent. It
-// holds exactly the defaults that are unconditional and independent of any
-// other field on the element. Two look like they belong here but do not:
-// route.oauth2.scope is set only when the route actually uses OAuth2, so
-// setting it unconditionally would populate the field on routes that never
-// read it; the domain lower-casing in routes() is interleaved with
-// duplicate-domain detection in the same loop and cannot be hoisted without
-// duplicating that loop.
+// Normalize applies every per-element default and the [limits] timeout
+// defaults, so the checks below read one settled value rather than "the
+// configured value, or the default if empty". It is idempotent and runs
+// before validation, so a value validation rejects outright -- a negative
+// max_recipients -- is left exactly as configured for that check to see; a
+// zero or negative timeout settles to its default regardless. Domain
+// lower-casing stays in routes(), interleaved with duplicate-domain
+// detection in the same loop.
 func (c *Config) Normalize() {
 	for i := range c.Listeners {
-		if c.Listeners[i].TLS == "" {
-			c.Listeners[i].TLS = defaultListenerTLS
+		l := &c.Listeners[i]
+		if l.TLS == "" {
+			l.TLS = defaultListenerTLS
+		}
+		if l.TLS != TLSNone && l.MinTLS == "" {
+			l.MinTLS = defaultMinTLS
 		}
 	}
 	for i := range c.Clients {
-		if c.Clients[i].Rewrite.Mode == "" {
-			c.Clients[i].Rewrite.Mode = defaultRewriteMode
+		cl := &c.Clients[i]
+		if cl.Rewrite.Mode == "" {
+			cl.Rewrite.Mode = defaultRewriteMode
+		}
+		if cl.MaxRecipients == 0 {
+			cl.MaxRecipients = defaultClientMaxRecipients
 		}
 	}
 	for i := range c.Routes {
-		if c.Routes[i].Port == 0 {
-			c.Routes[i].Port = defaultRoutePort
+		r := &c.Routes[i]
+		if r.Port == 0 {
+			r.Port = defaultRoutePort
 		}
-		if c.Routes[i].TLS == "" {
-			c.Routes[i].TLS = defaultRouteTLS
+		if r.TLS == "" {
+			r.TLS = defaultRouteTLS
 		}
-		if c.Routes[i].MaxConcurrent <= 0 {
-			c.Routes[i].MaxConcurrent = defaultRouteConcurrency
+		if r.MaxConcurrent <= 0 {
+			r.MaxConcurrent = defaultRouteConcurrency
 		}
+		if r.TLS != TLSNone && r.MinTLS == "" {
+			r.MinTLS = defaultMinTLS
+		}
+		if r.UsesOAuth2() && r.OAuth2.Scope == "" {
+			r.OAuth2.Scope = DefaultScope
+		}
+	}
+	if c.Limits.ReadTimeoutSec <= 0 {
+		c.Limits.ReadTimeoutSec = defaultReadTimeoutSec
+	}
+	if c.Limits.WriteTimeoutSec <= 0 {
+		c.Limits.WriteTimeoutSec = defaultWriteTimeoutSec
+	}
+	if c.Limits.DataTimeoutSec <= 0 {
+		c.Limits.DataTimeoutSec = defaultDataTimeoutSec
 	}
 }
 
@@ -379,7 +411,7 @@ func (v *validator) clients() {
 			switch {
 			case cl.Rewrite.EnvelopeFrom == "":
 				v.add("%s: rewrite.envelope_from is required for mode %s", where, cl.Rewrite.Mode)
-			case !ValidAddress(cl.Rewrite.EnvelopeFrom):
+			case !mailaddr.ValidAddress(cl.Rewrite.EnvelopeFrom):
 				v.add("%s: rewrite.envelope_from %q is not a valid address", where, cl.Rewrite.EnvelopeFrom)
 			}
 			// An empty allowlist would make if_unauthorized behave exactly
@@ -388,31 +420,31 @@ func (v *validator) clients() {
 				v.add("%s: rewrite.mode if_unauthorized requires at least one allowed_senders entry", where)
 			}
 			if hf := strings.TrimSpace(cl.Rewrite.HeaderFrom); hf != "" && hf != "keep" {
-				_, addr, ok := SplitMailbox(hf)
+				_, addr, ok := mailaddr.SplitMailbox(hf)
 				switch {
 				case !ok:
 					v.add("%s: rewrite.header_from must be keep, an address, or "+
 						"a printable ASCII display name followed by <address>", where)
-				case DomainOf(addr) != DomainOf(cl.Rewrite.EnvelopeFrom):
+				case mailaddr.DomainOf(addr) != mailaddr.DomainOf(cl.Rewrite.EnvelopeFrom):
 					// SPF checks the envelope and DMARC checks the header, so
 					// a split between the two domains fails alignment at the
 					// smarthost and is never what the operator wanted.
 					v.add("%s: rewrite.header_from domain %q does not match rewrite.envelope_from domain %q",
-						where, DomainOf(addr), DomainOf(cl.Rewrite.EnvelopeFrom))
+						where, mailaddr.DomainOf(addr), mailaddr.DomainOf(cl.Rewrite.EnvelopeFrom))
 				}
 			}
 		default:
 			v.add("%s: rewrite.mode must be off, if_unauthorized or force", where)
 		}
 		for j, p := range cl.Rewrite.AllowedSenders {
-			if !ValidSenderPattern(p) {
+			if !mailaddr.ValidSenderPattern(p) {
 				v.add("%s: rewrite.allowed_senders[%d] %q must be an address or *@domain", where, j, p)
 			}
 		}
 		switch rt := strings.TrimSpace(cl.Rewrite.ReplyTo); {
 		case rt == "" || rt == "preserve" || rt == "drop":
 		case strings.HasPrefix(rt, "fixed:"):
-			if !ValidAddress(strings.TrimSpace(strings.TrimPrefix(rt, "fixed:"))) {
+			if !mailaddr.ValidAddress(strings.TrimSpace(strings.TrimPrefix(rt, "fixed:"))) {
 				v.add("%s: rewrite.reply_to fixed address is not valid", where)
 			}
 		default:
@@ -509,8 +541,6 @@ func (v *validator) routeTLS(r *Route, where string) {
 			v.add("%s: auth %s requires tls starttls or implicit; "+
 				"tls none supports auth none only", where, r.Auth)
 		}
-	} else if r.MinTLS == "" {
-		r.MinTLS = "1.2"
 	} else if ver, err := ParseTLSVersion(r.MinTLS); err != nil {
 		v.add("%s: min_tls: %v", where, err)
 	} else if ver < tls.VersionTLS12 {
@@ -542,9 +572,8 @@ func (v *validator) routeAuth(r *Route, where string) {
 			if !printableASCII(o.Mailbox) || !strings.Contains(o.Mailbox, "@") {
 				v.add("%s: oauth2.mailbox must be an ASCII email address", where)
 			}
-			if o.Scope == "" {
-				r.OAuth2.Scope = DefaultScope
-			} else if !strings.HasPrefix(o.Scope, "https://") || !strings.HasSuffix(o.Scope, "/.default") {
+			// Normalize has already settled an empty scope to DefaultScope.
+			if !strings.HasPrefix(o.Scope, "https://") || !strings.HasSuffix(o.Scope, "/.default") {
 				v.add("%s: oauth2.scope must be an https resource scope ending in /.default", where)
 			}
 			if o.SecretExpires != "" {
@@ -586,7 +615,7 @@ func (v *validator) routeDomains(r *Route, where string, domainOwner map[string]
 	// client, so a domain claimed twice would silently pick one of them.
 	for j, d := range r.Domains {
 		dl := strings.ToLower(strings.TrimSpace(d))
-		if !ValidDomain(dl) {
+		if !mailaddr.ValidDomain(dl) {
 			v.add("%s: domains[%d] %q is not a valid domain name", where, j, d)
 			continue
 		}
@@ -779,20 +808,20 @@ func (v *validator) bounce() {
 		// than remote, but it is still a header built by concatenation from an
 		// unvalidated string, which CLAUDE.md bans outright.
 		for j, n := range cl.Bounce.Notify {
-			if !ValidAddress(n) {
+			if !mailaddr.ValidAddress(n) {
 				v.add("client %q: bounce.notify[%d] %q is not a valid email address", cl.Name, j, n)
 			}
 		}
 	}
 	for j, n := range v.c.Bounce.Notify {
-		if !ValidAddress(n) {
+		if !mailaddr.ValidAddress(n) {
 			v.add("bounce.notify[%d] %q is not a valid email address", j, n)
 		}
 	}
 	if len(v.c.Bounce.Notify) > 0 || clientNotifies {
 		if v.c.Bounce.Sender == "" {
 			v.add("bounce.sender is required when notifications are enabled")
-		} else if !ValidAddress(v.c.Bounce.Sender) {
+		} else if !mailaddr.ValidAddress(v.c.Bounce.Sender) {
 			v.add("bounce.sender %q is not a valid email address", v.c.Bounce.Sender)
 		}
 		if v.c.Bounce.DigestMinutes <= 0 {
@@ -842,12 +871,12 @@ func (v *validator) canaries() {
 		} else {
 			canaryNames[cn.Name] = true
 		}
-		if !ValidAddress(cn.Recipient) {
+		if !mailaddr.ValidAddress(cn.Recipient) {
 			v.add("canary[%d] %q: recipient %q is not a valid email address", i, cn.Name, cn.Recipient)
 		}
 		if cn.Sender == "" {
 			v.add("canary[%d] %q: sender is required", i, cn.Name)
-		} else if !ValidAddress(cn.Sender) {
+		} else if !mailaddr.ValidAddress(cn.Sender) {
 			v.add("canary[%d] %q: sender %q is not a valid email address", i, cn.Name, cn.Sender)
 		}
 		if cn.Route == "" {

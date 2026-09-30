@@ -422,33 +422,12 @@ func (s *Spool) Commit(st *Staged, env Envelope, lifetime time.Duration, prefix 
 	defer src.Close()
 
 	tmpData := filepath.Join(s.tmp, id.String()+".eml")
-	//#nosec G304 -- tmpData is s.tmp joined with a validated ID; see Stage for the O_NOFOLLOW/O_EXCL reasoning
-	dst, err := os.OpenFile(tmpData, os.O_CREATE|os.O_EXCL|os.O_WRONLY|noFollow, 0o600)
-	if err != nil {
-		return "", err
-	}
-	var n int64
+	var head string
 	if prefix != nil {
-		if head := prefix(id); head != "" {
-			var written int
-			written, err = dst.WriteString(head)
-			n += int64(written)
-		}
+		head = prefix(id)
 	}
-	if err == nil {
-		var copied int64
-		copied, err = io.Copy(dst, src)
-		n += copied
-	}
-	if err == nil {
-		err = dst.Sync()
-	}
-	cerr := dst.Close()
-	if err == nil {
-		err = cerr
-	}
+	n, err := writeStagedCopy(tmpData, src, head)
 	if err != nil {
-		_ = os.Remove(tmpData)
 		return "", err
 	}
 
@@ -487,6 +466,40 @@ func (s *Spool) Commit(st *Staged, env Envelope, lifetime time.Duration, prefix 
 	s.putLocked(m)
 	s.mu.Unlock()
 	return id, nil
+}
+
+// writeStagedCopy writes one route copy's tmp file: head first if non-empty,
+// then src, synced and closed before the caller renames it into place.
+// Removes the tmp file on every error path; n is meaningful only when err is
+// nil.
+func writeStagedCopy(tmpPath string, src io.Reader, head string) (n int64, err error) {
+	//#nosec G304 -- tmpPath is built by Commit from s.tmp and a validated ID; see Stage for the O_NOFOLLOW/O_EXCL reasoning
+	dst, err := os.OpenFile(tmpPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY|noFollow, 0o600)
+	if err != nil {
+		return 0, err
+	}
+	if head != "" {
+		var written int
+		written, err = dst.WriteString(head)
+		n += int64(written)
+	}
+	if err == nil {
+		var copied int64
+		copied, err = io.Copy(dst, src)
+		n += copied
+	}
+	if err == nil {
+		err = dst.Sync()
+	}
+	cerr := dst.Close()
+	if err == nil {
+		err = cerr
+	}
+	if err != nil {
+		_ = os.Remove(tmpPath)
+		return 0, err
+	}
+	return n, nil
 }
 
 // Enqueue stages and commits a single copy. It is the path used by callers

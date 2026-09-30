@@ -23,22 +23,6 @@ import (
 	"github.com/tokajer/smtprelayd/internal/spool"
 )
 
-const defaultMaxMessageMB = 50
-
-// Per-session defaults applied when a client or the limits block leaves the
-// value at zero. Named for the reason defaultMaxMessageMB is: an operator
-// auditing what this relay enforces should find every ceiling by searching
-// for its name, not by reading the function that happens to apply it.
-const (
-	// defaultMaxRecipients bounds one transaction when the matched client
-	// sets no max_recipients of its own.
-	defaultMaxRecipients = 100
-
-	// defaultTimeoutSec is the fallback for any of the read, write and data
-	// timeouts left unset.
-	defaultTimeoutSec = 60
-)
-
 const (
 	// unmatchedMaxConns bounds how many sockets one unauthorised source may
 	// hold at a time. Such a source is refused at MAIL FROM, but the refusal
@@ -366,11 +350,8 @@ func (s *session) doRcpt(arg string) {
 		s.reply(503, "5.5.1 send MAIL FROM first")
 		return
 	}
-	max := s.client.MaxRecipients
-	if max <= 0 {
-		max = defaultMaxRecipients
-	}
-	if len(s.rcpts) >= max {
+	// config.Normalize has already settled max_recipients to a positive value.
+	if len(s.rcpts) >= s.client.MaxRecipients {
 		s.reply(452, "4.5.3 too many recipients")
 		return
 	}
@@ -578,12 +559,10 @@ func (s *session) receivedHeader(id spool.ID) string {
 
 // maxMessageBytes is the global limit unless the client narrows it. A client
 // can only lower the limit: the loader rejects a client value above the
-// global one, so no client can raise the ceiling for itself.
+// global one, so no client can raise the ceiling for itself. validate.go's
+// limits() check guarantees limits.max_message_mb is positive.
 func (s *session) maxMessageBytes() int64 {
 	mb := s.srv.cfg.Limits.MaxMessageMB
-	if mb <= 0 {
-		mb = defaultMaxMessageMB
-	}
 	if s.client != nil && s.client.MaxMessageMB > 0 && s.client.MaxMessageMB < mb {
 		mb = s.client.MaxMessageMB
 	}
@@ -613,18 +592,11 @@ func (s *session) armRead(t time.Time) {
 // that a source which simply stops sending cannot outlive its session budget
 // inside a single blocking read.
 func (s *session) readDeadline(sec int) time.Time {
-	d := time.Now().Add(s.timeout(sec))
+	d := time.Now().Add(time.Duration(sec) * time.Second)
 	if !s.deadline.IsZero() && s.deadline.Before(d) {
 		return s.deadline
 	}
 	return d
-}
-
-func (s *session) timeout(sec int) time.Duration {
-	if sec <= 0 {
-		sec = defaultTimeoutSec
-	}
-	return time.Duration(sec) * time.Second
 }
 
 func (s *session) resetTransaction() {
@@ -639,13 +611,13 @@ func (s *session) resetTransaction() {
 // Before that the loop kept reading from a peer that had already gone, for
 // the whole read_timeout_sec, holding a connection slot the whole time.
 func (s *session) reply(code int, msg string) {
-	_ = s.conn.SetWriteDeadline(time.Now().Add(s.timeout(s.srv.cfg.Limits.WriteTimeoutSec)))
+	_ = s.conn.SetWriteDeadline(time.Now().Add(time.Duration(s.srv.cfg.Limits.WriteTimeoutSec) * time.Second))
 	fmt.Fprintf(s.bw, "%d %s\r\n", code, msg)
 	s.flush()
 }
 
 func (s *session) multiline(code int, lines []string) {
-	_ = s.conn.SetWriteDeadline(time.Now().Add(s.timeout(s.srv.cfg.Limits.WriteTimeoutSec)))
+	_ = s.conn.SetWriteDeadline(time.Now().Add(time.Duration(s.srv.cfg.Limits.WriteTimeoutSec) * time.Second))
 	for i, l := range lines {
 		sep := "-"
 		if i == len(lines)-1 {

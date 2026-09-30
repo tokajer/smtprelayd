@@ -4,6 +4,8 @@
 package bounce
 
 import (
+	"bytes"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -120,6 +122,29 @@ func TestAnItemIsNotRepeatedWithinTheResendInterval(t *testing.T) {
 		if got := sp.Len(); got != step.want {
 			t.Fatalf("after check at +%v: %d warning(s) queued, want %d", step.after, got, step.want)
 		}
+	}
+}
+
+// Without bounce.notify configured there is nowhere to mail a warning to,
+// but the deadline still has to reach an operator somewhere: the log line
+// must say what actually happened, not claim a mail was sent that never was.
+func TestCheckLogsWithoutMailingWhenNoNotifyIsConfigured(t *testing.T) {
+	var buf bytes.Buffer
+	log := slog.New(slog.NewTextHandler(&buf, nil))
+
+	cfg := &config.Config{
+		TLS:    config.TLS{CertFile: certExpiringIn(t, 10*24*time.Hour)},
+		Expiry: config.Expiry{WarnDays: 30},
+	}
+	w := NewExpiryWatcher(cfg, nil, log)
+	w.check(time.Now())
+
+	out := buf.String()
+	if !strings.Contains(out, "expiry deadline approaching") {
+		t.Fatalf("want the deadline logged, got %q", out)
+	}
+	if strings.Contains(out, "expiry warning sent") {
+		t.Fatalf("no mail could be sent, but the log claims one was: %q", out)
 	}
 }
 

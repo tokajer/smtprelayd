@@ -14,13 +14,11 @@ import (
 	"sync"
 	"time"
 
-	"github.com/tokajer/smtprelayd/internal/authms365"
 	"github.com/tokajer/smtprelayd/internal/config"
 	"github.com/tokajer/smtprelayd/internal/delivery/smarthost"
 	"github.com/tokajer/smtprelayd/internal/metrics"
 	"github.com/tokajer/smtprelayd/internal/ratelimit"
 	"github.com/tokajer/smtprelayd/internal/spool"
-	"github.com/tokajer/smtprelayd/internal/store"
 )
 
 // pollInterval bounds how long a freshly queued message waits before a worker
@@ -28,10 +26,14 @@ import (
 // a restart or a missed wakeup.
 const pollInterval = 5 * time.Second
 
-// secretExpiryWarning is how far ahead an expiring client secret is announced.
-// Renewing one needs an administrator with directory rights, which is rarely a
-// same-day operation.
-const secretExpiryWarning = 30 * 24 * time.Hour
+// Journal is what this package needs from the history store to record one
+// delivery attempt. Declared here, on the consumer side, the way
+// queueaction.Journal is: it lets the journal-failure path be tested with a
+// fake that returns an error, which a real *store.Store backed by SQLite is
+// not a state a test can put on demand.
+type Journal interface {
+	RecordAttempt(queueID string, attemptNum int, smtpCode int, smtpResponse, class string, nextAttemptAt *time.Time) error
+}
 
 // FailRecorder is told about every message that failed permanently or
 // expired, once it has been moved to spool/failed. It is the whole of what
@@ -47,7 +49,7 @@ type FailRecorder interface {
 type Manager struct {
 	cfg     *config.Config
 	spool   *spool.Spool
-	store   *store.Store
+	history Journal
 	log     *slog.Logger
 	metrics *metrics.Registry
 	fails   FailRecorder
@@ -65,67 +67,32 @@ type Manager struct {
 	tokens map[string]smarthost.TokenSource
 	rate   *ratelimit.Limiter
 	wg     sync.WaitGroup
-
-	// lastFailedSweep and quotaWarned are read and written only from Run's
-	// own goroutine.
-	lastFailedSweep time.Time
-	quotaWarned     bool
 }
 
 // New builds the delivery manager. Each route gets its own concurrency budget
 // so that one slow smarthost cannot starve the others.
 //
-// reg and fails are injected rather than built here: the registry is shared
-// with the listener, the dashboard and the metrics endpoint, and the notifier
-// runs on its own goroutine that the caller owns, so neither is this
-// package's to construct. fails may be nil, in which case permanent failures
-// are moved aside without anyone being told.
-func New(cfg *config.Config, sp *spool.Spool, log *slog.Logger, st *store.Store, reg *metrics.Registry, fails FailRecorder) (*Manager, error) {
+// reg, tokens and fails are injected rather than built here: the registry is
+// shared with the listener, the dashboard and the metrics endpoint, the
+// OAuth2 token sources are built once in the composition root and registered
+// with reg there (see cmd/smtprelayd's buildTokenSources), and the notifier
+// runs on its own goroutine that the caller owns -- so none of the three is
+// this package's to construct. fails may be nil, in which case permanent
+// failures are moved aside without anyone being told.
+func New(cfg *config.Config, sp *spool.Spool, j Journal, reg *metrics.Registry, tokens map[string]smarthost.TokenSource, fails FailRecorder, log *slog.Logger) *Manager {
 	m := &Manager{
-		cfg: cfg, spool: sp, store: st, log: log.With("component", "delivery"),
+		cfg: cfg, spool: sp, history: j, log: log.With("component", "delivery"),
 		metrics: reg, fails: fails,
 		routes: map[string]chan struct{}{},
 		limits: map[string]int{},
-		tokens: map[string]smarthost.TokenSource{},
+		tokens: tokens,
 		rate:   ratelimit.New(),
 	}
 	for _, r := range cfg.Routes {
 		m.routes[r.Name] = make(chan struct{}, r.MaxConcurrent)
 		m.limits[r.Name] = r.RateLimitPerMin
-		if r.Auth != config.AuthXOAUTH2 {
-			continue
-		}
-		ts, err := authms365.New(authms365.Options{
-			TenantID: r.OAuth2.TenantID,
-			ClientID: r.OAuth2.ClientID,
-			Secret:   r.OAuth2.ClientSecret.Value(),
-			Scope:    r.OAuth2.Scope,
-		})
-		if err != nil {
-			return nil, fmt.Errorf("route %s: %w", r.Name, err)
-		}
-		m.tokens[r.Name] = ts
-		m.metrics.RegisterTokenAger(r.Name, ts)
-		m.warnSecretExpiry(r)
 	}
-	return m, nil
-}
-
-// warnSecretExpiry surfaces an expiring client secret at startup. Until the
-// metrics endpoint exists this log line is the only warning an operator gets
-// before every delivery starts failing authentication.
-func (m *Manager) warnSecretExpiry(r config.Route) {
-	exp, ok := r.OAuth2.SecretExpiry()
-	if !ok {
-		return
-	}
-	switch d := time.Until(exp); {
-	case d <= 0:
-		m.log.Error("client secret has expired", "route", r.Name, "expired", r.OAuth2.SecretExpires)
-	case d < secretExpiryWarning:
-		m.log.Warn("client secret expires soon", "route", r.Name,
-			"expires", r.OAuth2.SecretExpires, "days_left", int(d.Hours()/24))
-	}
+	return m
 }
 
 // VerifyTokens eagerly acquires a token for every xoauth2 route. Without this,
@@ -174,10 +141,6 @@ func (m *Manager) Run(ctx context.Context) {
 			m.wg.Wait()
 			return
 		}
-
-		m.sweepFailed(time.Now())
-		m.sweepHistory(time.Now())
-		m.checkQuota()
 
 		select {
 		case <-ctx.Done():
@@ -277,62 +240,6 @@ func (m *Manager) dispatchOne(ctx context.Context, meta *spool.Meta, saturated m
 		m.attempt(ctx, meta)
 	}()
 	return true
-}
-
-// failedSweepInterval throttles the spool/failed retention sweep. The dispatch
-// loop is the only thing already ticking over the spool's lifecycle, so the
-// sweep hangs off it rather than adding a goroutine — but it walks a directory
-// index, and the retention it enforces is measured in days, so running it on
-// every poll would be pure waste.
-const failedSweepInterval = time.Hour
-
-func (m *Manager) sweepFailed(now time.Time) {
-	if now.Sub(m.lastFailedSweep) < failedSweepInterval {
-		return
-	}
-	m.lastFailedSweep = now
-	if removed, freed := m.spool.SweepFailed(now); removed > 0 {
-		m.log.Info("failed spool retention sweep",
-			"removed", removed, "freed_bytes", freed)
-	}
-}
-
-// sweepHistory runs the history store's retention delete here rather than
-// letting it happen inside a journal write. The store keeps its own hourly
-// gate, so calling it every tick costs one comparison; what matters is which
-// goroutine pays when the gate opens. Measured at a million rows the delete
-// took 15.6 seconds, and SQLite has a single writer -- from a delivery worker
-// that stalled the worker and every other writer behind it.
-func (m *Manager) sweepHistory(now time.Time) {
-	if deleted := m.store.RetentionSweep(now); deleted > 0 {
-		m.log.Info("history retention sweep", "deleted_rows", deleted)
-	}
-}
-
-// checkQuota fetches the current quota state from the spool and reports it.
-func (m *Manager) checkQuota() {
-	used, quota, over := m.spool.QuotaWarning()
-	m.reportQuota(used, quota, over)
-}
-
-// reportQuota logs the spool quota warning only on a transition. The
-// dispatch loop polls every pollInterval (5s), so logging the current state
-// on each poll rather than the edge would bury the one line an operator
-// needs to notice under constant repetition.
-func (m *Manager) reportQuota(used, quota int64, over bool) {
-	switch {
-	case over && !m.quotaWarned:
-		var percent int64
-		if quota > 0 {
-			percent = used * 100 / quota
-		}
-		m.log.Warn("spool is filling up",
-			"used_bytes", used, "max_bytes", quota, "percent", percent)
-	case !over && m.quotaWarned:
-		m.log.Info("spool is back below the quota warning threshold",
-			"used_bytes", used, "max_bytes", quota)
-	}
-	m.quotaWarned = over
 }
 
 // attempt makes one delivery attempt and records what it ended in. The two
@@ -546,7 +453,7 @@ func (m *Manager) recordOutcome(meta *spool.Meta, o outcome, err error) {
 // stopped accepting writes otherwise shows up only as a dashboard that slowly
 // empties, which nobody reports.
 func (m *Manager) journal(log *slog.Logger, meta *spool.Meta, code int, resp, class string, next *time.Time) {
-	if err := m.store.RecordAttempt(meta.ID.String(), meta.Attempts, code, resp, class, next); err != nil {
+	if err := m.history.RecordAttempt(meta.ID.String(), meta.Attempts, code, resp, class, next); err != nil {
 		log.Warn("history journal write failed", "class", class, "error", err)
 		m.metrics.JournalWriteFailure()
 	}
@@ -588,8 +495,9 @@ func (m *Manager) hold(meta *spool.Meta, d time.Duration) {
 }
 
 func (m *Manager) fail(meta *spool.Meta, reason string) {
-	// Phase 5 turns this into a DSN. Until then the message is moved aside
-	// rather than deleted, so that nothing is lost without a trace.
+	// The message is moved aside into spool/failed rather than deleted, so
+	// that nothing is lost without a trace, and reported through the bounce
+	// digest via FailRecorder below.
 	if err := m.spool.Fail(meta, reason); err != nil {
 		m.log.Error("cannot move failed message aside", "queue_id", meta.ID.String(), "error", err)
 		return
@@ -639,8 +547,10 @@ func describeRefusals(rejected []smarthost.Rejection) string {
 	return b.String()
 }
 
-// extractSMTPError tries to extract the SMTP response code and text from an error.
-// Returns (0, "") if no SMTP error is found.
+// extractSMTPError tries to extract the SMTP response code and text from an
+// error. Returns (0, err.Error()) when no textproto.Error is found in err's
+// chain, so the attempt row always carries some description of the failure
+// even when it did not come from an SMTP reply.
 func extractSMTPError(err error) (int, string) {
 	var te *textproto.Error
 	if errors.As(err, &te) {

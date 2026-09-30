@@ -25,7 +25,11 @@ func testSet(t *testing.T, address string) *Set {
 		Listeners: []config.Listener{{Name: "test", Address: address, TLS: "none"}},
 		Limits:    config.Limits{MaxConnections: 10},
 	}
-	set, err := New(cfg, nil, discardLog(), nil, nil)
+	// config.Normalize is the only place the read/write/data timeout
+	// defaults are applied now; a config built by hand has to call it
+	// itself, the way config.Load already does through Validate.
+	cfg.Normalize()
+	set, err := New(cfg, nil, nil, nil, discardLog())
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -146,7 +150,11 @@ func TestShutdownDoesNotWaitForAnIdleSession(t *testing.T) {
 		Limits:  config.Limits{MaxConnections: 10, ReadTimeoutSec: 120, DataTimeoutSec: 300},
 		Service: config.Service{Hostname: "probe"},
 	}
-	set, err := New(cfg, nil, discardLog(), nil, nil)
+	// write_timeout_sec is left at its config.Normalize default: the banner
+	// write needs a real deadline, not the zero one an unnormalized config
+	// would give it.
+	cfg.Normalize()
+	set, err := New(cfg, nil, nil, nil, discardLog())
 	if err != nil {
 		t.Fatal(err)
 	}

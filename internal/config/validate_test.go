@@ -4,8 +4,6 @@
 package config
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -59,6 +57,13 @@ func write(t *testing.T, body string) string {
 // TestElementDefaultsAreApplied pins what normalize is responsible for: a
 // listener with no tls, a client with no rewrite.mode and a route with no
 // port must come out of Validate with "none", "off" and 587 respectively.
+//
+// The listener's own min_tls has nothing to default from with tls none and
+// must stay empty. The route sets no tls of its own either, which defaults
+// to starttls (defaultRouteTLS): since that is not none, its min_tls (the
+// outbound floor) settles to "1.2". The route's auth is "none", so
+// oauth2.scope must stay empty too; only a route that actually uses xoauth2
+// gets DefaultScope, see TestXOAUTH2ScopeDefaults in oauth2_test.go.
 func TestElementDefaultsAreApplied(t *testing.T) {
 	body := strings.Replace(baseConfig, `tls = "none"`+"\n", "", 1)
 	cfg, err := Load(write(t, body))
@@ -68,11 +73,106 @@ func TestElementDefaultsAreApplied(t *testing.T) {
 	if got := cfg.Listeners[0].TLS; got != "none" {
 		t.Fatalf("listener tls defaulted to %q, want none", got)
 	}
+	if got := cfg.Listeners[0].MinTLS; got != "" {
+		t.Fatalf("listener min_tls defaulted to %q on a listener with tls none, want empty", got)
+	}
 	if got := cfg.Clients[0].Rewrite.Mode; got != "off" {
 		t.Fatalf("client rewrite.mode defaulted to %q, want off", got)
 	}
 	if got := cfg.Routes[0].Port; got != 587 {
 		t.Fatalf("route port defaulted to %d, want 587", got)
+	}
+	if got := cfg.Routes[0].TLS; got != TLSStartTLS {
+		t.Fatalf("route tls defaulted to %q, want starttls", got)
+	}
+	if got := cfg.Routes[0].MinTLS; got != "1.2" {
+		t.Fatalf("route min_tls = %q on a route whose tls is not none, want 1.2", got)
+	}
+	if got := cfg.Routes[0].OAuth2.Scope; got != "" {
+		t.Fatalf("oauth2.scope = %q on a route that does not use xoauth2, want empty", got)
+	}
+}
+
+// A listener whose tls is starttls or implicit gets an inbound min_tls floor
+// too, for the same reason a route's outbound one exists: a value that only
+// means something once a handshake happens must not be left for each caller
+// to invent its own fallback for.
+func TestNormalizeSettlesListenerMinTLSWhenTLSIsNotNone(t *testing.T) {
+	dir := t.TempDir()
+	certFile, keyFile := filepath.Join(dir, "relay.crt"), filepath.Join(dir, "relay.key")
+	certPEM, keyPEM, err := certgen.Generate(certgen.Options{Hosts: []string{"127.0.0.1"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(certFile, certPEM, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(keyFile, keyPEM, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	body := strings.Replace(baseConfig, `tls = "none"`, `tls = "starttls"`, 1) +
+		fmt.Sprintf("\n[tls]\ncert_file = %q\nkey_file = %q\n",
+			filepath.ToSlash(certFile), filepath.ToSlash(keyFile))
+
+	cfg, err := Load(write(t, body))
+	if err != nil {
+		t.Fatalf("a starttls listener with a certificate was rejected: %v", err)
+	}
+	if got := cfg.Listeners[0].MinTLS; got != "1.2" {
+		t.Fatalf("listener min_tls = %q on a starttls listener, want 1.2", got)
+	}
+}
+
+// An explicit zero or a negative value must settle to the same default:
+// Normalize cannot and must not try to distinguish "the operator wrote 0"
+// from "the operator wrote nothing at all".
+func TestNormalizeSettlesTimeoutDefaults(t *testing.T) {
+	for _, sec := range []int{0, -1} {
+		t.Run(fmt.Sprintf("%d", sec), func(t *testing.T) {
+			body := baseConfig + fmt.Sprintf(
+				"\n[limits]\nread_timeout_sec = %d\nwrite_timeout_sec = %d\ndata_timeout_sec = %d\n",
+				sec, sec, sec)
+			cfg, err := Load(write(t, body))
+			if err != nil {
+				t.Fatalf("limits.*_timeout_sec = %d was rejected: %v", sec, err)
+			}
+			if got := cfg.Limits.ReadTimeoutSec; got != 60 {
+				t.Errorf("read_timeout_sec %d settled to %d, want 60", sec, got)
+			}
+			if got := cfg.Limits.WriteTimeoutSec; got != 60 {
+				t.Errorf("write_timeout_sec %d settled to %d, want 60", sec, got)
+			}
+			if got := cfg.Limits.DataTimeoutSec; got != 300 {
+				t.Errorf("data_timeout_sec %d settled to %d, want 300", sec, got)
+			}
+		})
+	}
+}
+
+// max_recipients is the one Normalize default that is not simply "any
+// non-positive value settles the same way": zero means the operator left it
+// unset and gets the documented default, but a negative value is a mistake
+// clients() must still catch, so Normalize must leave it exactly as
+// configured for that check to see.
+func TestNormalizeSettlesClientMaxRecipientsButLeavesNegativeForValidation(t *testing.T) {
+	zero := strings.Replace(baseConfig, `route = "m365"`, "route = \"m365\"\nmax_recipients = 0", 1)
+	cfg, err := Load(write(t, zero))
+	if err != nil {
+		t.Fatalf("max_recipients = 0 was rejected: %v", err)
+	}
+	if got := cfg.Clients[0].MaxRecipients; got != 100 {
+		t.Fatalf("max_recipients 0 settled to %d, want 100", got)
+	}
+
+	negative := strings.Replace(baseConfig, `route = "m365"`, "route = \"m365\"\nmax_recipients = -1", 1)
+	cfg, err = Load(write(t, negative))
+	if err == nil {
+		t.Fatal("max_recipients = -1 was accepted")
+	}
+	// Load hands back the decoded Config alongside the error, so this checks
+	// Normalize's ==0 guard did not also swallow the negative value.
+	if got := cfg.Clients[0].MaxRecipients; got != -1 {
+		t.Fatalf("max_recipients -1 was rewritten to %d before validation could reject it", got)
 	}
 }
 
@@ -464,21 +564,13 @@ path = "/metrics"
 	}
 }
 
-func TestMatchTokenIsScopeAware(t *testing.T) {
-	sum := sha256.Sum256([]byte("s3cr3t"))
+// HasReadableToken stays here rather than with httpx.MatchToken: moving it
+// would need ScopeSatisfies to move too, creating an import cycle (httpx
+// already imports config).
+func TestHasReadableToken(t *testing.T) {
 	c := Defaults()
-	c.Web.Tokens = []Token{{Name: "checkmk", Scope: "read", SHA256: hex.EncodeToString(sum[:])}}
+	c.Web.Tokens = []Token{{Name: "checkmk", Scope: "read", SHA256: strings.Repeat("a", 64)}}
 
-	got, ok := c.MatchToken("s3cr3t")
-	if !ok || got.Name != "checkmk" {
-		t.Fatalf("a valid token did not match: %+v %v", got, ok)
-	}
-	if _, ok := c.MatchToken("wrong"); ok {
-		t.Fatal("a wrong token matched")
-	}
-	if _, ok := c.MatchToken(""); ok {
-		t.Fatal("an empty token matched")
-	}
 	if !c.HasReadableToken() {
 		t.Fatal("a read token was not recognised as read-capable")
 	}

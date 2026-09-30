@@ -21,6 +21,7 @@ import (
 	"strings"
 
 	"github.com/tokajer/smtprelayd/internal/config"
+	"github.com/tokajer/smtprelayd/internal/mailaddr"
 )
 
 // Rewrite modes, mirroring config.Rewrite.Mode.
@@ -99,17 +100,17 @@ func Compile(r config.Rewrite) (*Rules, error) {
 		return nil, fmt.Errorf("rewrite: unknown mode %q", r.Mode)
 	}
 
-	if !config.ValidAddress(out.envFrom) {
+	if !mailaddr.ValidAddress(out.envFrom) {
 		return nil, fmt.Errorf("rewrite: envelope_from %q is not a valid address", r.EnvelopeFrom)
 	}
 	if out.headerFrom != "" && out.headerFrom != HeaderFromKeep {
-		display, addr, ok := config.SplitMailbox(out.headerFrom)
+		display, addr, ok := mailaddr.SplitMailbox(out.headerFrom)
 		if !ok {
 			return nil, fmt.Errorf("rewrite: header_from %q is not a valid mailbox", r.HeaderFrom)
 		}
-		if config.DomainOf(addr) != config.DomainOf(out.envFrom) {
+		if mailaddr.DomainOf(addr) != mailaddr.DomainOf(out.envFrom) {
 			return nil, fmt.Errorf("rewrite: header_from domain %q does not match envelope_from domain %q",
-				config.DomainOf(addr), config.DomainOf(out.envFrom))
+				mailaddr.DomainOf(addr), mailaddr.DomainOf(out.envFrom))
 		}
 		out.headerFrom = formatMailbox(display, addr)
 	}
@@ -131,7 +132,7 @@ func Compile(r config.Rewrite) (*Rules, error) {
 		out.replyTo = replyDrop
 	case strings.HasPrefix(rt, "fixed:"):
 		addr := strings.TrimSpace(strings.TrimPrefix(rt, "fixed:"))
-		if !config.ValidAddress(addr) {
+		if !mailaddr.ValidAddress(addr) {
 			return nil, fmt.Errorf("rewrite: reply_to fixed address %q is not valid", addr)
 		}
 		out.replyTo, out.replyFixed = replyFixed, addr
@@ -145,12 +146,12 @@ func compilePattern(s string) (pattern, error) {
 	s = strings.TrimSpace(s)
 	if strings.HasPrefix(s, "*@") {
 		d := strings.ToLower(s[2:])
-		if !config.ValidDomain(d) {
+		if !mailaddr.ValidDomain(d) {
 			return pattern{}, fmt.Errorf("rewrite: allowed_senders %q: invalid domain", s)
 		}
 		return pattern{domain: d}, nil
 	}
-	if !config.ValidAddress(s) {
+	if !mailaddr.ValidAddress(s) {
 		return pattern{}, fmt.Errorf("rewrite: allowed_senders %q must be an address or *@domain", s)
 	}
 	at := strings.LastIndex(s, "@")
@@ -279,10 +280,10 @@ func (r *Rules) keepsFrom(orig string) bool {
 		return false
 	}
 	a := addrOfMailbox(orig)
-	if !config.ValidAddress(a) {
+	if !mailaddr.ValidAddress(a) {
 		return false
 	}
-	return config.DomainOf(a) == config.DomainOf(r.envFrom)
+	return mailaddr.DomainOf(a) == mailaddr.DomainOf(r.envFrom)
 }
 
 func (r *Rules) fromValue() string {
@@ -296,13 +297,13 @@ func (r *Rules) fromValue() string {
 // its From header when that is usable, otherwise the envelope sender it
 // declared. Both have been validated before they get here.
 func (r *Rules) replyAddress(orig, envelope string) string {
-	if a := addrOfMailbox(orig); config.ValidAddress(a) {
+	if a := addrOfMailbox(orig); mailaddr.ValidAddress(a) {
 		if !strings.EqualFold(a, r.envFrom) {
 			return a
 		}
 		return ""
 	}
-	if config.ValidAddress(envelope) && !strings.EqualFold(envelope, r.envFrom) {
+	if mailaddr.ValidAddress(envelope) && !strings.EqualFold(envelope, r.envFrom) {
 		return envelope
 	}
 	return ""

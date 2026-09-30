@@ -5,7 +5,6 @@ package store
 
 import (
 	"database/sql"
-	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -22,7 +21,7 @@ func testStore(t *testing.T) *Store {
 	tmpDir := t.TempDir()
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-	s, err := Open(tmpDir, log, 90, true)
+	s, err := Open(filepath.Join(tmpDir, "history.db"), log, 90, true)
 	if err != nil {
 		t.Fatalf("Open failed: %v", err)
 	}
@@ -40,7 +39,7 @@ func testRecord(queueID string, received, expires time.Time) MessageRecord {
 		Client:       "client",
 		Route:        "route",
 		EnvelopeFrom: "from@example.com",
-		Recipients:   `["user@example.com"]`,
+		Recipients:   []string{"user@example.com"},
 		Subject:      "Subject",
 		Listener:     "smtp",
 		RemoteAddr:   "10.0.0.1",
@@ -57,7 +56,6 @@ func testRecord(queueID string, received, expires time.Time) MessageRecord {
 func TestRecordMessageAndAttempt(t *testing.T) {
 	s := testStore(t)
 
-	recipients, _ := json.Marshal([]string{"user@example.com"})
 	now := time.Now()
 	expires := now.Add(96 * time.Hour)
 
@@ -67,7 +65,7 @@ func TestRecordMessageAndAttempt(t *testing.T) {
 		Route:        "m365",
 		EnvelopeFrom: "relay@example.com",
 		OriginalFrom: "printer@local",
-		Recipients:   string(recipients),
+		Recipients:   []string{"user@example.com"},
 		Subject:      "Test Subject",
 		Listener:     "smtp",
 		RemoteAddr:   "10.0.0.5",
@@ -130,7 +128,7 @@ func TestSubjectRedaction(t *testing.T) {
 	tmpDir := t.TempDir()
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-	s, err := Open(tmpDir, log, 90, false) // retain_subjects = false
+	s, err := Open(filepath.Join(tmpDir, "history.db"), log, 90, false) // retain_subjects = false
 	if err != nil {
 		t.Fatalf("Open failed: %v", err)
 	}
@@ -170,7 +168,8 @@ func TestSubjectRedaction(t *testing.T) {
 // were retained must stop being readable once the setting is turned off.
 func TestSubjectStoredBeforeRedactionIsHiddenAfterwards(t *testing.T) {
 	dir := t.TempDir()
-	on, err := Open(dir, slog.New(slog.NewTextHandler(io.Discard, nil)), 90, true)
+	dbPath := filepath.Join(dir, "history.db")
+	on, err := Open(dbPath, slog.New(slog.NewTextHandler(io.Discard, nil)), 90, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -189,7 +188,7 @@ func TestSubjectStoredBeforeRedactionIsHiddenAfterwards(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	off, err := Open(dir, slog.New(slog.NewTextHandler(io.Discard, nil)), 90, false)
+	off, err := Open(dbPath, slog.New(slog.NewTextHandler(io.Discard, nil)), 90, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -571,13 +570,12 @@ func TestFindMessagesSortByStatus(t *testing.T) {
 // MAX(at_time) and fan the join out into two result rows for one message.
 func TestFindBounceSummariesMatchesAPIShape(t *testing.T) {
 	s := testStore(t)
-	recipients, _ := json.Marshal([]string{"someone@partner.example"})
 	now := time.Now()
 
 	rec := testRecord("BOUNCE-SUMMARY-1", now, now.Add(96*time.Hour))
 	rec.Client, rec.Route = "printers-vienna", "m365"
 	rec.EnvelopeFrom, rec.OriginalFrom = "relay@example.at", "kopierer@local"
-	rec.Recipients, rec.Subject, rec.TLSUsed = string(recipients), "Scan 2026-08-07", true
+	rec.Recipients, rec.Subject, rec.TLSUsed = []string{"someone@partner.example"}, "Scan 2026-08-07", true
 	if err := s.RecordMessage(rec); err != nil {
 		t.Fatal(err)
 	}
@@ -687,7 +685,7 @@ func TestMigrationAddsJournalColumns(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	s, err := Open(dir, slog.New(slog.NewTextHandler(io.Discard, nil)), 90, true)
+	s, err := Open(dbPath, slog.New(slog.NewTextHandler(io.Discard, nil)), 90, true)
 	if err != nil {
 		t.Fatalf("Open on a pre-journal database failed: %v", err)
 	}
@@ -728,7 +726,8 @@ func TestDatabaseFilesAreNotWorldReadable(t *testing.T) {
 		t.Skip("mode bits do not govern access on Windows; the data directory DACL does")
 	}
 	dir := t.TempDir()
-	s, err := Open(dir, slog.New(slog.NewTextHandler(io.Discard, nil)), 90, true)
+	base := filepath.Join(dir, "spool", "history.db")
+	s, err := Open(base, slog.New(slog.NewTextHandler(io.Discard, nil)), 90, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -740,7 +739,6 @@ func TestDatabaseFilesAreNotWorldReadable(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	base := filepath.Join(dir, "spool", "history.db")
 	for _, path := range []string{base, base + "-wal", base + "-shm"} {
 		fi, err := os.Stat(path)
 		if os.IsNotExist(err) {
@@ -865,11 +863,12 @@ func TestEveryFilterFieldBinds(t *testing.T) {
 	late := early.Add(48 * time.Hour)
 
 	for _, d := range []struct {
-		id, client, route, from, rcpt, subj string
-		at                                  time.Time
+		id, client, route, from, subj string
+		rcpt                          []string
+		at                            time.Time
 	}{
-		{"aaaaaaaa", "alpha", "r-alpha", "from-alpha@x.test", `["to-alpha@y.test"]`, "subject-alpha", early},
-		{"bbbbbbbb", "beta", "r-beta", "from-beta@x.test", `["to-beta@y.test"]`, "subject-beta", late},
+		{"aaaaaaaa", "alpha", "r-alpha", "from-alpha@x.test", "subject-alpha", []string{"to-alpha@y.test"}, early},
+		{"bbbbbbbb", "beta", "r-beta", "from-beta@x.test", "subject-beta", []string{"to-beta@y.test"}, late},
 	} {
 		if err := s.RecordMessage(MessageRecord{
 			QueueID: d.id, Client: d.client, Route: d.route, EnvelopeFrom: d.from,
@@ -1051,7 +1050,7 @@ func TestRecordAttemptDoesNotSweep(t *testing.T) {
 	old := time.Now().UTC().Add(-365 * 24 * time.Hour)
 	if err := s.RecordMessage(MessageRecord{
 		QueueID: "QSWEEPAAAAAAAAAA", Client: "c", Route: "r",
-		EnvelopeFrom: "a@b.at", Recipients: `["x@y.at"]`, Listener: "l",
+		EnvelopeFrom: "a@b.at", Recipients: []string{"x@y.at"}, Listener: "l",
 		RemoteAddr: "127.0.0.1", ReceivedAt: old, ExpiresAt: old,
 	}); err != nil {
 		t.Fatal(err)
@@ -1150,7 +1149,7 @@ func TestAttemptSummaryMatchesTheAttemptsTable(t *testing.T) {
 	const id = "QSUMMARYAAAAAAAA"
 	if err := s.RecordMessage(MessageRecord{
 		QueueID: id, Client: "c", Route: "r", EnvelopeFrom: "a@b.at",
-		Recipients: `["x@y.at"]`, Listener: "l", RemoteAddr: "127.0.0.1",
+		Recipients: []string{"x@y.at"}, Listener: "l", RemoteAddr: "127.0.0.1",
 		ReceivedAt: now, ExpiresAt: now.Add(time.Hour),
 	}); err != nil {
 		t.Fatal(err)
@@ -1213,7 +1212,7 @@ func TestABounceStaysABounceAfterARequeueAndDelivery(t *testing.T) {
 	const id = "QREBOUNDAAAAAAAA"
 	if err := s.RecordMessage(MessageRecord{
 		QueueID: id, Client: "c", Route: "r", EnvelopeFrom: "a@b.at",
-		Recipients: `["x@y.at"]`, Listener: "l", RemoteAddr: "127.0.0.1",
+		Recipients: []string{"x@y.at"}, Listener: "l", RemoteAddr: "127.0.0.1",
 		ReceivedAt: now, ExpiresAt: now.Add(time.Hour),
 	}); err != nil {
 		t.Fatal(err)
@@ -1315,7 +1314,7 @@ func TestMigrationBackfillsAttemptSummaries(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	s, err := Open(dir, slog.New(slog.NewTextHandler(io.Discard, nil)), 90, true)
+	s, err := Open(dbPath, slog.New(slog.NewTextHandler(io.Discard, nil)), 90, true)
 	if err != nil {
 		t.Fatalf("Open on a pre-summary database failed: %v", err)
 	}
@@ -1386,7 +1385,7 @@ func TestAnIndexThatEarnedNothingIsDropped(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	s, err := Open(dir, slog.New(slog.NewTextHandler(io.Discard, nil)), 90, true)
+	s, err := Open(dbPath, slog.New(slog.NewTextHandler(io.Discard, nil)), 90, true)
 	if err != nil {
 		t.Fatalf("Open on a database carrying the dropped index failed: %v", err)
 	}

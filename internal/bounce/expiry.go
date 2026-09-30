@@ -80,9 +80,8 @@ func (w *ExpiryWatcher) Run(ctx context.Context) {
 		return
 	}
 	if len(w.cfg.Bounce.Notify) == 0 {
-		// Nowhere to send. The startup log still carries what collect would
-		// have found, so this is not silent, and Notify would return without
-		// sending anyway.
+		// Nowhere to send. check logs each due deadline itself, so this stays
+		// visible without a mail.
 		w.log.Debug("no bounce.notify configured, expiry warnings will not be mailed")
 	}
 	w.check(time.Now())
@@ -114,6 +113,26 @@ func (w *ExpiryWatcher) check(now time.Time) {
 		return
 	}
 
+	// Logged independently of whether a mail can be sent at all: an operator
+	// with no bounce.notify configured still needs to see the deadline
+	// somewhere, and the log is the only place left.
+	for _, it := range due {
+		if !it.Expires.After(now) {
+			w.log.Error("expiry deadline has passed", "item", it.What, "detail", it.Detail,
+				"expires", it.Expires.Format(time.RFC3339))
+		} else {
+			w.log.Warn("expiry deadline approaching", "item", it.What, "detail", it.Detail,
+				"expires", it.Expires.Format(time.RFC3339), "days_left", int(it.Expires.Sub(now).Hours()/24))
+		}
+	}
+
+	if len(w.cfg.Bounce.Notify) == 0 {
+		for _, it := range due {
+			w.lastSent[it.Key] = now
+		}
+		return
+	}
+
 	subject, body := composeExpiry(due, now, w.cfg.Service.Hostname, w.cfg.Expiry.WarnDays)
 	if err := w.notifier.Notify(expirySource, subject, body, now); err != nil {
 		// Not marked as sent, so the next check tries again.
@@ -122,8 +141,8 @@ func (w *ExpiryWatcher) check(now time.Time) {
 	}
 	for _, it := range due {
 		w.lastSent[it.Key] = now
-		w.log.Warn("expiry warning sent", "item", it.What, "expires", it.Expires.Format(time.RFC3339))
 	}
+	w.log.Warn("expiry warning sent", "count", len(due))
 }
 
 // collect returns everything expiring inside the expiry.WarnWindow, already

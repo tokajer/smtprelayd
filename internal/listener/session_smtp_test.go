@@ -97,7 +97,13 @@ func serveTest(t *testing.T, cfg *config.Config) *smtpConn {
 	if cfg.Limits.MaxConnections == 0 {
 		cfg.Limits.MaxConnections = 10
 	}
-	set, err := New(cfg, nil, discardLog(), nil, nil)
+	// The session no longer falls back to a built-in default for the read,
+	// write and data timeouts or a client's max_recipients: config.Normalize
+	// is the only place those defaults are applied now, and a config built by
+	// hand (as every test here does) has to call it itself, the way
+	// config.Load already does through Validate.
+	cfg.Normalize()
+	set, err := New(cfg, nil, nil, nil, discardLog())
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -232,14 +238,15 @@ func serveQueuedWithStore(t *testing.T, cfg *config.Config) (*smtpConn, *store.S
 	if err != nil {
 		t.Fatalf("spool.Open: %v", err)
 	}
-	st, err := store.Open(dir, discardLog(), 90, true)
+	st, err := store.Open(filepath.Join(dir, "history.db"), discardLog(), 90, true)
 	if err != nil {
 		t.Fatalf("store.Open: %v", err)
 	}
 	t.Cleanup(func() { _ = st.Close() })
 
 	cfg.Listeners[0].Address = "127.0.0.1:0"
-	set, err := New(cfg, sp, discardLog(), st, nil)
+	cfg.Normalize()
+	set, err := New(cfg, sp, st, nil, discardLog())
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -272,6 +279,11 @@ func serveQueuedWithStore(t *testing.T, cfg *config.Config) (*smtpConn, *store.S
 }
 
 // queueConfig is plainConfig plus the route a committed message needs.
+//
+// Normalize is called here rather than left to serveTest/serveQueuedWithStore
+// alone: the load tests in load_conc_test.go and load_degrade_test.go build
+// on this and call New directly, bypassing those helpers, so this is the one
+// place that reaches every caller.
 func queueConfig() *config.Config {
 	cfg := plainConfig(config.Client{Name: "local", CIDR: []string{"127.0.0.0/8"}, Route: "r"})
 	cfg.Routes = []config.Route{{Name: "r", Default: true, Host: "smtp.example", Port: 587, Auth: "none", TLS: "none"}}
@@ -280,6 +292,7 @@ func queueConfig() *config.Config {
 	cfg.Limits.MaxHeaders = 50
 	cfg.Limits.MaxHeaderBytes = 65536
 	cfg.Limits.DataTimeoutSec = 30
+	cfg.Normalize()
 	return cfg
 }
 

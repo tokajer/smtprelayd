@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -52,7 +53,7 @@ func testServer(t *testing.T) (*Server, *store.Store, *spool.Spool) {
 			},
 		},
 	}
-	st, err := store.Open(t.TempDir(), discardLog(), 90, cfg.History.RetainSubjects)
+	st, err := store.Open(filepath.Join(t.TempDir(), "history.db"), discardLog(), 90, cfg.History.RetainSubjects)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -62,7 +63,7 @@ func testServer(t *testing.T) (*Server, *store.Store, *spool.Spool) {
 		t.Fatal(err)
 	}
 	reg := metrics.New(metrics.ConfigExpiry(cfg), sp, []string{"m365", "legacy"}, nil, nil)
-	return New(cfg, st, sp, reg, "test", discardLog()), st, sp
+	return New(cfg, sp, st, reg, "test", discardLog()), st, sp
 }
 
 func doReq(h http.Handler, method, target, token string) *httptest.ResponseRecorder {
@@ -200,11 +201,10 @@ func TestAdminScopeCanDeleteAndAudits(t *testing.T) {
 func TestDeleteClearsAMessageWithNoSpoolCopy(t *testing.T) {
 	srv, st, _ := testServer(t)
 	const id = "GHOSTAPIAAAAAAAA"
-	recipients, _ := json.Marshal([]string{"b@example.net"})
 	now := time.Now()
 	if err := st.RecordMessage(store.MessageRecord{
 		QueueID: id, Client: "client", Route: "m365", EnvelopeFrom: "a@example.at",
-		Recipients: string(recipients), Subject: "ghost", Listener: "smtp",
+		Recipients: []string{"b@example.net"}, Subject: "ghost", Listener: "smtp",
 		RemoteAddr: "10.0.0.1", ReceivedAt: now, ExpiresAt: now.Add(time.Hour),
 	}); err != nil {
 		t.Fatal(err)
@@ -386,8 +386,7 @@ func enqueueTestMessage(t *testing.T, st *store.Store, sp *spool.Spool, route st
 	if err != nil {
 		t.Fatal(err)
 	}
-	recipients, _ := json.Marshal([]string{"b@example.net"})
-	if err := st.RecordMessage(store.MessageRecord{QueueID: id.String(), Client: "client", Route: route, EnvelopeFrom: "a@example.at", OriginalFrom: "", Recipients: string(recipients), Subject: "Test", Listener: "smtp", RemoteAddr: "10.0.0.1", ReceivedAt: time.Now(), ExpiresAt: time.Now().Add(time.Hour), TLSUsed: false}); err != nil {
+	if err := st.RecordMessage(store.MessageRecord{QueueID: id.String(), Client: "client", Route: route, EnvelopeFrom: "a@example.at", OriginalFrom: "", Recipients: []string{"b@example.net"}, Subject: "Test", Listener: "smtp", RemoteAddr: "10.0.0.1", ReceivedAt: time.Now(), ExpiresAt: time.Now().Add(time.Hour), TLSUsed: false}); err != nil {
 		t.Fatal(err)
 	}
 	return id.String()

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/tokajer/smtprelayd/internal/config"
+	"github.com/tokajer/smtprelayd/internal/metrics"
 	"github.com/tokajer/smtprelayd/internal/selfmail"
 	"github.com/tokajer/smtprelayd/internal/spool"
 	"github.com/tokajer/smtprelayd/internal/store"
@@ -42,9 +43,10 @@ type Notifier struct {
 
 // New builds a notifier. It does nothing until Run is started; RecordFail
 // may be called beforehand; it will only queue events, never send anything.
-func New(cfg *config.Config, sp *spool.Spool, st *store.Store, log *slog.Logger) *Notifier {
+// reg is nil-safe; see the note on metrics.Registry.
+func New(cfg *config.Config, sp *spool.Spool, st *store.Store, reg *metrics.Registry, log *slog.Logger) *Notifier {
 	return &Notifier{
-		cfg: cfg, spool: sp, store: st, mailer: selfmail.New(sp, st, log.With("component", "bounce")),
+		cfg: cfg, spool: sp, store: st, mailer: selfmail.New(sp, st, reg, log.With("component", "bounce")),
 		log:     log.With("component", "bounce"),
 		pending: map[string][]string{}, overflow: map[string]int{}, hourStart: time.Now(),
 	}

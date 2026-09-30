@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -46,7 +47,7 @@ func TestPagingIsClampedAtBothEnds(t *testing.T) {
 // and by all three of them: the dashboard and the API between them use every
 // one.
 func TestListQueriesClampAHugeOffset(t *testing.T) {
-	s, err := Open(t.TempDir(), slog.New(slog.NewTextHandler(io.Discard, nil)), 90, true)
+	s, err := Open(filepath.Join(t.TempDir(), "history.db"), slog.New(slog.NewTextHandler(io.Discard, nil)), 90, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -58,7 +59,7 @@ func TestListQueriesClampAHugeOffset(t *testing.T) {
 		id := fmt.Sprintf("QAAAAAAAAAAAAA%02d", i)
 		if err := s.RecordMessage(MessageRecord{
 			QueueID: id, Client: "c", Route: "r",
-			EnvelopeFrom: "a@b.at", Recipients: `["x@y.at"]`, Listener: "l",
+			EnvelopeFrom: "a@b.at", Recipients: []string{"x@y.at"}, Listener: "l",
 			RemoteAddr: "127.0.0.1", ReceivedAt: now, ExpiresAt: now.Add(time.Hour),
 		}); err != nil {
 			t.Fatal(err)
@@ -101,7 +102,7 @@ func TestListQueriesClampAHugeOffset(t *testing.T) {
 // have rendered a page one row too long, which nobody reports. The contract
 // is now the same for all three and the extra row never leaves the store.
 func TestPagedQueriesReturnTheLimitAndReportMore(t *testing.T) {
-	s, err := Open(t.TempDir(), slog.New(slog.NewTextHandler(io.Discard, nil)), 90, true)
+	s, err := Open(filepath.Join(t.TempDir(), "history.db"), slog.New(slog.NewTextHandler(io.Discard, nil)), 90, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -113,7 +114,7 @@ func TestPagedQueriesReturnTheLimitAndReportMore(t *testing.T) {
 		id := fmt.Sprintf("QBBBBBBBBBBBBB%02d", i)
 		if err := s.RecordMessage(MessageRecord{
 			QueueID: id, Client: "c", Route: "r",
-			EnvelopeFrom: "a@b.at", Recipients: `["x@y.at"]`, Listener: "l",
+			EnvelopeFrom: "a@b.at", Recipients: []string{"x@y.at"}, Listener: "l",
 			RemoteAddr: "127.0.0.1", ReceivedAt: now, ExpiresAt: now.Add(time.Hour),
 		}); err != nil {
 			t.Fatal(err)

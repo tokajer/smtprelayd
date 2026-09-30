@@ -390,7 +390,7 @@ func enqueueAndFail(t *testing.T, s *Spool, body string) ID {
 	return id
 }
 
-// Fail() used to drop the message from the only index spoolSize() summed, so a
+// Fail() used to drop the message from the only index usedBytes() summed, so a
 // client that produced nothing but permanent failures freed its own quota on
 // every message while continuing to fill the filesystem.
 func TestFailedMessagesStillCountTowardsTheQuota(t *testing.T) {
@@ -398,13 +398,13 @@ func TestFailedMessagesStillCountTowardsTheQuota(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := s.spoolSize(); got != 0 {
+	if got := s.usedBytes(); got != 0 {
 		t.Fatalf("empty spool reports %d bytes", got)
 	}
 
 	enqueueAndFail(t, s, "Subject: x\r\n\r\n"+strings.Repeat("z", 4096)+"\r\n")
 
-	after := s.spoolSize()
+	after := s.usedBytes()
 	if after == 0 {
 		t.Fatal("a failed message freed its quota while still occupying the disk")
 	}
@@ -471,7 +471,7 @@ func TestSweepFailedHonoursRetention(t *testing.T) {
 			t.Errorf("%s survived the sweep: %v", ext, err)
 		}
 	}
-	if got := s.spoolSize(); got != 0 {
+	if got := s.usedBytes(); got != 0 {
 		t.Fatalf("spool still accounts %d bytes after the sweep", got)
 	}
 }
@@ -485,13 +485,13 @@ func TestFailedIndexSurvivesReopen(t *testing.T) {
 		t.Fatal(err)
 	}
 	enqueueAndFail(t, s, "Subject: x\r\n\r\n"+strings.Repeat("z", 2048)+"\r\n")
-	before := s.spoolSize()
+	before := s.usedBytes()
 
 	reopened, err := Open(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := reopened.spoolSize(); got != before {
+	if got := reopened.usedBytes(); got != before {
 		t.Fatalf("after reopen the spool accounts %d bytes, want %d", got, before)
 	}
 }
@@ -850,13 +850,13 @@ func TestDiscardKeepsWhatItCouldNotRemove(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	before := s.spoolSize()
+	before := s.usedBytes()
 	obstruct(t, filepath.Join(dir, "spool", "queue", id.String()+".eml"))
 
 	if err := s.Discard(id); err == nil {
 		t.Fatal("Discard reported success while the body was still on the disk")
 	}
-	if got := s.spoolSize(); got != before {
+	if got := s.usedBytes(); got != before {
 		t.Errorf("the quota forgot %d bytes that are still on the disk (was %d, now %d)",
 			before-got, before, got)
 	}
@@ -885,7 +885,7 @@ func TestFailChargesWhatItCouldNotMove(t *testing.T) {
 	if !ok {
 		t.Fatal("nothing to claim")
 	}
-	before := s.spoolSize()
+	before := s.usedBytes()
 	// The metadata's destination, so the body still moves: that is the split
 	// state the failed index has to describe.
 	obstruct(t, filepath.Join(dir, "spool", "failed", id.String()+".json"))
@@ -893,7 +893,7 @@ func TestFailChargesWhatItCouldNotMove(t *testing.T) {
 	if err := s.Fail(meta, "permanent"); err == nil {
 		t.Fatal("Fail reported success while a half of the message had not moved")
 	}
-	if got := s.spoolSize(); got != before {
+	if got := s.usedBytes(); got != before {
 		t.Errorf("the quota forgot %d bytes that are still on the disk (was %d, now %d)",
 			before-got, before, got)
 	}
@@ -928,7 +928,7 @@ func TestRequeueFromFailedPutsTheBodyBackWhenTheMetadataWriteFails(t *testing.T)
 	if err := s.Fail(meta, "permanent"); err != nil {
 		t.Fatal(err)
 	}
-	before := s.spoolSize()
+	before := s.usedBytes()
 
 	// writeMeta opens its temporary file with O_CREATE|O_EXCL, so an
 	// obstruction at that path fails the write itself -- the one step between
@@ -948,7 +948,7 @@ func TestRequeueFromFailedPutsTheBodyBackWhenTheMetadataWriteFails(t *testing.T)
 	if _, err := os.Stat(filepath.Join(dir, "spool", "queue", id.String()+".eml")); !os.IsNotExist(err) {
 		t.Error("a copy of the body was left in the queue directory with no metadata beside it")
 	}
-	if got := s.spoolSize(); got != before {
+	if got := s.usedBytes(); got != before {
 		t.Errorf("the quota moved by %d bytes for a requeue that did not happen (was %d, now %d)",
 			got-before, before, got)
 	}
@@ -1215,7 +1215,7 @@ func TestConcurrentCommitsCannotOvershootTheQuota(t *testing.T) {
 	}
 	wg.Wait()
 
-	if used := s.spoolSize(); used > 4*body {
+	if used := s.usedBytes(); used > 4*body {
 		t.Fatalf("the spool holds %d bytes against a quota of %d", used, 4*body)
 	}
 }
@@ -1569,5 +1569,40 @@ func TestPreRenameMetadataRecoversItsOrigin(t *testing.T) {
 	}
 	if m.Envelope.Origin != "printers" {
 		t.Errorf("Origin = %q after recovery, want %q", m.Envelope.Origin, "printers")
+	}
+}
+
+// failingReader yields n bytes and then always fails, standing in for a
+// staged body that dies mid-copy.
+type failingReader struct {
+	n   int
+	err error
+}
+
+func (r *failingReader) Read(p []byte) (int, error) {
+	if r.n <= 0 {
+		return 0, r.err
+	}
+	if len(p) > r.n {
+		p = p[:r.n]
+	}
+	copy(p, strings.Repeat("x", len(p)))
+	r.n -= len(p)
+	return len(p), nil
+}
+
+// A source that fails mid-copy must not leave a tmp file behind: recover()
+// on the next start would otherwise find a body it cannot pair with any
+// metadata, or worse, one it can.
+func TestWriteStagedCopyRemovesTmpFileOnReadError(t *testing.T) {
+	dir := t.TempDir()
+	tmpPath := filepath.Join(dir, "test.tmp")
+	wantErr := errors.New("read failed")
+
+	if _, err := writeStagedCopy(tmpPath, &failingReader{n: 8, err: wantErr}, ""); !errors.Is(err, wantErr) {
+		t.Fatalf("writeStagedCopy error = %v, want %v", err, wantErr)
+	}
+	if _, err := os.Stat(tmpPath); !os.IsNotExist(err) {
+		t.Fatalf("tmp file still exists after a failed copy: %v", err)
 	}
 }

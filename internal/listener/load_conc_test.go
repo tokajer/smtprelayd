@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
@@ -36,14 +37,14 @@ func concServer(t *testing.T, cfg *config.Config) (addr string, sp *spool.Spool)
 	if err != nil {
 		t.Fatal(err)
 	}
-	st, err := store.Open(dir, discardLog(), 90, true)
+	st, err := store.Open(filepath.Join(dir, "history.db"), discardLog(), 90, true)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = st.Close() })
 
 	cfg.Listeners[0].Address = "127.0.0.1:0"
-	set, err := New(cfg, sp, discardLog(), st, nil)
+	set, err := New(cfg, sp, st, nil, discardLog())
 	if err != nil {
 		t.Fatal(err)
 	}

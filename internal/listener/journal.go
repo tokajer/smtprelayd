@@ -4,7 +4,6 @@
 package listener
 
 import (
-	"encoding/json"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -69,14 +68,13 @@ func (s *session) journalMetaOf(headers string) journalMeta {
 // size the client announced, for the reason journalMetaOf reads the rewritten
 // headers.
 func (s *session) journalAccepted(id spool.ID, g router.Group, res rewrite.Result, meta journalMeta, received time.Time, size int64, lifetime time.Duration) {
-	recipientsJSON, _ := json.Marshal(g.Recipients)
 	err := s.srv.store.RecordMessage(store.MessageRecord{
 		QueueID:      id.String(),
 		Client:       s.client.Name,
 		Route:        g.Route,
 		EnvelopeFrom: res.EnvelopeFrom,
 		OriginalFrom: res.OriginalFrom,
-		Recipients:   string(recipientsJSON),
+		Recipients:   g.Recipients,
 		Subject:      meta.subject,
 		Listener:     s.srv.lc.Name,
 		RemoteAddr:   s.remote.String(),
@@ -91,9 +89,7 @@ func (s *session) journalAccepted(id spool.ID, g router.Group, res rewrite.Resul
 	})
 	if err != nil {
 		s.log.Warn("history journal write failed", "queue_id", id.String(), "error", err)
-		if s.srv.metrics != nil {
-			s.srv.metrics.JournalWriteFailure()
-		}
+		s.srv.metrics.JournalWriteFailure()
 	}
 }
 

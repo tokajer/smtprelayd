@@ -6,6 +6,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"os"
@@ -49,14 +50,12 @@ type retentionConfig struct {
 	retainSubjects bool
 }
 
-// Open creates or opens the history database at the given path.
-func Open(dataDir string, log *slog.Logger, retentionDays int, retainSubjects bool) (*Store, error) {
-	spoolDir := filepath.Join(dataDir, "spool")
-	if err := os.MkdirAll(spoolDir, 0o700); err != nil {
-		return nil, fmt.Errorf("store: create spool dir: %w", err)
+// Open creates or opens the history database at dbPath.
+func Open(dbPath string, log *slog.Logger, retentionDays int, retainSubjects bool) (*Store, error) {
+	if err := os.MkdirAll(filepath.Dir(dbPath), 0o700); err != nil {
+		return nil, fmt.Errorf("store: create database dir: %w", err)
 	}
 
-	dbPath := filepath.Join(spoolDir, "history.db")
 	// openPingTimeout is a wall-clock deadline on the very first use of the
 	// database, which is where the driver creates the file, replays a `-wal`
 	// sidecar left by an unclean stop, and takes its first lock. Five seconds
@@ -170,16 +169,17 @@ func (s *Store) Close() error {
 }
 
 // MessageRecord is one accepted message as it enters the history journal.
-// It is a struct rather than a parameter list because the record is eleven
-// strings wide: two adjacent ones transposed at a call site would still
-// compile and would silently store a sender as a recipient list.
+// It is a struct rather than a parameter list because the record is a dozen
+// fields wide, most of them adjacent strings: two of those transposed at a
+// call site would still compile and would silently store a sender as a
+// route.
 type MessageRecord struct {
 	QueueID      string
 	Client       string
 	Route        string
 	EnvelopeFrom string
 	OriginalFrom string
-	Recipients   string // JSON array
+	Recipients   []string
 	Subject      string
 	Listener     string
 	RemoteAddr   string
@@ -210,12 +210,17 @@ func (s *Store) RecordMessage(rec MessageRecord) error {
 		tlsInt = 1
 	}
 
+	recipientsJSON, err := json.Marshal(rec.Recipients)
+	if err != nil {
+		return fmt.Errorf("store: record message: marshal recipients: %w", err)
+	}
+
 	now := s.now().UTC()
-	_, err := s.db.Exec(`
+	_, err = s.db.Exec(`
 		INSERT INTO messages (queue_id, client, route, envelope_from, original_from, recipients, subject, listener, remote_addr, received_at, expires_at, tls_used, created_at, message_id, content_type, size_bytes, header_count, helo)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`,
-		rec.QueueID, rec.Client, rec.Route, rec.EnvelopeFrom, rec.OriginalFrom, rec.Recipients, subject, rec.Listener, rec.RemoteAddr,
+		rec.QueueID, rec.Client, rec.Route, rec.EnvelopeFrom, rec.OriginalFrom, string(recipientsJSON), subject, rec.Listener, rec.RemoteAddr,
 		rec.ReceivedAt.UTC().Format(time.RFC3339), rec.ExpiresAt.UTC().Format(time.RFC3339), tlsInt, now.Format(time.RFC3339),
 		rec.MessageID, rec.ContentType, rec.SizeBytes, rec.HeaderCount, rec.Helo,
 	)
@@ -292,14 +297,13 @@ func (s *Store) RecordAttempt(queueID string, attemptNum int, smtpCode int, smtp
 
 // RetentionSweep deletes journal rows past the retention window, at most once
 // an hour however often it is called. It returns how many messages went.
+// Measured on a million rows the delete took 15.6 seconds.
 //
-// It is called from the delivery manager's own tick, next to SweepFailed,
-// rather than from RecordAttempt. Measured on a million rows the delete took
-// 15.6 seconds, and SQLite has one writer: run from a delivery worker it
-// stopped that worker and every other writer with it -- the listener
-// journalling incoming mail included -- for as long as it ran. The dispatcher
-// is already ticking and owns no message while it does, so the pause costs
-// nobody a transaction.
+// It runs on delivery.Housekeeper's own goroutine, concurrently with the
+// delivery workers and the listener writing to the same database. SQLite has
+// one writer, so contention is bounded by retentionChunk's 5000-row DELETEs
+// waiting inside busy_timeout(5000), not by anything pausing for the whole
+// sweep to finish.
 func (s *Store) RetentionSweep(now time.Time) int64 {
 	if !s.claimCleanup(now) {
 		return 0

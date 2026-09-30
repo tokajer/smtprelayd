@@ -133,10 +133,6 @@ func (s *Spool) liveAndFailedBytes() int64 {
 	return live + s.failed.occupied()
 }
 
-// spoolSize returns the total size in bytes the spool occupies. See usedBytes
-// for what counts and why; this is the name the tests use.
-func (s *Spool) spoolSize() int64 { return s.usedBytes() }
-
 // reserveQuota admits n bytes for a commit in flight.
 func (s *Spool) reserveQuota(n int64) error {
 	return s.quota.reserve(n, s.liveAndFailedBytes())
@@ -147,7 +143,7 @@ func (s *Spool) releaseQuota(n int64) { s.quota.release(n) }
 // QuotaWarning reports whether the spool has reached limits.spool_warn_percent
 // of its configured quota. over is false whenever no quota or no warning
 // threshold is configured. It does no logging itself and mutates nothing:
-// this package holds no logger, so the caller (the delivery manager) is
+// this package holds no logger, so the caller (delivery.Housekeeper) is
 // responsible for reporting the transition.
 func (s *Spool) QuotaWarning() (used, quota int64, over bool) {
 	quota, warnPercent := s.quota.limits()

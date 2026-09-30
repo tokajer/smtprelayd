@@ -132,29 +132,31 @@ type Message struct {
 	Helo string
 }
 
-// Deliver sends a message through a configured route. Whenever a handshake
-// happens at all, certificate verification is part of it: there is no code
-// path here that negotiates TLS and then skips the check. A route may opt out
-// of TLS entirely with tls = "none", which the loader restricts to routes
-// that do not authenticate with XOAUTH2.
-// tokens may be nil for routes that do not use XOAUTH2.
-func Deliver(ctx context.Context, route config.Route, msg Message, timeout time.Duration, tokens TokenSource) error {
-	var tlsConf *tls.Config
-	if route.TLS != config.TLSNone {
-		minTLS, err := config.ParseTLSVersion(route.MinTLS)
-		if err != nil {
-			return perm("route %s: %w", route.Name, err)
-		}
-		tlsConf = &tls.Config{
-			ServerName: route.Host,
-			MinVersion: minTLS,
-		}
-		if route.CAPin != "" {
-			pin := strings.ToLower(strings.ReplaceAll(route.CAPin, ":", ""))
-			tlsConf.VerifyConnection = pinVerifier(pin)
-		}
+// tlsConfigFor builds the TLS configuration for route, or returns nil, nil
+// for tls = "none".
+func tlsConfigFor(route config.Route) (*tls.Config, error) {
+	if route.TLS == config.TLSNone {
+		return nil, nil
 	}
+	minTLS, err := config.ParseTLSVersion(route.MinTLS)
+	if err != nil {
+		return nil, err
+	}
+	tlsConf := &tls.Config{
+		ServerName: route.Host,
+		MinVersion: minTLS,
+	}
+	if route.CAPin != "" {
+		pin := strings.ToLower(strings.ReplaceAll(route.CAPin, ":", ""))
+		tlsConf.VerifyConnection = pinVerifier(pin)
+	}
+	return tlsConf, nil
+}
 
+// dial connects to route, over TLS immediately when tls = "implicit", and
+// returns the connection with its deadline already set to timeout -- or the
+// temporary error that means the connection could not be established at all.
+func dial(ctx context.Context, route config.Route, tlsConf *tls.Config, timeout time.Duration) (net.Conn, error) {
 	addr := net.JoinHostPort(route.Host, strconv.Itoa(route.Port))
 	// The dial gets a bound of its own rather than the whole attempt budget.
 	// timeout is limits.delivery_timeout_sec, 600s by default, because it has
@@ -173,9 +175,28 @@ func Deliver(ctx context.Context, route config.Route, msg Message, timeout time.
 		conn, err = dialer.DialContext(ctx, "tcp", addr)
 	}
 	if err != nil {
-		return temp("connect %s: %w", addr, err)
+		return nil, temp("connect %s: %w", addr, err)
 	}
 	_ = conn.SetDeadline(time.Now().Add(timeout))
+	return conn, nil
+}
+
+// Deliver sends a message through a configured route. Whenever a handshake
+// happens at all, certificate verification is part of it: there is no code
+// path here that negotiates TLS and then skips the check. A route may opt out
+// of TLS entirely with tls = "none", which the loader restricts to routes
+// that do not authenticate with XOAUTH2.
+// tokens may be nil for routes that do not use XOAUTH2.
+func Deliver(ctx context.Context, route config.Route, msg Message, timeout time.Duration, tokens TokenSource) error {
+	tlsConf, err := tlsConfigFor(route)
+	if err != nil {
+		return perm("route %s: %w", route.Name, err)
+	}
+
+	conn, err := dial(ctx, route, tlsConf, timeout)
+	if err != nil {
+		return err
+	}
 
 	// net/smtp takes no context, so everything after the dial -- the
 	// handshake, SASL, and the whole DATA transfer -- would otherwise run to

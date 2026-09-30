@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/tokajer/smtprelayd/internal/config"
+	"github.com/tokajer/smtprelayd/internal/httpx"
 )
 
 var tokenLine = regexp.MustCompile(`token:  (\S+)`)
@@ -19,7 +20,7 @@ var digestLine = regexp.MustCompile(`sha256: ([0-9a-f]{64})`)
 
 // The pair has to be usable: the printed digest is what goes into the
 // configuration, and the printed token is what a caller presents. If they do
-// not match through config.MatchToken, the command has produced a credential
+// not match through httpx.MatchToken, the command has produced a credential
 // that can never authenticate.
 func TestNewTokenProducesAMatchingPair(t *testing.T) {
 	var out strings.Builder
@@ -41,17 +42,14 @@ func TestNewTokenProducesAMatchingPair(t *testing.T) {
 	cfg := &config.Config{Web: config.Web{Tokens: []config.Token{
 		{Name: "checkmk", Scope: "read", SHA256: digest},
 	}}}
-	got, ok := cfg.MatchToken(token)
+	got, ok := httpx.MatchToken(cfg.Web.Tokens, token)
 	if !ok {
 		t.Fatal("the generated token does not authenticate against its own digest")
 	}
 	if got.Name != "checkmk" {
 		t.Errorf("matched token %q, want checkmk", got.Name)
 	}
-	if cfg.MatchToken(token + "x"); false {
-		t.Fatal("unreachable")
-	}
-	if _, ok := cfg.MatchToken(token + "x"); ok {
+	if _, ok := httpx.MatchToken(cfg.Web.Tokens, token+"x"); ok {
 		t.Error("a modified token still authenticated")
 	}
 }

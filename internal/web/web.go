@@ -75,11 +75,10 @@ type Server struct {
 	actions *queueaction.Actor
 }
 
-// New parses the embedded templates and builds a dashboard server. cfg, st,
-// sp and reg must outlive the server; nothing here mutates them. reg may be
-// nil, in which case the route sidebar is empty -- that is for tests, not a
-// mode the service runs in; see the note on metrics.Registry.
-func New(cfg *config.Config, st *store.Store, sp *spool.Spool, reg *metrics.Registry, version string, log *slog.Logger) (*Server, error) {
+// New parses the embedded templates and builds a dashboard server. cfg, sp,
+// st and reg must outlive the server; nothing here mutates them. reg is
+// nil-safe; see the note on metrics.Registry.
+func New(cfg *config.Config, sp *spool.Spool, st *store.Store, reg *metrics.Registry, version string, log *slog.Logger) (*Server, error) {
 	tmpl := make(map[string]*template.Template, len(dashboardPages))
 	// Load already validated service.timezone; a nil Location here just
 	// means every timestamp keeps rendering in whatever zone it already
@@ -144,10 +143,7 @@ type totals struct {
 }
 
 func (s *Server) base(page string, r *http.Request) baseData {
-	var routes []metrics.RouteStatus
-	if s.metrics != nil {
-		routes = s.metrics.Status()
-	}
+	routes := s.metrics.Status()
 	var sum totals
 	for _, rt := range routes {
 		sum.Queued += rt.Queued
@@ -160,10 +156,7 @@ func (s *Server) base(page string, r *http.Request) baseData {
 		s.log.Warn("sidebar: recent bounces query failed", "error", err)
 		recent = nil
 	}
-	var journalFailures uint64
-	if s.metrics != nil {
-		journalFailures = s.metrics.JournalWriteFailures()
-	}
+	journalFailures := s.metrics.JournalWriteFailures()
 	return baseData{
 		Version: s.version, Page: page, Theme: s.theme,
 		Routes: routes, Totals: sum, RecentBounces: recent,

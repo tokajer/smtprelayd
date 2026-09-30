@@ -49,15 +49,12 @@ func ConfigExpiry(cfg *config.Config) ExpirySource {
 // import this package. The exposition is one output of that state and lives
 // in exposition.go; how it is served is http.go.
 //
-// **A nil *Registry is for tests, not for a running service.** The listener,
-// the dashboard and the API each guard their uses with a nil check, and
-// several of their doc comments used to describe the result as what happens
-// "if metrics are disabled". That was never reachable: cmd/smtprelayd builds
-// a registry unconditionally and hands the same one to everything, because
-// the listener's session-panic and journal-failure counters and the
-// dashboard's route page need it whether or not a metrics listener is bound.
-// metrics.enabled governs the HTTP endpoint alone. The nil case exists so a
-// test can construct a listener or a server without caring about counters.
+// Every recording and reporting method is nil-safe (a no-op, or the zero
+// value), so a test may pass nil without its own guard. cmd/smtprelayd always
+// builds one: the listener's session-panic and journal-failure counters and
+// the dashboard's route page need it whether or not a metrics listener is
+// bound, since metrics.enabled governs only the HTTP endpoint. ServeHTTP and
+// Serve are not part of that nil-safety and carry no guard of their own.
 type Registry struct {
 	// expiry is read at scrape time for the expiry gauges; see ExpirySource.
 	expiry      ExpirySource
@@ -85,9 +82,10 @@ type Registry struct {
 // New builds a registry seeded with zero counters for every configured
 // route and every configured canary, so one that has never delivered still
 // reports 0 instead of being absent from the exposition until its first
-// event. tokens may be nil; the delivery manager registers its token sources
-// through RegisterTokenAger once it has built them, which is what lets the
-// registry exist before the manager and be handed to the listener. exp may be
+// event. tokens may be nil; cmd/smtprelayd's buildTokenSources registers its
+// token sources through RegisterTokenAger once it has built them, which is
+// what lets the registry exist before the delivery manager and be handed to
+// the listener. exp may be
 // nil too, in which case the exposition simply omits the expiry families --
 // which is what a caller with no deadlines to report wants, and what a
 // configuration naming neither a certificate nor an xoauth2 route produced
@@ -131,8 +129,12 @@ func New(exp ExpirySource, sp *spool.Spool, routes, canaryNames []string, tokens
 }
 
 // RegisterTokenAger attaches the token source whose age the route's gauge
-// reports. Called by the delivery manager for each xoauth2 route it builds.
+// reports. Called by cmd/smtprelayd's buildTokenSources for each xoauth2
+// route it builds.
 func (r *Registry) RegisterTokenAger(route string, t TokenAger) {
+	if r == nil {
+		return
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.tokens[route] = t
@@ -143,17 +145,24 @@ func (r *Registry) RegisterTokenAger(route string, t TokenAger) {
 // only logs hides a parser bug that an attacker can trigger at will, and a
 // counter is what a monitoring system can alert on.
 func (r *Registry) SessionPanic() {
+	if r == nil {
+		return
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.sessionPanics++
 }
 
-// JournalWriteFailure records a history-store write the listener or the
-// delivery manager could not complete. Those writes are best-effort by
-// design -- the message is queued or delivered regardless -- which is
+// JournalWriteFailure records a history-store write the listener, the
+// delivery manager, or a relay-composed message (a bounce digest, an expiry
+// warning, a canary probe) could not complete. Those writes are best-effort
+// by design -- the message is queued or delivered regardless -- which is
 // precisely why a broken database has to be visible somewhere other than an
 // empty dashboard.
 func (r *Registry) JournalWriteFailure() {
+	if r == nil {
+		return
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.journalWriteFails++
@@ -161,6 +170,9 @@ func (r *Registry) JournalWriteFailure() {
 
 // Delivered records a successful delivery on route.
 func (r *Registry) Delivered(route string) {
+	if r == nil {
+		return
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.delivered[route]++
@@ -169,6 +181,9 @@ func (r *Registry) Delivered(route string) {
 
 // Bounced records a permanent failure or an expiry in queue on route.
 func (r *Registry) Bounced(route string) {
+	if r == nil {
+		return
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.bounced[route]++
@@ -177,6 +192,9 @@ func (r *Registry) Bounced(route string) {
 // Deferred records a temporary failure that returned the message to the
 // spool for retry on route.
 func (r *Registry) Deferred(route string) {
+	if r == nil {
+		return
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.deferredCnt[route]++
@@ -185,6 +203,9 @@ func (r *Registry) Deferred(route string) {
 // AuthFailure records a delivery attempt that failed because of the relay's
 // own credentials rather than the message.
 func (r *Registry) AuthFailure(route string) {
+	if r == nil {
+		return
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.authFailures[route]++
@@ -200,7 +221,7 @@ func (r *Registry) AuthFailure(route string) {
 // the mail loss removed the only signal an operator had, and /metrics is what
 // docs/guides/API.md points monitoring at. This is that signal.
 func (r *Registry) RecipientsRefused(route string, n int) {
-	if n <= 0 {
+	if r == nil || n <= 0 {
 		return
 	}
 	r.mu.Lock()
@@ -214,6 +235,9 @@ func (r *Registry) RecipientsRefused(route string, n int) {
 // source address is still logged, per docs/guides/API.md; only the metric itself
 // stays a single counter.
 func (r *Registry) APIAuthFailure() {
+	if r == nil {
+		return
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.apiAuthFailure++
@@ -226,6 +250,9 @@ func (r *Registry) APIAuthFailure() {
 // otherwise be indistinguishable from a real production delivery problem on
 // that route.
 func (r *Registry) NotificationFailure() {
+	if r == nil {
+		return
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.notificationFailure++
@@ -239,6 +266,9 @@ func (r *Registry) NotificationFailure() {
 // message that was delivered), not the route it happened to test — the two
 // can differ if more than one canary shares a route.
 func (r *Registry) CanaryDelivered(name string) {
+	if r == nil {
+		return
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.lastCanaryDelivery[name] = time.Now()
@@ -252,6 +282,9 @@ func (r *Registry) CanaryDelivered(name string) {
 // without adding anything this dedicated counter does not already say more
 // precisely.
 func (r *Registry) CanaryFailure(name string) {
+	if r == nil {
+		return
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.canaryFailure[name]++
@@ -263,6 +296,9 @@ func (r *Registry) CanaryFailure(name string) {
 // queue view is built from the store, so without this the gap is visible
 // only in the log and in /metrics.
 func (r *Registry) JournalWriteFailures() uint64 {
+	if r == nil {
+		return 0
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.journalWriteFails
@@ -272,6 +308,9 @@ func (r *Registry) JournalWriteFailures() uint64 {
 // been running. Used by the API's health endpoint so it does not need its
 // own separate start-time bookkeeping.
 func (r *Registry) Uptime() time.Duration {
+	if r == nil {
+		return 0
+	}
 	return time.Since(r.start)
 }
 
@@ -297,6 +336,9 @@ type RouteStatus struct {
 
 // Status returns a snapshot of every configured route, sorted by name.
 func (r *Registry) Status() []RouteStatus {
+	if r == nil {
+		return nil
+	}
 	r.mu.Lock()
 	delivered := cloneCounts(r.delivered)
 	bounced := cloneCounts(r.bounced)

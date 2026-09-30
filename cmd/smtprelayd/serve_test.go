@@ -95,7 +95,7 @@ func TestLoopbackHandlerGuardsBothTheDashboardAndTheAPI(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	st, err := store.Open(dir, log, 90, true)
+	st, err := store.Open(filepath.Join(dir, "history.db"), log, 90, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -104,11 +104,11 @@ func TestLoopbackHandlerGuardsBothTheDashboardAndTheAPI(t *testing.T) {
 	cfg := config.Defaults()
 	cfg.Service.DataDir = dir
 	reg := metrics.New(nil, sp, []string{"m365"}, nil, nil)
-	ws, err := web.New(cfg, st, sp, reg, "test", log)
+	ws, err := web.New(cfg, sp, st, reg, "test", log)
 	if err != nil {
 		t.Fatal(err)
 	}
-	h := loopbackHandler(ws, api.New(cfg, st, sp, reg, "test", log), log)
+	h := loopbackHandler(ws, api.New(cfg, sp, st, reg, "test", log), log)
 
 	// Both surfaces, because covering one and not the other is the defect.
 	for _, path := range []string{"/queue", "/api/v1/health"} {

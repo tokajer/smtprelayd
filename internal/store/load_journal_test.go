@@ -21,7 +21,7 @@ import (
 func loadStore(t *testing.T) (*Store, string) {
 	t.Helper()
 	dir := t.TempDir()
-	s, err := Open(dir, slog.New(slog.NewTextHandler(io.Discard, nil)), 90, true)
+	s, err := Open(filepath.Join(dir, "history.db"), slog.New(slog.NewTextHandler(io.Discard, nil)), 90, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -52,7 +52,7 @@ func TestLoadRecordThroughput(t *testing.T) {
 		id := fmt.Sprintf("QT%024d", i)
 		if err := s.RecordMessage(MessageRecord{
 			QueueID: id, Client: "printers", Route: "m365",
-			EnvelopeFrom: "device@example.at", Recipients: `["someone@partner.example"]`,
+			EnvelopeFrom: "device@example.at", Recipients: []string{"someone@partner.example"},
 			Subject: "Scan job 4711", Listener: "smtp", RemoteAddr: "10.10.5.42",
 			ReceivedAt: now, ExpiresAt: now.Add(96 * time.Hour), SizeBytes: 48000,
 		}); err != nil {
@@ -134,7 +134,7 @@ func TestLoadQueriesAtOneMillion(t *testing.T) {
 		id := fmt.Sprintf("QW%024d", i)
 		if err := s.RecordMessage(MessageRecord{
 			QueueID: id, Client: "printers", Route: "m365",
-			EnvelopeFrom: "device@example.at", Recipients: `["someone@partner.example"]`,
+			EnvelopeFrom: "device@example.at", Recipients: []string{"someone@partner.example"},
 			Subject: "Scan job 4711", Listener: "smtp", RemoteAddr: "10.10.5.42",
 			ReceivedAt: now, ExpiresAt: now.Add(96 * time.Hour), SizeBytes: 48000,
 		}); err != nil {

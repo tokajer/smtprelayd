@@ -8,6 +8,7 @@ import (
 	"context"
 	"io"
 	"net"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -171,17 +172,14 @@ func managerAgainst(t *testing.T, f *fakeSmarthost) (*Manager, *spool.Spool, *st
 	if err != nil {
 		t.Fatal(err)
 	}
-	st, err := store.Open(t.TempDir(), discardLog(), 90, true)
+	st, err := store.Open(filepath.Join(t.TempDir(), "history.db"), discardLog(), 90, true)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = st.Close() })
 	reg := testRegistry(cfg, sp)
-	notifier := bounce.New(cfg, sp, st, discardLog())
-	m, err := New(cfg, sp, discardLog(), st, reg, notifier)
-	if err != nil {
-		t.Fatal(err)
-	}
+	notifier := bounce.New(cfg, sp, st, reg, discardLog())
+	m := New(cfg, sp, st, reg, nil, notifier, discardLog())
 	return m, sp, st, notifier, reg
 }
 
@@ -200,7 +198,7 @@ func queueOne(t *testing.T, sp *spool.Spool, st *store.Store, lifetime time.Dura
 	}
 	if err := st.RecordMessage(store.MessageRecord{
 		QueueID: id.String(), Client: "printers", Route: "smarthost",
-		EnvelopeFrom: "device@example.at", Recipients: `["ops@example.net"]`,
+		EnvelopeFrom: "device@example.at", Recipients: []string{"ops@example.net"},
 		Listener: "l", RemoteAddr: "127.0.0.1", ReceivedAt: now, ExpiresAt: now.Add(lifetime),
 	}); err != nil {
 		t.Fatal(err)

@@ -5,6 +5,8 @@ package httpx
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"io"
 	"log/slog"
@@ -15,7 +17,25 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/tokajer/smtprelayd/internal/config"
 )
+
+func TestMatchToken(t *testing.T) {
+	sum := sha256.Sum256([]byte("s3cr3t"))
+	tokens := []config.Token{{Name: "checkmk", Scope: "read", SHA256: hex.EncodeToString(sum[:])}}
+
+	got, ok := MatchToken(tokens, "s3cr3t")
+	if !ok || got.Name != "checkmk" {
+		t.Fatalf("a valid token did not match: %+v %v", got, ok)
+	}
+	if _, ok := MatchToken(tokens, "wrong"); ok {
+		t.Fatal("a wrong token matched")
+	}
+	if _, ok := MatchToken(tokens, ""); ok {
+		t.Fatal("an empty token matched")
+	}
+}
 
 func TestBearerTokenAcceptsOnlyTheBearerScheme(t *testing.T) {
 	cases := []struct {

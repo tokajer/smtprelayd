@@ -8,6 +8,7 @@ import (
 	"context"
 	"io"
 	"net"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -125,15 +126,13 @@ func TestASaturatedRouteDoesNotStallTheOtherRoutes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	st, err := store.Open(t.TempDir(), discardLog(), 90, true)
+	st, err := store.Open(filepath.Join(t.TempDir(), "history.db"), discardLog(), 90, true)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = st.Close() })
-	m, err := New(cfg, sp, discardLog(), st, testRegistry(cfg, sp), bounce.New(cfg, sp, st, discardLog()))
-	if err != nil {
-		t.Fatal(err)
-	}
+	reg := testRegistry(cfg, sp)
+	m := New(cfg, sp, st, reg, nil, bounce.New(cfg, sp, st, reg, discardLog()), discardLog())
 
 	// Both messages for the stuck route are older, so Claim offers them
 	// first and the healthy route's message sits behind them.
@@ -186,15 +185,12 @@ func TestDispatchHoldsASaturatedRouteAndMovesOn(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	st, err := store.Open(t.TempDir(), discardLog(), 90, true)
+	st, err := store.Open(filepath.Join(t.TempDir(), "history.db"), discardLog(), 90, true)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = st.Close() })
-	m, err := New(cfg, sp, discardLog(), st, testRegistry(cfg, sp), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	m := New(cfg, sp, st, testRegistry(cfg, sp), nil, nil, discardLog())
 	// MaxConcurrent 0 would be normalised to a default by config.Validate;
 	// this config never goes through it, so the budget is genuinely empty.
 	m.routes["full"] = make(chan struct{})

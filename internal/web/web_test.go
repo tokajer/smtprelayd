@@ -5,7 +5,6 @@ package web
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -70,7 +69,7 @@ enabled = true
 
 func testServer(t *testing.T, cfg *config.Config) (*Server, *store.Store, *spool.Spool) {
 	t.Helper()
-	st, err := store.Open(t.TempDir(), discardLog(), 90, cfg.History.RetainSubjects)
+	st, err := store.Open(filepath.Join(t.TempDir(), "history.db"), discardLog(), 90, cfg.History.RetainSubjects)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -79,7 +78,7 @@ func testServer(t *testing.T, cfg *config.Config) (*Server, *store.Store, *spool
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv, err := New(cfg, st, sp, nil, "test", discardLog())
+	srv, err := New(cfg, sp, st, nil, "test", discardLog())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -137,7 +136,6 @@ func TestXSSShapedSubjectIsEscaped(t *testing.T) {
 	cfg := testConfig(t, "")
 	srv, st, _ := testServer(t, cfg)
 
-	recipients, _ := json.Marshal([]string{"user@example.com"})
 	now := time.Now()
 	const evilSubject = `<script>alert(1)</script><img src=x onerror=alert(2)>`
 	// The journal fields carry client-supplied text just like the subject
@@ -145,7 +143,7 @@ func TestXSSShapedSubjectIsEscaped(t *testing.T) {
 	// trusting that a header is somehow safer than a subject.
 	if err := st.RecordMessage(store.MessageRecord{
 		QueueID: "XSSTESTAAAAAAAAA", Client: "printers", Route: "m365",
-		EnvelopeFrom: "relay@example.com", Recipients: string(recipients),
+		EnvelopeFrom: "relay@example.com", Recipients: []string{"user@example.com"},
 		Subject: evilSubject, Listener: "smtp", RemoteAddr: "10.10.5.5",
 		MessageID: evilSubject, ContentType: evilSubject, Helo: evilSubject,
 		SizeBytes: 2048, HeaderCount: 7,
@@ -175,12 +173,11 @@ func TestSubjectRedactedWhenRetentionDisabled(t *testing.T) {
 	cfg := testConfig(t, "\n[history]\nretention_days = 90\nretain_subjects = false\n")
 	srv, st, _ := testServer(t, cfg)
 
-	recipients, _ := json.Marshal([]string{"user@example.com"})
 	now := time.Now()
 	// store.RecordMessage itself already redacts when retain_subjects is
 	// false, so this proves the display layer's fallback matches, not that
 	// it does the only redaction.
-	if err := st.RecordMessage(store.MessageRecord{QueueID: "REDACTEDAAAAAAAA", Client: "printers", Route: "m365", EnvelopeFrom: "relay@example.com", OriginalFrom: "", Recipients: string(recipients), Subject: "should never appear", Listener: "smtp", RemoteAddr: "10.10.5.5", ReceivedAt: now, ExpiresAt: now.Add(time.Hour), TLSUsed: false}); err != nil {
+	if err := st.RecordMessage(store.MessageRecord{QueueID: "REDACTEDAAAAAAAA", Client: "printers", Route: "m365", EnvelopeFrom: "relay@example.com", OriginalFrom: "", Recipients: []string{"user@example.com"}, Subject: "should never appear", Listener: "smtp", RemoteAddr: "10.10.5.5", ReceivedAt: now, ExpiresAt: now.Add(time.Hour), TLSUsed: false}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -228,10 +225,9 @@ func TestQueueStatusFilterOnlyShowsActiveMessages(t *testing.T) {
 	cfg := testConfig(t, "")
 	srv, st, _ := testServer(t, cfg)
 
-	recipients, _ := json.Marshal([]string{"user@example.com"})
 	now := time.Now()
-	_ = st.RecordMessage(store.MessageRecord{QueueID: "QUEUEDAAAAAAAAAA", Client: "printers", Route: "m365", EnvelopeFrom: "relay@example.com", OriginalFrom: "", Recipients: string(recipients), Subject: "still queued", Listener: "smtp", RemoteAddr: "10.10.5.5", ReceivedAt: now, ExpiresAt: now.Add(time.Hour), TLSUsed: false})
-	_ = st.RecordMessage(store.MessageRecord{QueueID: "DELIVEREDAAAAAAA", Client: "printers", Route: "m365", EnvelopeFrom: "relay@example.com", OriginalFrom: "", Recipients: string(recipients), Subject: "already gone", Listener: "smtp", RemoteAddr: "10.10.5.5", ReceivedAt: now, ExpiresAt: now.Add(time.Hour), TLSUsed: false})
+	_ = st.RecordMessage(store.MessageRecord{QueueID: "QUEUEDAAAAAAAAAA", Client: "printers", Route: "m365", EnvelopeFrom: "relay@example.com", OriginalFrom: "", Recipients: []string{"user@example.com"}, Subject: "still queued", Listener: "smtp", RemoteAddr: "10.10.5.5", ReceivedAt: now, ExpiresAt: now.Add(time.Hour), TLSUsed: false})
+	_ = st.RecordMessage(store.MessageRecord{QueueID: "DELIVEREDAAAAAAA", Client: "printers", Route: "m365", EnvelopeFrom: "relay@example.com", OriginalFrom: "", Recipients: []string{"user@example.com"}, Subject: "already gone", Listener: "smtp", RemoteAddr: "10.10.5.5", ReceivedAt: now, ExpiresAt: now.Add(time.Hour), TLSUsed: false})
 	_ = st.RecordAttempt("DELIVEREDAAAAAAA", 1, 250, "ok", "delivered", nil)
 
 	rec := get(t, srv.Handler(), "/queue")
@@ -297,9 +293,8 @@ oauth2.mailbox = "relay@contoso.onmicrosoft.com"
 func TestMessagePageIncludesCSRFTokens(t *testing.T) {
 	cfg := testConfig(t, "")
 	srv, st, _ := testServer(t, cfg)
-	recipients, _ := json.Marshal([]string{"user@example.com"})
 	now := time.Now()
-	if err := st.RecordMessage(store.MessageRecord{QueueID: "CSRFPAGEAAAAAAAA", Client: "printers", Route: "m365", EnvelopeFrom: "relay@example.com", OriginalFrom: "", Recipients: string(recipients), Subject: "s", Listener: "smtp", RemoteAddr: "10.10.5.5", ReceivedAt: now, ExpiresAt: now.Add(time.Hour), TLSUsed: false}); err != nil {
+	if err := st.RecordMessage(store.MessageRecord{QueueID: "CSRFPAGEAAAAAAAA", Client: "printers", Route: "m365", EnvelopeFrom: "relay@example.com", OriginalFrom: "", Recipients: []string{"user@example.com"}, Subject: "s", Listener: "smtp", RemoteAddr: "10.10.5.5", ReceivedAt: now, ExpiresAt: now.Add(time.Hour), TLSUsed: false}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -320,7 +315,6 @@ func TestMessagePageIncludesCSRFTokens(t *testing.T) {
 func TestMessagePageHidesActionsForTerminalStatus(t *testing.T) {
 	cfg := testConfig(t, "")
 	srv, st, _ := testServer(t, cfg)
-	recipients, _ := json.Marshal([]string{"user@example.com"})
 	now := time.Now()
 
 	for _, tc := range []struct {
@@ -329,7 +323,7 @@ func TestMessagePageHidesActionsForTerminalStatus(t *testing.T) {
 		{"TERMDELIVERED222", "delivered"},
 		{"TERMREMOVED22222", "removed"},
 	} {
-		if err := st.RecordMessage(store.MessageRecord{QueueID: tc.id, Client: "printers", Route: "m365", EnvelopeFrom: "relay@example.com", Recipients: string(recipients), Subject: "s", Listener: "smtp", RemoteAddr: "10.10.5.5", ReceivedAt: now, ExpiresAt: now.Add(time.Hour)}); err != nil {
+		if err := st.RecordMessage(store.MessageRecord{QueueID: tc.id, Client: "printers", Route: "m365", EnvelopeFrom: "relay@example.com", Recipients: []string{"user@example.com"}, Subject: "s", Listener: "smtp", RemoteAddr: "10.10.5.5", ReceivedAt: now, ExpiresAt: now.Add(time.Hour)}); err != nil {
 			t.Fatal(err)
 		}
 		if err := st.RecordAttempt(tc.id, 1, 0, "", tc.class, nil); err != nil {
@@ -447,8 +441,7 @@ func enqueueMessage(t *testing.T, st *store.Store, sp *spool.Spool, route string
 	if err != nil {
 		t.Fatal(err)
 	}
-	recipients, _ := json.Marshal([]string{"b@example.net"})
-	if err := st.RecordMessage(store.MessageRecord{QueueID: id.String(), Client: "client", Route: route, EnvelopeFrom: "a@example.at", OriginalFrom: "", Recipients: string(recipients), Subject: "Test", Listener: "smtp", RemoteAddr: "10.0.0.1", ReceivedAt: time.Now(), ExpiresAt: time.Now().Add(time.Hour), TLSUsed: false}); err != nil {
+	if err := st.RecordMessage(store.MessageRecord{QueueID: id.String(), Client: "client", Route: route, EnvelopeFrom: "a@example.at", OriginalFrom: "", Recipients: []string{"b@example.net"}, Subject: "Test", Listener: "smtp", RemoteAddr: "10.0.0.1", ReceivedAt: time.Now(), ExpiresAt: time.Now().Add(time.Hour), TLSUsed: false}); err != nil {
 		t.Fatal(err)
 	}
 	return id.String()
@@ -471,11 +464,10 @@ func postValues(h http.Handler, target string, form url.Values) *httptest.Respon
 // that dropped a half-written pair, leaves behind.
 func recordGhost(t *testing.T, st *store.Store, id string) string {
 	t.Helper()
-	recipients, _ := json.Marshal([]string{"b@example.net"})
 	now := time.Now()
 	if err := st.RecordMessage(store.MessageRecord{
 		QueueID: id, Client: "printers", Route: "m365", EnvelopeFrom: "a@example.at",
-		Recipients: string(recipients), Subject: "ghost", Listener: "smtp",
+		Recipients: []string{"b@example.net"}, Subject: "ghost", Listener: "smtp",
 		RemoteAddr: "10.10.5.5", ReceivedAt: now, ExpiresAt: now.Add(time.Hour),
 	}); err != nil {
 		t.Fatal(err)
@@ -996,7 +988,7 @@ func TestBulkFlashReportsAnIncompleteRun(t *testing.T) {
 // than at the log or at /metrics, learns that.
 func TestJournalFailuresAreStatedOnThePage(t *testing.T) {
 	cfg := testConfig(t, "")
-	st, err := store.Open(t.TempDir(), discardLog(), 90, true)
+	st, err := store.Open(filepath.Join(t.TempDir(), "history.db"), discardLog(), 90, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1006,7 +998,7 @@ func TestJournalFailuresAreStatedOnThePage(t *testing.T) {
 		t.Fatal(err)
 	}
 	reg := metrics.New(metrics.ConfigExpiry(cfg), sp, []string{"m365"}, nil, nil)
-	srv, err := New(cfg, st, sp, reg, "test", discardLog())
+	srv, err := New(cfg, sp, st, reg, "test", discardLog())
 	if err != nil {
 		t.Fatal(err)
 	}

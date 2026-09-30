@@ -187,8 +187,8 @@ warn_days = 30   # lead time; 0 switches the mails off
 That is the only setting. The warning goes to the **`bounce.notify`**
 contacts, from `bounce.sender`, over `bounce.notify_route` — the same contact
 details a delivery-failure digest uses, so there is no second place to keep
-addresses. With no `bounce.notify` set, nothing is sent and the expiry appears
-only in the log.
+addresses. Every deadline inside the window is also logged daily regardless
+of `bounce.notify`, so it is visible even with no mail contact configured.
 
 Both deadlines are listed at the top of the dashboard's **Configuration**
 page regardless of this setting, with a state of `ok`, `soon` or `expired`, so
@@ -197,8 +197,7 @@ one. They are also exposed as `smtprelayd_expiry_seconds` on the metrics
 endpoint (`docs/guides/CHECKMK.md`) — worth alerting on independently of the
 mail, since a lapsed credential is exactly what stops mail working.
 
-- `warn_days` accepts 0 to 3650. The default is 30, matching the threshold the
-  startup log already used for client secrets.
+- `warn_days` accepts 0 to 3650. The default is 30.
 - **To trigger one deliberately** — to check the mail path works — raise
   `warn_days` above the remaining lifetime (`warn_days = 900` against a
   freshly generated 825-day certificate), restart, and the mail goes out at
