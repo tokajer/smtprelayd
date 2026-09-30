@@ -143,7 +143,7 @@ func (s *Spool) releaseQuota(n int64) { s.quota.release(n) }
 // QuotaWarning reports whether the spool has reached limits.spool_warn_percent
 // of its configured quota. over is false whenever no quota or no warning
 // threshold is configured. It does no logging itself and mutates nothing:
-// this package holds no logger, so the caller (delivery.Housekeeper) is
+// this package holds no logger, so the caller (housekeeping.Housekeeper) is
 // responsible for reporting the transition.
 func (s *Spool) QuotaWarning() (used, quota int64, over bool) {
 	quota, warnPercent := s.quota.limits()

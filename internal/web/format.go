@@ -6,6 +6,7 @@ package web
 import (
 	"fmt"
 	"net/url"
+	"reflect"
 	"strconv"
 	"strings"
 	"time"
@@ -150,65 +151,153 @@ func orNone(s string) string {
 }
 
 // formatListeners, formatClients, formatRoutes and formatBounce render the
-// read-only configuration view as plain text. None of them ever calls
-// Secret.Value(): a client secret or SMTP password is written as the fixed
-// string "[redacted]" regardless of what Secret.String() would already
-// return, so there are two independent reasons this can never leak, not one.
+// read-only configuration view as plain text. All four are thin callers over
+// formatBlock, which walks a toml-tagged config struct by reflection: hand
+// writing four field lists was how the page came to omit fields nobody
+// noticed were missing -- min_tls, ca_pin and most of a client's rewrite
+// block among them -- since adding a field to config.go was never required
+// to add a line here too.
+//
+// None of them ever calls Secret.Value(): formatBlock recognises
+// config.Secret by name and renders it through String(), which returns
+// "[redacted]", never descending into it -- so there are two independent
+// reasons a secret can never leak onto this page, not one.
 func formatListeners(ls []config.Listener) string {
 	if len(ls) == 0 {
 		return "(none configured)"
 	}
-	var b strings.Builder
-	for _, l := range ls {
-		fmt.Fprintf(&b, "[listener %q]\naddress     = %s\ntls         = %s\nmin_tls     = %s\nrequire_tls = %v\n\n",
-			l.Name, l.Address, orNone(l.TLS), orNone(l.MinTLS), l.RequireTLS)
+	blocks := make([]string, len(ls))
+	for i, l := range ls {
+		blocks[i] = formatBlock(fmt.Sprintf("[listener %q]", l.Name), reflect.ValueOf(l), nil)
 	}
-	return strings.TrimRight(b.String(), "\n")
+	return strings.Join(blocks, "\n\n")
 }
 
 func formatClients(cs []config.Client) string {
 	if len(cs) == 0 {
 		return "(none configured)"
 	}
-	var b strings.Builder
-	for _, c := range cs {
-		fmt.Fprintf(&b, "[client %q]\ncidr               = %s\nroute              = %s\nmax_message_mb     = %d\nmax_recipients     = %d\nrate_limit_per_min = %d\nmax_connections    = %d\nrewrite.mode       = %s\n\n",
-			c.Name, strings.Join(c.CIDR, ", "), c.Route, c.MaxMessageMB, c.MaxRecipients,
-			c.RateLimitPerMin, c.MaxConnections, orNone(c.Rewrite.Mode))
+	blocks := make([]string, len(cs))
+	for i, c := range cs {
+		blocks[i] = formatBlock(fmt.Sprintf("[client %q]", c.Name), reflect.ValueOf(c), nil)
 	}
-	return strings.TrimRight(b.String(), "\n")
+	return strings.Join(blocks, "\n\n")
 }
 
 func formatRoutes(rs []config.Route) string {
 	if len(rs) == 0 {
 		return "(none configured)"
 	}
-	var b strings.Builder
-	for _, r := range rs {
-		fmt.Fprintf(&b, "[route %q]\ndefault            = %v\nhost               = %s\nport               = %d\ntls                = %s\nauth               = %s\ndomains            = %s\nsources            = %s\nmax_concurrent     = %d\nrate_limit_per_min = %d\n",
-			r.Name, r.Default, r.Host, r.Port, orNone(r.TLS), orNone(r.Auth),
-			strings.Join(r.Domains, ", "), strings.Join(r.Sources, ", "), r.MaxConcurrent, r.RateLimitPerMin)
-		// The secrets are printed through config.Secret, whose String
-		// returns "[redacted]", rather than as a literal here. Both produce
-		// the same page, but only one of them keeps producing it: were a
-		// secret field ever to become a plain string, a literal would go on
-		// printing "[redacted]" over a value that is no longer protected,
-		// and this page would be asserting something that had stopped being
-		// true.
-		switch r.Auth {
-		case config.AuthXOAUTH2:
-			fmt.Fprintf(&b, "oauth2.tenant_id     = %s\noauth2.client_id     = %s\noauth2.mailbox       = %s\noauth2.client_secret = %s\n",
-				r.OAuth2.TenantID, r.OAuth2.ClientID, r.OAuth2.Mailbox, r.OAuth2.ClientSecret)
-		case config.AuthPlain, config.AuthLogin:
-			fmt.Fprintf(&b, "credentials.username = %s\ncredentials.password = %s\n",
-				r.Credentials.Username, r.Credentials.Password)
+	blocks := make([]string, len(rs))
+	for i, r := range rs {
+		// The oauth2.* lines only mean anything for an xoauth2 route and the
+		// credentials.* lines only for plain/login, so the other block is
+		// skipped rather than shown empty or, worse, shown with the fields
+		// an operator would read as configured for an auth mode that
+		// ignores them.
+		skip := func(key string) bool {
+			switch {
+			case strings.HasPrefix(key, "oauth2."):
+				return r.Auth != config.AuthXOAUTH2
+			case strings.HasPrefix(key, "credentials."):
+				return r.Auth != config.AuthPlain && r.Auth != config.AuthLogin
+			}
+			return false
 		}
+		blocks[i] = formatBlock(fmt.Sprintf("[route %q]", r.Name), reflect.ValueOf(r), skip)
+	}
+	return strings.Join(blocks, "\n\n")
+}
+
+func formatBounce(b config.Bounce) string {
+	return formatBlock("", reflect.ValueOf(b), nil)
+}
+
+// kv is one rendered "key = value" line, in the order formatBlock's fields
+// were declared.
+type kv struct{ key, value string }
+
+// formatBlock renders one config value as the configuration page's plain
+// text block: header (or none, for [bounce], which the caller passes as
+// ""), then one key = value line per toml-tagged field, keys padded to the
+// widest one in the block. skip, if non-nil, is asked about each field's
+// dotted key before it is rendered or descended into.
+func formatBlock(header string, v reflect.Value, skip func(key string) bool) string {
+	var fields []kv
+	flattenFields(v, "", skip, &fields)
+
+	width := 0
+	for _, f := range fields {
+		width = max(width, len(f.key))
+	}
+
+	var b strings.Builder
+	if header != "" {
+		b.WriteString(header)
 		b.WriteString("\n")
+	}
+	for _, f := range fields {
+		fmt.Fprintf(&b, "%-*s = %s\n", width, f.key, f.value)
 	}
 	return strings.TrimRight(b.String(), "\n")
 }
 
-func formatBounce(b config.Bounce) string {
-	return fmt.Sprintf("sender         = %s\nnotify         = %s\nnotify_route   = %s\ndigest_minutes = %d\nmax_per_hour   = %d",
-		orNone(b.Sender), strings.Join(b.Notify, ", "), orNone(b.NotifyRoute), b.DigestMinutes, b.MaxPerHour)
+// flattenFields walks a toml-tagged config struct and appends one kv per
+// leaf field, in declaration order, dotting a nested struct's tag onto its
+// own (rewrite.mode, oauth2.tenant_id). config.Secret is matched by concrete
+// type rather than an fmt.Stringer assertion, so this can never be fooled
+// into rendering some other type's String() unredacted. The struct's own
+// "name" field, if it has one, is the caller's section header and is not
+// repeated as a body line.
+func flattenFields(v reflect.Value, prefix string, skip func(key string) bool, out *[]kv) {
+	t := v.Type()
+	for i := 0; i < t.NumField(); i++ {
+		field := t.Field(i)
+		tag := field.Tag.Get("toml")
+		if tag == "" || tag == "-" {
+			continue
+		}
+		if prefix == "" && tag == "name" {
+			continue
+		}
+		key := tag
+		if prefix != "" {
+			key = prefix + "." + tag
+		}
+		if skip != nil && skip(key) {
+			continue
+		}
+
+		fv := v.Field(i)
+		if sec, ok := fv.Interface().(config.Secret); ok {
+			val := sec.String()
+			if sec.Empty() {
+				val = "(none)"
+			}
+			*out = append(*out, kv{key, val})
+			continue
+		}
+
+		switch fv.Kind() {
+		case reflect.Struct:
+			flattenFields(fv, key, skip, out)
+		case reflect.Slice:
+			if fv.Type().Elem().Kind() == reflect.Struct {
+				// fmt.Sprint on a struct element reaches its unexported
+				// fields too, which for a slice of sub-blocks containing a
+				// config.Secret would print it unredacted.
+				*out = append(*out, kv{key, fmt.Sprintf("(%d entries)", fv.Len())})
+				continue
+			}
+			items := make([]string, fv.Len())
+			for j := range items {
+				items[j] = fmt.Sprint(fv.Index(j).Interface())
+			}
+			*out = append(*out, kv{key, orNone(strings.Join(items, ", "))})
+		case reflect.String:
+			*out = append(*out, kv{key, orNone(fv.String())})
+		default:
+			*out = append(*out, kv{key, fmt.Sprintf("%v", fv.Interface())})
+		}
+	}
 }

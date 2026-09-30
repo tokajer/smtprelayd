@@ -31,6 +31,7 @@ import (
 	"time"
 
 	"github.com/tokajer/smtprelayd/internal/config"
+	"github.com/tokajer/smtprelayd/internal/store"
 )
 
 // MatchToken compares a presented bearer token against every configured
@@ -150,6 +151,22 @@ func ParseTimeRange(q url.Values, since, until **time.Time) string {
 		*until = &t
 	}
 	return ""
+}
+
+// ParseCommonFilter reads the filter parameters the dashboard and the API
+// share: sender, recipient, subject, client and route as trimmed substrings,
+// and since/until through ParseTimeRange. The message is "" when every value
+// parsed; the caller decides what to do with a non-empty one, since the web
+// handlers render the page with FilterError instead of failing the request.
+func ParseCommonFilter(q url.Values) (store.CommonFilter, string) {
+	f := store.CommonFilter{
+		Sender:    strings.TrimSpace(q.Get("sender")),
+		Recipient: strings.TrimSpace(q.Get("recipient")),
+		Subject:   strings.TrimSpace(q.Get("subject")),
+		Client:    strings.TrimSpace(q.Get("client")),
+		Route:     strings.TrimSpace(q.Get("route")),
+	}
+	return f, ParseTimeRange(q, &f.Since, &f.Until)
 }
 
 // shutdownGrace is how long an in-flight request has to finish once the

@@ -21,7 +21,7 @@ func TestAttemptSummaryReflectsTheLatestAttemptWithinOneSecond(t *testing.T) {
 	s.setClock(func() time.Time { return at })
 
 	if err := s.RecordMessage(MessageRecord{
-		QueueID: "CLOCKORDERAAAAAA", Client: "printers", Route: "m365",
+		QueueID: "CLOCKORDERAAAAAA", Origin: "printers", Route: "m365",
 		EnvelopeFrom: "device@example.at", Recipients: []string{"ops@example.at"},
 		Listener: "submission", RemoteAddr: "192.0.2.10",
 		ReceivedAt: at, ExpiresAt: at.Add(96 * time.Hour),

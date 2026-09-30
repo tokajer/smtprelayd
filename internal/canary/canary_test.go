@@ -114,7 +114,7 @@ func TestSendRecordsHistory(t *testing.T) {
 	if !ok {
 		t.Fatal("canary message not claimable")
 	}
-	msg, err := st.FindMessageByID(meta.ID.String())
+	msg, err := st.FindMessageByID(meta.ID)
 	if err != nil {
 		t.Fatal(err)
 	}

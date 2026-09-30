@@ -7,13 +7,12 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/tokajer/smtprelayd/internal/httpx"
 	"github.com/tokajer/smtprelayd/internal/metrics"
 	"github.com/tokajer/smtprelayd/internal/queueaction"
-	"github.com/tokajer/smtprelayd/internal/spool"
+	"github.com/tokajer/smtprelayd/internal/queueid"
 	"github.com/tokajer/smtprelayd/internal/store"
 )
 
@@ -65,15 +64,14 @@ func (s *Server) handleBounces(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	get := func(k string) string { return strings.TrimSpace(q.Get(k)) }
-	filter := store.BounceFilter{
-		Sender: get("sender"), Recipient: get("recipient"), Subject: get("subject"),
-		Client: get("client"), Route: get("route"), Class: class,
-		Limit: c.Limit, Offset: c.Offset,
-	}
-	if msg := httpx.ParseTimeRange(q, &filter.Since, &filter.Until); msg != "" {
+	common, msg := httpx.ParseCommonFilter(q)
+	if msg != "" {
 		writeJSONError(w, http.StatusBadRequest, msg)
 		return
+	}
+	filter := store.BounceFilter{
+		CommonFilter: common, Class: class,
+		Limit: c.Limit, Offset: c.Offset,
 	}
 
 	rows, hasMore, err := s.store.FindBounceSummaries(filter)
@@ -91,14 +89,10 @@ func (s *Server) handleBounces(w http.ResponseWriter, r *http.Request) {
 // validMessageStatus allowlists the status values docs/guides/API.md documents for
 // /api/v1/messages. "active" (queued or deferred) is a convenience the web
 // dashboard's own /queue view uses internally; it is not part of the
-// published API contract, so it is not accepted here.
+// published API contract, so it is excluded even though store.ValidStatus
+// itself accepts it.
 func validMessageStatus(s string) bool {
-	switch s {
-	case "", store.StatusQueued, store.StatusDeferred, store.StatusDelivered, store.StatusBounced:
-		return true
-	default:
-		return false
-	}
+	return s != store.StatusActive && store.ValidStatus(s)
 }
 
 func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
@@ -107,19 +101,18 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 
 	status := q.Get("status")
 	if !validMessageStatus(status) {
-		writeJSONError(w, http.StatusBadRequest, "status must be queued, deferred, delivered or bounced")
+		writeJSONError(w, http.StatusBadRequest, "status must be queued, deferred, delivered, bounced or removed")
 		return
 	}
 
-	get := func(k string) string { return strings.TrimSpace(q.Get(k)) }
-	filter := store.MessageFilter{
-		Sender: get("sender"), Recipient: get("recipient"), Subject: get("subject"),
-		Client: get("client"), Route: get("route"), Status: status,
-		Limit: c.Limit, Offset: c.Offset,
-	}
-	if msg := httpx.ParseTimeRange(q, &filter.Since, &filter.Until); msg != "" {
+	common, msg := httpx.ParseCommonFilter(q)
+	if msg != "" {
 		writeJSONError(w, http.StatusBadRequest, msg)
 		return
+	}
+	filter := store.MessageFilter{
+		CommonFilter: common, Status: status,
+		Limit: c.Limit, Offset: c.Offset,
 	}
 
 	rows, hasMore, err := s.store.FindMessages(filter)
@@ -135,12 +128,12 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleMessage(w http.ResponseWriter, r *http.Request) {
-	id, err := spool.ParseID(r.PathValue("id"))
+	id, err := queueid.Parse(r.PathValue("id"))
 	if err != nil {
 		writeJSONError(w, http.StatusBadRequest, "invalid queue id")
 		return
 	}
-	msg, err := s.store.FindMessageByID(id.String())
+	msg, err := s.store.FindMessageByID(id)
 	if err != nil {
 		s.serverError(w, "message", err)
 		return
@@ -198,7 +191,7 @@ func (s *Server) handleQueue(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleRequeue(w http.ResponseWriter, r *http.Request) {
-	id, err := spool.ParseID(r.PathValue("id"))
+	id, err := queueid.Parse(r.PathValue("id"))
 	if err != nil {
 		writeJSONError(w, http.StatusBadRequest, "invalid queue id")
 		return
@@ -218,7 +211,7 @@ func (s *Server) handleRequeue(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request) {
-	id, err := spool.ParseID(r.PathValue("id"))
+	id, err := queueid.Parse(r.PathValue("id"))
 	if err != nil {
 		writeJSONError(w, http.StatusBadRequest, "invalid queue id")
 		return

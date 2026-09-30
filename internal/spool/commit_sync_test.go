@@ -28,9 +28,9 @@ func TestCommitLeavesNothingBehindWhenTheDirectorySyncFails(t *testing.T) {
 	}
 
 	wantErr := errors.New("sync failed")
-	original := syncDirFn
-	syncDirFn = func(string) error { return wantErr }
-	t.Cleanup(func() { syncDirFn = original })
+	original := s.syncDir
+	s.syncDir = func(string) error { return wantErr }
+	t.Cleanup(func() { s.syncDir = original })
 
 	st, err := s.Stage(strings.NewReader("body"), 0)
 	if err != nil {
@@ -56,7 +56,7 @@ func TestCommitLeavesNothingBehindWhenTheDirectorySyncFails(t *testing.T) {
 	}
 
 	// And the proof of that last claim: a restart finds an empty queue.
-	syncDirFn = original
+	s.syncDir = original
 	reopened, err := Open(filepath.Dir(filepath.Dir(s.queue)))
 	if err != nil {
 		t.Fatal(err)

@@ -39,6 +39,7 @@ import (
 	"github.com/tokajer/smtprelayd/internal/delivery"
 	"github.com/tokajer/smtprelayd/internal/delivery/smarthost"
 	"github.com/tokajer/smtprelayd/internal/expiry"
+	"github.com/tokajer/smtprelayd/internal/housekeeping"
 	"github.com/tokajer/smtprelayd/internal/httpx"
 	"github.com/tokajer/smtprelayd/internal/listener"
 	"github.com/tokajer/smtprelayd/internal/logging"
@@ -76,7 +77,7 @@ func main() {
 	outPath := fs.String("out", "", "output file for protect-secret (Windows only)")
 	force := fs.Bool("force", false, "allow gen-cert to overwrite an existing certificate and key")
 	days := fs.Int("days", 0, "validity in days for gen-cert (0 uses the default)")
-	scope := fs.String("scope", "read", "scope for token new: read or admin")
+	scope := fs.String("scope", config.ScopeRead, "scope for token new: read or admin")
 	fs.Usage = func() {
 		fmt.Fprintf(os.Stderr, usage, version, commandList(false), commandList(true))
 	}
@@ -478,8 +479,8 @@ func startWorkers(ctx context.Context, bg *sync.WaitGroup, cfg *config.Config,
 		dm.Run(ctx)
 		close(done)
 	})
-	// See the note on delivery.Housekeeper for why this runs apart from dm.Run.
-	hk := delivery.NewHousekeeper(sp, st, log)
+	// See the note on housekeeping.Housekeeper for why this runs apart from dm.Run.
+	hk := housekeeping.New(sp, st, log)
 	bg.Go(func() { hk.Run(ctx) })
 	bg.Go(func() { notifier.Run(ctx); <-done; notifier.Flush() })
 	lifetime := time.Duration(cfg.Queue.MaxLifetimeHours) * time.Hour
@@ -490,7 +491,7 @@ func startWorkers(ctx context.Context, bg *sync.WaitGroup, cfg *config.Config,
 	// Started unconditionally: it reports through the notifier, which
 	// declines to send when bounce.notify is empty, so an unconfigured
 	// contact costs one idle ticker rather than needing a switch of its own.
-	expiryWatcher := bounce.NewExpiryWatcher(cfg, deadlines, notifier, log)
+	expiryWatcher := expiry.NewWatcher(cfg, deadlines, notifier, log)
 	bg.Go(func() { expiryWatcher.Run(ctx) })
 	return done
 }

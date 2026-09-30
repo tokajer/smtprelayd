@@ -19,6 +19,7 @@ func TestClassAndStatusStringsArePinned(t *testing.T) {
 		{ClassPermanent, "permanent", "bounced"},
 		{ClassExpired, "expired", "bounced"},
 		{ClassRemoved, "removed", "removed"},
+		{ClassRequeued, "requeued", "queued"},
 	}
 	for _, c := range cases {
 		if string(c.class) != c.string {

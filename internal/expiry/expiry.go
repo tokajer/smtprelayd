@@ -13,10 +13,12 @@
 // secret fails every delivery on that route.
 //
 // This package only answers "what expires and when". Deciding whether that
-// is worth a mail, and sending one, is bounce.ExpiryWatcher's job -- keeping
-// the two apart is what lets the dashboard and the metrics endpoint read
-// these deadlines without dragging the whole mail-composition path in with
-// them.
+// is worth a mail, and sending one, is Watcher's job -- keeping the two
+// apart is what lets the dashboard and the metrics endpoint read these
+// deadlines without dragging the whole mail-composition path in with them.
+// Watcher depends on a Notifier interface rather than on internal/bounce
+// directly, which is what keeps that mail-composition path out of this
+// package's imports.
 package expiry
 
 import (

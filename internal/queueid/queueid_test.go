@@ -1,32 +1,32 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Tokajer
 
-package spool
+package queueid
 
 import "testing"
 
-func TestParseIDRejectsPathTricks(t *testing.T) {
+func TestParseRejectsPathTricks(t *testing.T) {
 	// The queue ID becomes a file name, so anything that could escape the
 	// spool directory must be refused before it gets there.
 	for _, s := range []string{
 		"../../etc/passwd", "..", "/absolute", "a/b", `a\b`, "",
 		"lowercase1234567", "TOOSHORT", "AAAAAAAAAAAAAAAAA", "AAAAAAAA1AAAAAAA",
 	} {
-		if id, err := ParseID(s); err == nil {
-			t.Errorf("ParseID(%q) accepted %q", s, id)
+		if id, err := Parse(s); err == nil {
+			t.Errorf("Parse(%q) accepted %q", s, id)
 		}
 	}
 }
 
-func TestNewIDRoundTrips(t *testing.T) {
-	id, err := NewID()
+func TestNewRoundTrips(t *testing.T) {
+	id, err := New()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !id.valid() {
-		t.Fatalf("NewID produced an invalid id %q", id)
+	if !id.Valid() {
+		t.Fatalf("New produced an invalid id %q", id)
 	}
-	if _, err := ParseID(id.String()); err != nil {
-		t.Fatalf("ParseID rejected a generated id %q: %v", id, err)
+	if _, err := Parse(id.String()); err != nil {
+		t.Fatalf("Parse rejected a generated id %q: %v", id, err)
 	}
 }

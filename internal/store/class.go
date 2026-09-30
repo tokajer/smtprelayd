@@ -12,6 +12,11 @@ const (
 	ClassPermanent Class = "permanent"
 	ClassExpired   Class = "expired"
 	ClassRemoved   Class = "removed"
+	// ClassRequeued is written by RecordRequeue when an operator requeues a
+	// message: it keeps the message showing as queued until its next real
+	// delivery attempt overwrites last_class, instead of it staying "bounced"
+	// or "temporary" for a message the spool has already made live again.
+	ClassRequeued Class = "requeued"
 )
 
 // Message statuses, derived from the latest attempt's class.
@@ -34,6 +39,7 @@ var classStatus = map[Class]string{
 	ClassPermanent: StatusBounced,
 	ClassExpired:   StatusBounced,
 	ClassRemoved:   StatusRemoved,
+	ClassRequeued:  StatusQueued,
 }
 
 // statusClasses is classStatus inverted: which classes produce a given
@@ -69,4 +75,14 @@ func classToStatus(class Class, hasAttempt bool) string {
 // produce the "bounced" status.
 func ValidBounceClass(s string) bool {
 	return s == "" || classStatus[Class(s)] == StatusBounced
+}
+
+// ValidStatus reports whether s is an acceptable value for a message status
+// filter: no filter, the "active" filter (queued or deferred, not a status
+// any class derives to), or a status statusClasses actually maps back to a
+// class -- derived so this cannot list a status classToStatus would never
+// produce, or omit one it would.
+func ValidStatus(s string) bool {
+	_, ok := statusClasses[s]
+	return ok || s == "" || s == StatusActive
 }

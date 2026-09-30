@@ -234,29 +234,47 @@ func Deliver(ctx context.Context, route config.Route, msg Message, timeout time.
 		}
 	}
 
+	if err := authenticate(ctx, c, route, tokens); err != nil {
+		return err
+	}
+
+	return transact(c, route, msg)
+}
+
+// authenticate negotiates SASL for route, if route.Auth configures one; a
+// no-op otherwise.
+func authenticate(ctx context.Context, c *smtp.Client, route config.Route, tokens TokenSource) error {
 	a, err := authFor(ctx, route, tokens)
 	if err != nil {
 		return err
 	}
-	if a != nil {
-		// The loader already rejects this combination; repeating it here
-		// keeps a hand-edited or future in-memory Route from putting
-		// credentials on an unprotected connection.
-		if route.TLS == config.TLSNone {
-			return perm("route %s: refusing to authenticate over a cleartext connection", route.Name)
-		}
-		if err := c.Auth(a); err != nil {
-			// An authentication failure is a property of the relay's
-			// credentials, never of the message. Classifying the 535 as
-			// permanent would empty the whole queue into spool/failed the
-			// moment a client secret is rotated or a mailbox is disabled.
-			if x, ok := a.(*xoauth2Auth); ok && x.challenge != "" {
-				return &AuthError{Err: fmt.Errorf("route %s: XOAUTH2 rejected (%s): %w", route.Name, x.challenge, err)}
-			}
-			return &AuthError{Err: fmt.Errorf("route %s: authentication failed: %w", route.Name, err)}
-		}
+	if a == nil {
+		return nil
 	}
+	// The loader already rejects this combination; repeating it here
+	// keeps a hand-edited or future in-memory Route from putting
+	// credentials on an unprotected connection.
+	if route.TLS == config.TLSNone {
+		return perm("route %s: refusing to authenticate over a cleartext connection", route.Name)
+	}
+	if err := c.Auth(a); err != nil {
+		// An authentication failure is a property of the relay's
+		// credentials, never of the message. Classifying the 535 as
+		// permanent would empty the whole queue into spool/failed the
+		// moment a client secret is rotated or a mailbox is disabled.
+		if x, ok := a.(*xoauth2Auth); ok && x.challenge != "" {
+			return &AuthError{Err: fmt.Errorf("route %s: XOAUTH2 rejected (%s): %w", route.Name, x.challenge, err)}
+		}
+		return &AuthError{Err: fmt.Errorf("route %s: authentication failed: %w", route.Name, err)}
+	}
+	return nil
+}
 
+// transact runs MAIL through QUIT: the envelope, the recipients, the body and
+// the goodbye, resolving the two outcomes that still count as delivered -- a
+// partial acceptance, or a QUIT that failed after the body was already
+// accepted -- into their own error types rather than an ordinary failure.
+func transact(c *smtp.Client, route config.Route, msg Message) error {
 	if err := c.Mail(msg.From); err != nil {
 		return classify(err)
 	}
@@ -282,7 +300,7 @@ func Deliver(ctx context.Context, route config.Route, msg Message, timeout time.
 	// would deliver it a second time. Three ordinary things reach this point
 	// -- Exchange closing the connection after its 250 without waiting for
 	// QUIT, the delivery deadline expiring in this gap on a large message,
-	// and a service stop firing the cancellation armed above.
+	// and a service stop firing the cancellation Deliver arms on dial.
 	//
 	// This is the mirror of the rule the listener already applies on the way
 	// in, where commitCopies withdraws partial copies rather than let a

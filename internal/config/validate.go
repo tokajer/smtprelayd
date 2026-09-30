@@ -24,14 +24,14 @@ import (
 // credentials flow. Microsoft 365 rejects anything else for SMTP submission.
 const DefaultScope = "https://outlook.office365.com/.default"
 
-// SourceExpiryWatch is the name internal/bounce's expiry watcher gives itself
+// SourceExpiryWatch is the name internal/expiry's watcher gives itself
 // when it asks the notifier who to mail. The notifier resolves recipients by
 // looking the name up among the clients, so a client called this would
 // capture every certificate and secret expiry warning into its own
 // [client.bounce] notify override -- the same hazard a canary sharing a
 // client's name has, which is already refused. It lives here rather than in
-// internal/bounce because this is where it has to be refused, and
-// internal/bounce imports this package.
+// internal/expiry because this is where it has to be refused, and
+// internal/expiry imports this package.
 const SourceExpiryWatch = "expiry-watch"
 
 // reservedNames are the grouping keys the relay uses for mail it composes
@@ -189,13 +189,20 @@ func (v *validator) add(format string, a ...any) {
 
 // Normalize applies every per-element default and the [limits] timeout
 // defaults, so the checks below read one settled value rather than "the
-// configured value, or the default if empty". It is idempotent and runs
-// before validation, so a value validation rejects outright -- a negative
-// max_recipients -- is left exactly as configured for that check to see; a
-// zero or negative timeout settles to its default regardless. Domain
-// lower-casing stays in routes(), interleaved with duplicate-domain
-// detection in the same loop.
+// configured value, or the default if empty". It is idempotent.
+//
+// A value validation rejects outright -- a negative max_recipients -- is
+// left exactly as configured for that check to see; a zero or negative
+// timeout settles to its default regardless. The two exceptions that can
+// still fail after normalizing are the hostname, which falls back to
+// os.Hostname() here and is reported by validator.service only if that still
+// leaves it empty, and a route's own domains, lower-cased and trimmed here.
 func (c *Config) Normalize() {
+	if c.Service.Hostname == "" {
+		if h, err := os.Hostname(); err == nil && h != "" {
+			c.Service.Hostname = h
+		}
+	}
 	for i := range c.Listeners {
 		l := &c.Listeners[i]
 		if l.TLS == "" {
@@ -231,6 +238,9 @@ func (c *Config) Normalize() {
 		if r.UsesOAuth2() && r.OAuth2.Scope == "" {
 			r.OAuth2.Scope = DefaultScope
 		}
+		for j, d := range r.Domains {
+			r.Domains[j] = strings.ToLower(strings.TrimSpace(d))
+		}
 	}
 	if c.Limits.ReadTimeoutSec <= 0 {
 		c.Limits.ReadTimeoutSec = defaultReadTimeoutSec
@@ -252,8 +262,9 @@ func newValidator(c *Config) *validator {
 	return &validator{c: c, clientNames: map[string]bool{}, routeNames: map[string]bool{}}
 }
 
-// Validate enforces every rule from docs/guides/SECURITY.md that can be decided
-// without touching the network. Ambiguity is an error, never a warning.
+// Validate enforces every rule from docs/guides/SECURITY.md that can be
+// decided without touching the network, against the configuration newValidator
+// has already normalized. Ambiguity is an error, never a warning.
 //
 // The order below is a contract, not a reading order. Three of the section
 // methods leave state on the validator that later ones read, so reordering
@@ -316,17 +327,10 @@ func (v *validator) service() {
 	if _, err := ParseTimezone(v.c.Service.Timezone); err != nil {
 		v.add("service.timezone: %v", err)
 	}
-	// The hostname default is resolved here, not in normalize, because
-	// os.Hostname can fail: the failure becomes a validation error, so this
-	// is not a pure element-level default the way the TLS, rewrite mode and
-	// port defaults are.
+	// Normalize has already tried os.Hostname() as a fallback; still empty
+	// here means that failed too, which is the only way this ever fires.
 	if v.c.Service.Hostname == "" {
-		h, err := os.Hostname()
-		if err != nil || h == "" {
-			v.add("service.hostname is required (host name could not be determined)")
-		} else {
-			v.c.Service.Hostname = h
-		}
+		v.add("service.hostname is required (host name could not be determined)")
 	}
 	// The hostname is interpolated into the Received: header and into the 220
 	// banner. Every other value that reaches that header has been proved free
@@ -656,23 +660,22 @@ func (v *validator) routeCAPin(r *Route, where string) {
 	}
 }
 
-// routeDomains lower-cases each recipient domain and rejects one already
+// routeDomains rejects a recipient domain that is not valid, or one already
 // claimed by another route. domainOwner carries the claims across routes.
+// Normalize has already lower-cased and trimmed every domain.
 func (v *validator) routeDomains(r *Route, where string, domainOwner map[string]string) {
 	// Recipient domains take precedence over the route named by the
 	// client, so a domain claimed twice would silently pick one of them.
 	for j, d := range r.Domains {
-		dl := strings.ToLower(strings.TrimSpace(d))
-		if !mailaddr.ValidDomain(dl) {
+		if !mailaddr.ValidDomain(d) {
 			v.add("%s: domains[%d] %q is not a valid domain name", where, j, d)
 			continue
 		}
-		if owner, dup := domainOwner[dl]; dup {
-			v.add("%s: domain %q is already routed by route %q", where, dl, owner)
+		if owner, dup := domainOwner[d]; dup {
+			v.add("%s: domain %q is already routed by route %q", where, d, owner)
 			continue
 		}
-		domainOwner[dl] = r.Name
-		r.Domains[j] = dl
+		domainOwner[d] = r.Name
 	}
 }
 
@@ -768,12 +771,7 @@ func (v *validator) web() {
 	default:
 		v.add("web.theme.mode %q: must be auto, light or dark", v.c.Web.Theme.Mode)
 	}
-	th := v.c.Web.Theme
-	for _, f := range []struct{ key, value string }{
-		{"accent", th.Accent}, {"accent_text", th.AccentText}, {"background", th.Background},
-		{"surface", th.Surface}, {"border", th.Border}, {"text", th.Text},
-		{"muted", th.Muted}, {"ok", th.OK}, {"warn", th.Warn}, {"danger", th.Danger},
-	} {
+	for _, f := range v.c.Web.Theme.fields() {
 		if f.value != "" && !IsHexColor(f.value) {
 			v.add("web.theme.%s %q: must be a hex colour such as #2f5fa8 or #fff", f.key, f.value)
 		}
@@ -782,7 +780,7 @@ func (v *validator) web() {
 		if !ValidName(t.Name) {
 			v.add("web.token[%d]: name must be 1 to %d printable ASCII characters without a quote or backslash", i, maxNameLen)
 		}
-		if t.Scope != "read" && t.Scope != "admin" {
+		if t.Scope != ScopeRead && t.Scope != ScopeAdmin {
 			v.add("web.token[%d] %q: scope must be read or admin", i, t.Name)
 		}
 		if len(t.SHA256) != 64 {

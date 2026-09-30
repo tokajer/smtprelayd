@@ -77,7 +77,7 @@ func New(routes []config.Route) (*Router, error) {
 			}
 			p = p.Masked()
 			for _, o := range r.sources {
-				if o.prefix.Overlaps(p) && o.route != rt.Name {
+				if o.prefix.Overlaps(p) {
 					return nil, fmt.Errorf("router: source %s of route %q overlaps %s of route %q",
 						p, rt.Name, o.prefix, o.route)
 				}

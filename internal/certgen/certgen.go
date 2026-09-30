@@ -38,9 +38,9 @@ const keyBits = 2048
 // not stay valid indefinitely.
 //
 // The approaching expiry is warned about in three places, none of them here:
-// internal/expiry reads the deadline, bounce.ExpiryWatcher mails about it,
-// and smtprelayd_expiry_seconds exposes it. The date this command prints is
-// the first notice, not the only one.
+// internal/expiry reads the deadline, expiry.Watcher mails about it, and
+// smtprelayd_expiry_seconds exposes it. The date this command prints is the
+// first notice, not the only one.
 const DefaultValidity = 825 * 24 * time.Hour
 
 // Options describes the certificate to produce.

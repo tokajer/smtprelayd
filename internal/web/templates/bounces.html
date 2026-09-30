@@ -49,7 +49,7 @@
 	<td>{{.Route}}</td>
 	<td class="cell-addr">{{.EnvelopeFrom}}</td>
 	<td class="cell-addr">{{range .Recipients}}{{.}}<br>{{end}}</td>
-	<td class="cell-subject"><a href="/messages/{{.QueueID}}">{{if .Subject}}{{.Subject}}{{else}}<span class="empty">(no subject)</span>{{end}}</a></td>
+	<td class="cell-subject"><a href="/messages/{{.QueueID}}">{{if .Subject}}{{.Subject}}{{else}}<span class="empty">(no subject)</span>{{end}}</a>{{if ne .Status "bounced"}} <span class="pill pill-{{.Status}}">{{.Status}}</span>{{end}}</td>
 	<td class="num">{{.AttemptCount}}</td>
 	<td class="cell-resp">{{if .LastCode}}{{.LastCode}} {{end}}{{.LastErr}}</td>
 </tr>

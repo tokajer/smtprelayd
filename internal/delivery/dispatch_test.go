@@ -16,6 +16,7 @@ import (
 
 	"github.com/tokajer/smtprelayd/internal/bounce"
 	"github.com/tokajer/smtprelayd/internal/config"
+	"github.com/tokajer/smtprelayd/internal/queueid"
 	"github.com/tokajer/smtprelayd/internal/spool"
 	"github.com/tokajer/smtprelayd/internal/store"
 )
@@ -137,7 +138,7 @@ func TestASaturatedRouteDoesNotStallTheOtherRoutes(t *testing.T) {
 	// Both messages for the stuck route are older, so Claim offers them
 	// first and the healthy route's message sits behind them.
 	base := time.Now().UTC().Add(-time.Hour)
-	enqueue := func(route string, at time.Time) spool.ID {
+	enqueue := func(route string, at time.Time) queueid.ID {
 		t.Helper()
 		id, err := sp.Enqueue(spool.Envelope{
 			From: "device@example.at", To: []string{"ops@example.net"},
@@ -290,4 +291,43 @@ func TestDispatchOneReturnsTheSlotWhenTheRateLimiterRefuses(t *testing.T) {
 	if !saturated["smarthost"] {
 		t.Error(`saturated["smarthost"] = false, want true after a rate-limit refusal`)
 	}
+}
+
+// A commit's Wake signal, not the 5s pollInterval ticker, is what a running
+// Manager relies on to notice a freshly queued message promptly. This drives
+// Run for real against a live fake smarthost and requires delivery well
+// inside pollInterval, so a regression that broke the Wake plumbing --
+// dropping the signal instead of coalescing it, or wiring Run to ignore it --
+// falls back to the ticker and this catches the difference.
+func TestCommitWakesARunningManagerPromptly(t *testing.T) {
+	f := startFakeSmarthost(t, "250 2.0.0 accepted")
+	m, sp, st, _, _ := managerAgainst(t, f)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go m.Run(ctx)
+
+	now := time.Now().UTC()
+	env := spool.Envelope{From: "device@example.at", To: []string{"ops@example.net"},
+		Origin: "printers", Route: "smarthost", Received: now}
+	id, err := sp.Enqueue(env, strings.NewReader("Subject: t\r\n\r\nbody\r\n"), 0, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.RecordMessage(store.MessageRecord{
+		QueueID: id, Origin: "printers", Route: "smarthost",
+		EnvelopeFrom: "device@example.at", Recipients: []string{"ops@example.net"},
+		Listener: "l", RemoteAddr: "127.0.0.1", ReceivedAt: now, ExpiresAt: now.Add(time.Hour),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if !sp.Has(id) {
+			return // delivered and removed from the spool
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatal("message not delivered within 2s of being committed; Run fell back to pollInterval")
 }

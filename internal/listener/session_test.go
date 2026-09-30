@@ -13,9 +13,35 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/tokajer/smtprelayd/internal/queueid"
 	"github.com/tokajer/smtprelayd/internal/spool"
 	"github.com/tokajer/smtprelayd/internal/store"
 )
+
+// busyQueue is a Queue whose Discard always answers ErrBusy, standing in for
+// a copy a delivery worker has already claimed and started sending -- the
+// one case withdraw must leave alone rather than mark removed.
+type busyQueue struct{}
+
+func (busyQueue) Stage(io.Reader, int64) (*spool.Staged, error) {
+	panic("withdraw's ErrBusy path never stages a message")
+}
+
+func (busyQueue) Commit(*spool.Staged, spool.Envelope, time.Duration, func(queueid.ID) string) (queueid.ID, error) {
+	panic("withdraw's ErrBusy path never commits a message")
+}
+
+func (busyQueue) Discard(queueid.ID) error { return spool.ErrBusy }
+
+// countingJournal counts RecordRemoval calls, so a test can assert none was
+// made for a copy withdraw left alone.
+type countingJournal struct{ removals int }
+
+func (j *countingJournal) RecordMessage(store.MessageRecord) error { return nil }
+func (j *countingJournal) RecordRemoval(queueid.ID) error {
+	j.removals++
+	return nil
+}
 
 // TestReadDeadlineClampedToSession covers the unmatched-source path: the per
 // command deadline is refreshed by every NOOP, so without the clamp a source
@@ -162,7 +188,7 @@ func TestWithdrawMarksSpoolCopiesRemoved(t *testing.T) {
 	}
 	defer staged.Discard()
 
-	var ids []spool.ID
+	var ids []queueid.ID
 	for i := 0; i < 2; i++ {
 		now := time.Now().UTC()
 		env := spool.Envelope{
@@ -174,7 +200,7 @@ func TestWithdrawMarksSpoolCopiesRemoved(t *testing.T) {
 			t.Fatal(err)
 		}
 		if err := st.RecordMessage(store.MessageRecord{
-			QueueID: id.String(), Client: "printers", Route: "r",
+			QueueID: id, Origin: "printers", Route: "r",
 			EnvelopeFrom: "device@example.at", Recipients: []string{"ops@example.net"},
 			Listener: "l", RemoteAddr: "127.0.0.1", ReceivedAt: now, ExpiresAt: now.Add(time.Hour),
 		}); err != nil {
@@ -189,7 +215,7 @@ func TestWithdrawMarksSpoolCopiesRemoved(t *testing.T) {
 		t.Errorf("sp.Len() = %d after withdraw, want 0", n)
 	}
 	for _, id := range ids {
-		msg, err := st.FindMessageByID(id.String())
+		msg, err := st.FindMessageByID(id)
 		if err != nil {
 			t.Fatalf("FindMessageByID(%s): %v", id, err)
 		}
@@ -199,5 +225,25 @@ func TestWithdrawMarksSpoolCopiesRemoved(t *testing.T) {
 		if msg.Status != store.StatusRemoved {
 			t.Errorf("%s: Status = %q, want %q", id, msg.Status, store.StatusRemoved)
 		}
+	}
+}
+
+// withdraw must not write a RecordRemoval row for a copy whose Discard
+// answers ErrBusy: it is not actually gone -- a delivery worker already holds
+// its lease and could be mid-send -- so marking it removed in history would
+// claim something the spool does not agree with yet.
+func TestWithdrawSkipsRecordRemovalForABusyCopy(t *testing.T) {
+	j := &countingJournal{}
+	s := &session{srv: &Server{spool: busyQueue{}, store: j}, log: discardLog()}
+
+	id, err := queueid.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	s.withdraw([]queueid.ID{id})
+
+	if j.removals != 0 {
+		t.Errorf("RecordRemoval called %d time(s) for a copy Discard refused as busy, want 0", j.removals)
 	}
 }

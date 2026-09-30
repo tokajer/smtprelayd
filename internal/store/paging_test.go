@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/tokajer/smtprelayd/internal/queueid"
 )
 
 // An offset past the end of the result set costs SQLite a walk of the whole
@@ -58,13 +60,13 @@ func TestListQueriesClampAHugeOffset(t *testing.T) {
 	for i := 0; i < rows; i++ {
 		id := fmt.Sprintf("QAAAAAAAAAAAAA%02d", i)
 		if err := s.RecordMessage(MessageRecord{
-			QueueID: id, Client: "c", Route: "r",
+			QueueID: queueid.ID(id), Origin: "c", Route: "r",
 			EnvelopeFrom: "a@b.at", Recipients: []string{"x@y.at"}, Listener: "l",
 			RemoteAddr: "127.0.0.1", ReceivedAt: now, ExpiresAt: now.Add(time.Hour),
 		}); err != nil {
 			t.Fatal(err)
 		}
-		if err := s.RecordAttempt(id, 1, 550, "rejected", "permanent", nil); err != nil {
+		if err := s.RecordAttempt(queueid.ID(id), 1, 550, "rejected", "permanent", nil); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -113,13 +115,13 @@ func TestPagedQueriesReturnTheLimitAndReportMore(t *testing.T) {
 	for i := 0; i < rows; i++ {
 		id := fmt.Sprintf("QBBBBBBBBBBBBB%02d", i)
 		if err := s.RecordMessage(MessageRecord{
-			QueueID: id, Client: "c", Route: "r",
+			QueueID: queueid.ID(id), Origin: "c", Route: "r",
 			EnvelopeFrom: "a@b.at", Recipients: []string{"x@y.at"}, Listener: "l",
 			RemoteAddr: "127.0.0.1", ReceivedAt: now, ExpiresAt: now.Add(time.Hour),
 		}); err != nil {
 			t.Fatal(err)
 		}
-		if err := s.RecordAttempt(id, 1, 550, "rejected", "permanent", nil); err != nil {
+		if err := s.RecordAttempt(queueid.ID(id), 1, 550, "rejected", "permanent", nil); err != nil {
 			t.Fatal(err)
 		}
 	}

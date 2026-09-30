@@ -57,12 +57,12 @@ type tokenNameKey struct{}
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", s.handleHealth)
-	mux.HandleFunc("GET /bounces", s.auth("read", s.handleBounces))
-	mux.HandleFunc("GET /messages", s.auth("read", s.handleMessages))
-	mux.HandleFunc("GET /messages/{id}", s.auth("read", s.handleMessage))
-	mux.HandleFunc("GET /queue", s.auth("read", s.handleQueue))
-	mux.HandleFunc("POST /messages/{id}/requeue", s.auth("admin", s.handleRequeue))
-	mux.HandleFunc("DELETE /messages/{id}", s.auth("admin", s.handleDelete))
+	mux.HandleFunc("GET /bounces", s.auth(config.ScopeRead, s.handleBounces))
+	mux.HandleFunc("GET /messages", s.auth(config.ScopeRead, s.handleMessages))
+	mux.HandleFunc("GET /messages/{id}", s.auth(config.ScopeRead, s.handleMessage))
+	mux.HandleFunc("GET /queue", s.auth(config.ScopeRead, s.handleQueue))
+	mux.HandleFunc("POST /messages/{id}/requeue", s.auth(config.ScopeAdmin, s.handleRequeue))
+	mux.HandleFunc("DELETE /messages/{id}", s.auth(config.ScopeAdmin, s.handleDelete))
 	return jsonHeaders(mux)
 }
 

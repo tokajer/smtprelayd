@@ -1,7 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Tokajer
 
-package delivery
+// Package housekeeping runs the spool/failed retention sweep, the history
+// store's retention sweep and the spool quota warning on their own
+// goroutine, apart from the delivery manager's dispatch loop.
+package housekeeping
 
 import (
 	"context"
@@ -12,14 +15,17 @@ import (
 	"github.com/tokajer/smtprelayd/internal/store"
 )
 
-// Housekeeper runs the spool/failed retention sweep, the history store's
-// retention sweep and the spool quota warning on their own goroutine, apart
-// from the delivery manager's dispatch loop. A retention DELETE (15.6s
+// passInterval is how often Housekeeper polls. A retention DELETE (15.6s
 // measured at a million rows) or the hourly spool/failed sweep would
 // otherwise delay the next dispatch tick, and a dispatch pass over a deep
-// queue would otherwise delay both sweeps and the quota warning. It uses
-// *store.Store directly rather than delivery.Journal, since RetentionSweep is
-// not part of the narrower interface the manager itself needs.
+// queue would otherwise delay both sweeps and the quota warning, which is why
+// this runs on its own goroutine rather than sharing delivery's.
+const passInterval = 5 * time.Second
+
+// Housekeeper runs the spool/failed retention sweep, the history store's
+// retention sweep and the spool quota warning. It uses *store.Store directly
+// rather than delivery.Journal, since RetentionSweep is not part of the
+// narrower interface the delivery manager itself needs.
 type Housekeeper struct {
 	spool *spool.Spool
 	store *store.Store
@@ -31,18 +37,19 @@ type Housekeeper struct {
 	quotaWarned     bool
 }
 
-// NewHousekeeper builds a Housekeeper. Logs as component=delivery so
-// existing log searches still match.
-func NewHousekeeper(sp *spool.Spool, st *store.Store, log *slog.Logger) *Housekeeper {
+// New builds a Housekeeper. Logs as component=delivery so existing log
+// searches still match: the sweeps it runs are still delivery's concern as
+// far as an operator watching the logs is concerned.
+func New(sp *spool.Spool, st *store.Store, log *slog.Logger) *Housekeeper {
 	return &Housekeeper{spool: sp, store: st, log: log.With("component", "delivery")}
 }
 
-// Run does one pass immediately, then one pass per pollInterval tick until
+// Run does one pass immediately, then one pass per passInterval tick until
 // ctx is done.
 func (h *Housekeeper) Run(ctx context.Context) {
 	h.pass(ctx, time.Now())
 
-	t := time.NewTicker(pollInterval)
+	t := time.NewTicker(passInterval)
 	defer t.Stop()
 	for {
 		select {
@@ -89,7 +96,7 @@ func (h *Housekeeper) sweepHistory(ctx context.Context, now time.Time) {
 }
 
 // reportQuota logs the spool quota warning only on a transition. Housekeeper
-// polls every pollInterval (5s), so logging the current state on each poll
+// polls every passInterval (5s), so logging the current state on each poll
 // rather than the edge would bury the one line an operator needs to notice
 // under constant repetition.
 func (h *Housekeeper) reportQuota(used, quota int64, over bool) {

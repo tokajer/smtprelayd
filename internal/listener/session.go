@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/tokajer/smtprelayd/internal/config"
+	"github.com/tokajer/smtprelayd/internal/queueid"
 	"github.com/tokajer/smtprelayd/internal/rewrite"
 	"github.com/tokajer/smtprelayd/internal/router"
 	"github.com/tokajer/smtprelayd/internal/spool"
@@ -36,7 +37,26 @@ const (
 	// command read deadline alone does not bound this, because every NOOP
 	// resets it.
 	unmatchedMaxSession = 30 * time.Second
+
+	// refusalTimeout bounds a write that refuses a connection outright: the
+	// per-source and per-client 421s below, and accept's global-cap 421 in
+	// listener.go. On an implicit-TLS listener such a write also runs the
+	// handshake, so without this bound a peer that never sends a ClientHello
+	// could hold the reply -- and the connection slot behind it -- open for
+	// the full read_timeout_sec instead of five seconds.
+	refusalTimeout = 5 * time.Second
 )
+
+// armConn sets conn's full deadline and re-expires it if ctx was already
+// cancelled. This closes the same race armRead closes for the read-only
+// deadline: a cancellation landing between the ctx.Err check and SetDeadline
+// would otherwise be overwritten by the deadline this call just installed.
+func armConn(ctx context.Context, conn net.Conn, t time.Time) {
+	_ = conn.SetDeadline(t)
+	if ctx.Err() != nil {
+		_ = conn.SetDeadline(time.Now())
+	}
+}
 
 type session struct {
 	srv  *Server
@@ -83,6 +103,15 @@ func (s *Server) handle(ctx context.Context, conn net.Conn) {
 	stopOnCancel := context.AfterFunc(ctx, func() { _ = conn.SetDeadline(time.Now()) })
 	defer stopOnCancel()
 
+	// Armed before anything else touches the connection, implicit-TLS
+	// handshake included: without this, a peer that opens the socket and
+	// never sends a ClientHello held HandshakeContext open indefinitely,
+	// before the per-source connection cap below ever saw it, occupying a
+	// global limits.max_connections slot forever. The same race armRead
+	// closes applies here: a cancellation landing between the check above and
+	// this call would otherwise be overwritten by it.
+	armConn(ctx, conn, time.Now().Add(time.Duration(s.cfg.Limits.ReadTimeoutSec)*time.Second))
+
 	host, _, err := net.SplitHostPort(conn.RemoteAddr().String())
 	if err != nil {
 		return
@@ -102,20 +131,20 @@ func (s *Server) handle(ctx context.Context, conn net.Conn) {
 		clientBits: -1,
 		log:        s.log.With("remote", host),
 	}
-	if tc, ok := conn.(*tls.Conn); ok {
-		if err := tc.HandshakeContext(ctx); err != nil {
-			ss.log.Debug("tls handshake failed", "error", err)
-			return
-		}
-		ss.isTLS = true
-	}
 
-	// Default deny. An unmatched source is refused before it can name a
-	// recipient, on every listener, regardless of TLS or authentication state.
+	// Default deny, and the per-source admission cap, both before the TLS
+	// handshake: an unmatched source is refused before it can name a
+	// recipient, on every listener, regardless of TLS or authentication
+	// state, and it must not be able to hold a handshake open to dodge its
+	// own connection cap either.
 	client, bits, matched := s.match.Match(ss.remote)
 	if matched {
 		key := connKeyClient(client.Name)
 		if !s.conns.acquire(key, client.MaxConnections) {
+			// On an implicit-TLS listener this reply runs the handshake on its
+			// own write; bound that by refusalTimeout, not read_timeout_sec, so
+			// a peer withholding its ClientHello cannot sit on this slot.
+			_ = conn.SetDeadline(time.Now().Add(refusalTimeout))
 			ss.reply(421, "4.7.0 too many connections for this client")
 			return
 		}
@@ -129,11 +158,26 @@ func (s *Server) handle(ctx context.Context, conn net.Conn) {
 		// server an unauthorised source may occupy while getting there.
 		key := connKeyUnmatched(ss.remote.String())
 		if !s.conns.acquire(key, unmatchedMaxConns) {
+			_ = conn.SetDeadline(time.Now().Add(refusalTimeout))
 			ss.reply(421, "4.7.0 too many connections")
 			return
 		}
 		defer s.conns.release(key, unmatchedMaxConns)
 		ss.deadline = time.Now().Add(unmatchedMaxSession)
+	}
+
+	if tc, ok := conn.(*tls.Conn); ok {
+		// readDeadline clamps to ss.deadline for an unmatched source, so a
+		// stalled handshake cannot outlive that source's own session budget
+		// either. The pre-handshake 421 replies above carry their own,
+		// shorter refusalTimeout deadline; this one only has to cover the
+		// HandshakeContext call below.
+		armConn(ctx, tc, ss.readDeadline(s.cfg.Limits.ReadTimeoutSec))
+		if err := tc.HandshakeContext(ctx); err != nil {
+			ss.log.Debug("tls handshake failed", "error", err)
+			return
+		}
+		ss.isTLS = true
 	}
 
 	ss.reply(220, s.cfg.Service.Hostname+" ESMTP smtprelayd")
@@ -464,7 +508,7 @@ func (s *session) stageMessage(hr *bufio.Reader) (*spool.Staged, rewrite.Result,
 // the copies already made before replying. It replies to the client itself on
 // failure; a false return means the session is finished with this message.
 func (s *session) commitCopies(staged *spool.Staged, res rewrite.Result, groups []router.Group, lifetime time.Duration) ([]string, bool) {
-	committed := make([]spool.ID, 0, len(groups))
+	committed := make([]queueid.ID, 0, len(groups))
 	ids := make([]string, 0, len(groups))
 
 	// Once, not once per group: the header block is the same for every copy,
@@ -513,14 +557,25 @@ func (s *session) commitCopies(staged *spool.Staged, res rewrite.Result, groups 
 // returns, so its "message accepted" row is written before this can run; the
 // history row is updated to removed rather than left listing a copy the spool
 // no longer backs.
-func (s *session) withdraw(committed []spool.ID) {
+//
+// Discard, not Remove: Remove ignores the lease, so it could unlink a copy a
+// delivery worker had already claimed and started sending -- withdrawing the
+// spool's only record of a send in flight. Discard refuses with ErrBusy
+// instead, in which case the copy is left alone and no RecordRemoval is
+// written for it, since it is not actually gone.
+func (s *session) withdraw(committed []queueid.ID) {
 	for _, done := range committed {
-		if err := s.srv.spool.Remove(done); err != nil {
+		if err := s.srv.spool.Discard(done); err != nil {
+			if errors.Is(err, spool.ErrBusy) {
+				s.log.Error("a partially queued copy is already being delivered and could not be withdrawn; the client's retry will duplicate it",
+					"queue_id", done.String())
+				continue
+			}
 			s.log.Error("could not withdraw a partially queued copy",
 				"queue_id", done.String(), "error", err)
 			continue
 		}
-		if err := s.srv.store.RecordRemoval(done.String()); err != nil {
+		if err := s.srv.store.RecordRemoval(done); err != nil {
 			s.log.Warn("history journal write failed", "queue_id", done.String(), "error", err)
 			s.srv.metrics.JournalWriteFailure()
 		}
@@ -553,7 +608,7 @@ func (s *session) replyDataError(err error) {
 // control characters": a HELO name may still contain, say, a BEL, which is
 // ugly in a header but cannot split one. The comment claimed the broader
 // property until 2026-08-11.
-func (s *session) receivedHeader(id spool.ID) string {
+func (s *session) receivedHeader(id queueid.ID) string {
 	proto := "SMTP"
 	if s.isTLS {
 		proto = "ESMTPS"

@@ -76,7 +76,9 @@ Messages the relay could not hand over to a smarthost.
 
 Full message history. Same filters plus `status` with values `queued`,
 `deferred`, `delivered`, `bounced`, `removed` (discarded from the spool by an
-operator via `DELETE /messages/{id}` before it reached an outcome).
+operator via `DELETE /messages/{id}` before it reached an outcome). A message
+just requeued via `POST /messages/{id}/requeue` also reads `queued` here,
+until its next delivery attempt.
 
 ```json
 {
@@ -147,7 +149,9 @@ One message including every delivery attempt with its verbatim SMTP response.
 ### `POST /api/v1/messages/{queue_id}/requeue`
 
 Scope `admin`. Moves a deferred or bounced message back to `incoming` and
-resets its retry counter.
+resets its retry counter. The requeue itself is recorded as an attempt row of
+class `requeued`, so the message reads `queued` again until its next real
+delivery attempt overwrites that.
 
 ### `DELETE /api/v1/messages/{queue_id}`
 

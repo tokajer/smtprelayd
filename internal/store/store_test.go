@@ -16,6 +16,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/tokajer/smtprelayd/internal/queueid"
 )
 
 func testStore(t *testing.T) *Store {
@@ -36,8 +38,8 @@ func testStore(t *testing.T) *Store {
 // on the returned value.
 func testRecord(queueID string, received, expires time.Time) MessageRecord {
 	return MessageRecord{
-		QueueID:      queueID,
-		Client:       "client",
+		QueueID:      queueid.ID(queueID),
+		Origin:       "client",
 		Route:        "route",
 		EnvelopeFrom: "from@example.com",
 		Recipients:   []string{"user@example.com"},
@@ -62,7 +64,7 @@ func TestRecordMessageAndAttempt(t *testing.T) {
 
 	err := s.RecordMessage(MessageRecord{
 		QueueID:      "TESTQUEUEID1",
-		Client:       "printer-client",
+		Origin:       "printer-client",
 		Route:        "m365",
 		EnvelopeFrom: "relay@example.com",
 		OriginalFrom: "printer@local",
@@ -220,7 +222,7 @@ func TestFindBounces(t *testing.T) {
 	for i, tc := range testCases {
 		expires := now.Add(96 * time.Hour)
 		_ = s.RecordMessage(testRecord(tc.id, now.Add(-time.Duration(i)*time.Hour), expires))
-		_ = s.RecordAttempt(tc.id, 1, 550, "Error", tc.class, nil)
+		_ = s.RecordAttempt(queueid.ID(tc.id), 1, 550, "Error", tc.class, nil)
 	}
 
 	bounces, _, err := s.FindBounces(BounceFilter{Limit: 100})
@@ -325,17 +327,17 @@ func TestReconcileRemovedClearsAnActiveRow(t *testing.T) {
 	} {
 		_ = s.RecordMessage(testRecord(tc.id, now, now.Add(96*time.Hour)))
 		if tc.class != "" {
-			_ = s.RecordAttempt(tc.id, 1, 421, "try later", tc.class, nil)
+			_ = s.RecordAttempt(queueid.ID(tc.id), 1, 421, "try later", tc.class, nil)
 		}
 
-		cleared, err := s.ReconcileRemoved(tc.id)
+		cleared, err := s.ReconcileRemoved(queueid.ID(tc.id))
 		if err != nil {
 			t.Fatalf("%s: %v", tc.id, err)
 		}
 		if !cleared {
 			t.Fatalf("%s: reported nothing to reconcile", tc.id)
 		}
-		msg, err := s.FindMessageByID(tc.id)
+		msg, err := s.FindMessageByID(queueid.ID(tc.id))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -362,16 +364,16 @@ func TestReconcileRemovedLeavesFinishedRowsAlone(t *testing.T) {
 		{"DONE-REMOVED", "removed", "removed"},
 	} {
 		_ = s.RecordMessage(testRecord(tc.id, now, now.Add(96*time.Hour)))
-		_ = s.RecordAttempt(tc.id, 1, 250, "response", tc.class, nil)
+		_ = s.RecordAttempt(queueid.ID(tc.id), 1, 250, "response", tc.class, nil)
 
-		cleared, err := s.ReconcileRemoved(tc.id)
+		cleared, err := s.ReconcileRemoved(queueid.ID(tc.id))
 		if err != nil {
 			t.Fatalf("%s: %v", tc.id, err)
 		}
 		if cleared {
 			t.Fatalf("%s: a finished message was rewritten into a removal", tc.id)
 		}
-		msg, err := s.FindMessageByID(tc.id)
+		msg, err := s.FindMessageByID(queueid.ID(tc.id))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -422,7 +424,7 @@ func TestFindMessagesFiltersByDerivedStatus(t *testing.T) {
 		if err != nil {
 			t.Fatalf("status %q: %v", tc.status, err)
 		}
-		if len(got) != 1 || got[0].QueueID != tc.wantID {
+		if len(got) != 1 || got[0].QueueID != queueid.ID(tc.wantID) {
 			t.Fatalf("status %q: got %v, want exactly [%s]", tc.status, got, tc.wantID)
 		}
 	}
@@ -444,7 +446,7 @@ func TestFindMessagesSenderAndSubjectFilters(t *testing.T) {
 	r.EnvelopeFrom, r.Subject, r.TLSUsed = "erp@floor2.local", "Invoice", true
 	_ = s.RecordMessage(r)
 
-	got, _, err := s.FindMessages(MessageFilter{Sender: "printer@", Limit: 100})
+	got, _, err := s.FindMessages(MessageFilter{CommonFilter: CommonFilter{Sender: "printer@"}, Limit: 100})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -452,7 +454,7 @@ func TestFindMessagesSenderAndSubjectFilters(t *testing.T) {
 		t.Fatalf("sender filter: got %v", got)
 	}
 
-	got, _, err = s.FindMessages(MessageFilter{Subject: "Scan", Limit: 100})
+	got, _, err = s.FindMessages(MessageFilter{CommonFilter: CommonFilter{Subject: "Scan"}, Limit: 100})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -480,7 +482,7 @@ func TestFindMessagesActiveStatusIsQueuedOrDeferred(t *testing.T) {
 	}
 	ids := map[string]bool{}
 	for _, m := range got {
-		ids[m.QueueID] = true
+		ids[m.QueueID.String()] = true
 	}
 	if len(got) != 2 || !ids["ACTIVE-QUEUED"] || !ids["ACTIVE-DEFERRED"] {
 		t.Fatalf("active filter: got %v", got)
@@ -517,10 +519,10 @@ func TestFindMessagesSortIsAllowlisted(t *testing.T) {
 	expires := now.Add(96 * time.Hour)
 
 	r := testRecord("SORT-B", now, expires)
-	r.Client = "client-b"
+	r.Origin = "client-b"
 	_ = s.RecordMessage(r)
 	r = testRecord("SORT-A", now.Add(time.Second), expires)
-	r.Client = "client-a"
+	r.Origin = "client-a"
 	_ = s.RecordMessage(r)
 
 	got, _, err := s.FindMessages(MessageFilter{Sort: "client", Order: "asc", Limit: 100})
@@ -562,7 +564,7 @@ func TestFindMessagesSortByStatus(t *testing.T) {
 	}
 	want := []string{"SORT-QUEUED", "SORT-DEFERRED", "SORT-BOUNCED"}
 	for i, id := range want {
-		if got[i].QueueID != id {
+		if got[i].QueueID != queueid.ID(id) {
 			t.Fatalf("position %d: got %s, want %s (order: %v)", i, got[i].QueueID, id, got)
 		}
 	}
@@ -578,7 +580,7 @@ func TestFindBounceSummariesMatchesAPIShape(t *testing.T) {
 	now := time.Now()
 
 	rec := testRecord("BOUNCE-SUMMARY-1", now, now.Add(96*time.Hour))
-	rec.Client, rec.Route = "printers-vienna", "m365"
+	rec.Origin, rec.Route = "printers-vienna", "m365"
 	rec.EnvelopeFrom, rec.OriginalFrom = "relay@example.at", "kopierer@local"
 	rec.Recipients, rec.Subject, rec.TLSUsed = []string{"someone@partner.example"}, "Scan 2026-08-07", true
 	if err := s.RecordMessage(rec); err != nil {
@@ -620,7 +622,7 @@ func TestFindBounceSummariesPagination(t *testing.T) {
 	for i := 0; i < 3; i++ {
 		id := fmt.Sprintf("PAGE-BOUNCE-%d", i)
 		_ = s.RecordMessage(testRecord(id, now.Add(time.Duration(i)*time.Second), now.Add(96*time.Hour)))
-		_ = s.RecordAttempt(id, 1, 550, "no such user", "permanent", nil)
+		_ = s.RecordAttempt(queueid.ID(id), 1, 550, "no such user", "permanent", nil)
 	}
 
 	rows, hasMore, err := s.FindBounceSummaries(BounceFilter{Limit: 2})
@@ -648,7 +650,7 @@ func TestFindMessagesRecipientFilterIsParameterized(t *testing.T) {
 	now := time.Now()
 	_ = s.RecordMessage(testRecord("SQLI-TEST", now, now.Add(96*time.Hour)))
 
-	results, _, err := s.FindMessages(MessageFilter{Recipient: "' OR 1=1 --", Limit: 100})
+	results, _, err := s.FindMessages(MessageFilter{CommonFilter: CommonFilter{Recipient: "' OR 1=1 --"}, Limit: 100})
 	if err != nil {
 		t.Fatalf("FindMessages with SQL-shaped filter errored instead of treating it as a literal: %v", err)
 	}
@@ -776,7 +778,7 @@ func TestFindBouncesFiltersByClass(t *testing.T) {
 		{"DELIVERED-1", "delivered"},
 	} {
 		_ = s.RecordMessage(testRecord(tc.id, now.Add(-time.Duration(i)*time.Hour), expires))
-		_ = s.RecordAttempt(tc.id, 1, 550, "Error", tc.class, nil)
+		_ = s.RecordAttempt(queueid.ID(tc.id), 1, 550, "Error", tc.class, nil)
 	}
 
 	for class, want := range map[string]int{
@@ -879,14 +881,14 @@ func TestEveryFilterFieldBinds(t *testing.T) {
 		{"bbbbbbbb", "beta", "r-beta", "from-beta@x.test", "subject-beta", []string{"to-beta@y.test"}, late},
 	} {
 		if err := s.RecordMessage(MessageRecord{
-			QueueID: d.id, Client: d.client, Route: d.route, EnvelopeFrom: d.from,
+			QueueID: queueid.ID(d.id), Origin: d.client, Route: d.route, EnvelopeFrom: d.from,
 			Recipients: d.rcpt, Subject: d.subj, Listener: "l", RemoteAddr: "127.0.0.1",
 			ReceivedAt: d.at, ExpiresAt: d.at.Add(time.Hour),
 		}); err != nil {
 			t.Fatal(err)
 		}
 		// Permanent, so the same rows are visible to the bounce builders.
-		if err := s.RecordAttempt(d.id, 1, 550, "rejected", "permanent", nil); err != nil {
+		if err := s.RecordAttempt(queueid.ID(d.id), 1, 550, "rejected", "permanent", nil); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -896,13 +898,13 @@ func TestEveryFilterFieldBinds(t *testing.T) {
 
 	t.Run("FindMessages", func(t *testing.T) {
 		for name, f := range map[string]MessageFilter{
-			"client":    {Client: "alpha"},
-			"route":     {Route: "r-alpha"},
-			"sender":    {Sender: "from-alpha"},
-			"recipient": {Recipient: "to-alpha"},
-			"subject":   {Subject: "subject-alpha"},
-			"since":     {Since: &afterEarly},
-			"until":     {Until: &beforeLate},
+			"client":    {CommonFilter: CommonFilter{Client: "alpha"}},
+			"route":     {CommonFilter: CommonFilter{Route: "r-alpha"}},
+			"sender":    {CommonFilter: CommonFilter{Sender: "from-alpha"}},
+			"recipient": {CommonFilter: CommonFilter{Recipient: "to-alpha"}},
+			"subject":   {CommonFilter: CommonFilter{Subject: "subject-alpha"}},
+			"since":     {CommonFilter: CommonFilter{Since: &afterEarly}},
+			"until":     {CommonFilter: CommonFilter{Until: &beforeLate}},
 		} {
 			got, _, err := s.FindMessages(f)
 			if err != nil {
@@ -916,13 +918,13 @@ func TestEveryFilterFieldBinds(t *testing.T) {
 
 	t.Run("FindBounces", func(t *testing.T) {
 		for name, f := range map[string]BounceFilter{
-			"client":    {Client: "alpha"},
-			"route":     {Route: "r-alpha"},
-			"sender":    {Sender: "from-alpha"},
-			"recipient": {Recipient: "to-alpha"},
-			"subject":   {Subject: "subject-alpha"},
-			"since":     {Since: &afterEarly},
-			"until":     {Until: &beforeLate},
+			"client":    {CommonFilter: CommonFilter{Client: "alpha"}},
+			"route":     {CommonFilter: CommonFilter{Route: "r-alpha"}},
+			"sender":    {CommonFilter: CommonFilter{Sender: "from-alpha"}},
+			"recipient": {CommonFilter: CommonFilter{Recipient: "to-alpha"}},
+			"subject":   {CommonFilter: CommonFilter{Subject: "subject-alpha"}},
+			"since":     {CommonFilter: CommonFilter{Since: &afterEarly}},
+			"until":     {CommonFilter: CommonFilter{Until: &beforeLate}},
 		} {
 			got, _, err := s.FindBounces(f)
 			if err != nil {
@@ -936,11 +938,11 @@ func TestEveryFilterFieldBinds(t *testing.T) {
 
 	t.Run("FindBounceSummaries", func(t *testing.T) {
 		for name, f := range map[string]BounceFilter{
-			"client":    {Client: "alpha"},
-			"route":     {Route: "r-alpha"},
-			"sender":    {Sender: "from-alpha"},
-			"recipient": {Recipient: "to-alpha"},
-			"subject":   {Subject: "subject-alpha"},
+			"client":    {CommonFilter: CommonFilter{Client: "alpha"}},
+			"route":     {CommonFilter: CommonFilter{Route: "r-alpha"}},
+			"sender":    {CommonFilter: CommonFilter{Sender: "from-alpha"}},
+			"recipient": {CommonFilter: CommonFilter{Recipient: "to-alpha"}},
+			"subject":   {CommonFilter: CommonFilter{Subject: "subject-alpha"}},
 		} {
 			got, _, err := s.FindBounceSummaries(f)
 			if err != nil {
@@ -957,13 +959,13 @@ func TestEveryFilterFieldBinds(t *testing.T) {
 		// the past must drop both -- enough to prove the clause binds.
 		future := time.Now().Add(24 * time.Hour)
 		past := time.Now().Add(-24 * time.Hour)
-		if got, _, err := s.FindBounceSummaries(BounceFilter{Since: &past, Until: &future}); err != nil || len(got) != 2 {
+		if got, _, err := s.FindBounceSummaries(BounceFilter{CommonFilter: CommonFilter{Since: &past, Until: &future}}); err != nil || len(got) != 2 {
 			t.Errorf("a window spanning now matched %d rows (err %v), want 2", len(got), err)
 		}
-		if got, _, err := s.FindBounceSummaries(BounceFilter{Since: &future}); err != nil || len(got) != 0 {
+		if got, _, err := s.FindBounceSummaries(BounceFilter{CommonFilter: CommonFilter{Since: &future}}); err != nil || len(got) != 0 {
 			t.Errorf("since in the future matched %d rows (err %v), want 0", len(got), err)
 		}
-		if got, _, err := s.FindBounceSummaries(BounceFilter{Until: &past}); err != nil || len(got) != 0 {
+		if got, _, err := s.FindBounceSummaries(BounceFilter{CommonFilter: CommonFilter{Until: &past}}); err != nil || len(got) != 0 {
 			t.Errorf("until in the past matched %d rows (err %v), want 0", len(got), err)
 		}
 	})
@@ -991,7 +993,7 @@ func TestConcurrentWritersNeverSeeBusy(t *testing.T) {
 					errs <- err
 					continue
 				}
-				if err := s.RecordAttempt(id, 1, 250, "ok", "delivered", nil); err != nil {
+				if err := s.RecordAttempt(queueid.ID(id), 1, 250, "ok", "delivered", nil); err != nil {
 					errs <- err
 				}
 			}
@@ -1057,7 +1059,7 @@ func TestRecordAttemptDoesNotSweep(t *testing.T) {
 	// Old enough to be past any retention window, so a sweep would take it.
 	old := time.Now().UTC().Add(-365 * 24 * time.Hour)
 	if err := s.RecordMessage(MessageRecord{
-		QueueID: "QSWEEPAAAAAAAAAA", Client: "c", Route: "r",
+		QueueID: "QSWEEPAAAAAAAAAA", Origin: "c", Route: "r",
 		EnvelopeFrom: "a@b.at", Recipients: []string{"x@y.at"}, Listener: "l",
 		RemoteAddr: "127.0.0.1", ReceivedAt: old, ExpiresAt: old,
 	}); err != nil {
@@ -1156,7 +1158,7 @@ func TestAttemptSummaryMatchesTheAttemptsTable(t *testing.T) {
 	now := time.Now().UTC()
 	const id = "QSUMMARYAAAAAAAA"
 	if err := s.RecordMessage(MessageRecord{
-		QueueID: id, Client: "c", Route: "r", EnvelopeFrom: "a@b.at",
+		QueueID: id, Origin: "c", Route: "r", EnvelopeFrom: "a@b.at",
 		Recipients: []string{"x@y.at"}, Listener: "l", RemoteAddr: "127.0.0.1",
 		ReceivedAt: now, ExpiresAt: now.Add(time.Hour),
 	}); err != nil {
@@ -1219,7 +1221,7 @@ func TestABounceStaysABounceAfterARequeueAndDelivery(t *testing.T) {
 	now := time.Now().UTC()
 	const id = "QREBOUNDAAAAAAAA"
 	if err := s.RecordMessage(MessageRecord{
-		QueueID: id, Client: "c", Route: "r", EnvelopeFrom: "a@b.at",
+		QueueID: id, Origin: "c", Route: "r", EnvelopeFrom: "a@b.at",
 		Recipients: []string{"x@y.at"}, Listener: "l", RemoteAddr: "127.0.0.1",
 		ReceivedAt: now, ExpiresAt: now.Add(time.Hour),
 	}); err != nil {
@@ -1249,6 +1251,65 @@ func TestABounceStaysABounceAfterARequeueAndDelivery(t *testing.T) {
 	// And the class filter still selects on the latest attempt.
 	if rows, _, err := s.FindBounces(BounceFilter{Class: "permanent", Limit: 10}); err != nil || len(rows) != 0 {
 		t.Errorf("filtering on class permanent matched %d rows; the latest attempt is delivered", len(rows))
+	}
+}
+
+// An operator's requeue must make a bounced message read "active" and
+// "queued" again immediately, rather than staying "bounced" until its next
+// real delivery attempt overwrites last_class.
+func TestRecordRequeueMakesABouncedMessageQueuedAgain(t *testing.T) {
+	s := testStore(t)
+	now := time.Now()
+	const id = "QREQUEUEAAAAAAAA"
+	_ = s.RecordMessage(testRecord(id, now, now.Add(96*time.Hour)))
+	if err := s.RecordAttempt(id, 1, 550, "no such user", "permanent", nil); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := s.RecordRequeue(id); err != nil {
+		t.Fatal(err)
+	}
+
+	active, _, err := s.FindMessages(MessageFilter{Status: StatusActive, Limit: 100})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(active) != 1 || active[0].QueueID != id {
+		t.Fatalf("active filter after requeue: got %v", active)
+	}
+
+	queued, _, err := s.FindMessages(MessageFilter{Status: StatusQueued, Limit: 100})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(queued) != 1 || queued[0].QueueID != id {
+		t.Fatalf("queued filter after requeue: got %v", queued)
+	}
+
+	msg, err := s.FindMessageByID(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if msg.Status != StatusQueued {
+		t.Fatalf("derived status = %q, want %q", msg.Status, StatusQueued)
+	}
+
+	// A requeue is not a delivery attempt: unlike RecordAttempt, it must not
+	// touch attempt_count or overwrite the last real attempt's SMTP response.
+	// FindBounces still lists the row (has_bounced only ever goes up) and is
+	// what reads the messages table's summary columns back.
+	bounces, _, err := s.FindBounces(BounceFilter{Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bounces) != 1 || bounces[0].QueueID != id {
+		t.Fatalf("FindBounces after requeue: got %v, want the one message", bounces)
+	}
+	if bounces[0].AttemptCount != 1 {
+		t.Errorf("attempt_count after requeue = %d, want 1 (unchanged by the requeue)", bounces[0].AttemptCount)
+	}
+	if bounces[0].LastErr != "no such user" {
+		t.Errorf("last_smtp_response after requeue = %q, want the last real attempt's response, unchanged", bounces[0].LastErr)
 	}
 }
 

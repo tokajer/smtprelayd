@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/tokajer/smtprelayd/internal/metrics"
+	"github.com/tokajer/smtprelayd/internal/queueid"
 	"github.com/tokajer/smtprelayd/internal/rewrite"
 	"github.com/tokajer/smtprelayd/internal/spool"
 	"github.com/tokajer/smtprelayd/internal/store"
@@ -88,7 +89,7 @@ func New(sp *spool.Spool, st Journal, reg *metrics.Registry, log *slog.Logger) *
 // Send renders msg, spools it and records it in the journal. The journal
 // write is best-effort: a message that is queued but unrecorded still gets
 // delivered, whereas failing here would lose it.
-func (m *Mailer) Send(msg Message, lifetime time.Duration, now time.Time) (spool.ID, error) {
+func (m *Mailer) Send(msg Message, lifetime time.Duration, now time.Time) (queueid.ID, error) {
 	// This is the last place before HeaderFrom, To and Subject reach a header
 	// line, so it must not depend on every caller having already validated
 	// them.
@@ -127,8 +128,8 @@ func (m *Mailer) Send(msg Message, lifetime time.Duration, now time.Time) (spool
 	}
 
 	if rerr := m.store.RecordMessage(store.MessageRecord{
-		QueueID:      id.String(),
-		Client:       msg.Origin,
+		QueueID:      id,
+		Origin:       msg.Origin,
 		Route:        msg.Route,
 		EnvelopeFrom: msg.EnvelopeFrom,
 		Recipients:   msg.To,

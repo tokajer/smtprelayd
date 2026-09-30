@@ -30,6 +30,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/tokajer/smtprelayd/internal/queueid"
 )
 
 // Envelope is everything known about a message at the moment it was accepted.
@@ -117,12 +119,12 @@ func (e *Envelope) normalizeKind() {
 
 // Meta is the persisted state of a queued message.
 type Meta struct {
-	ID          ID        `json:"id"`
-	Envelope    Envelope  `json:"envelope"`
-	Attempts    int       `json:"attempts"`
-	LastError   string    `json:"last_error,omitempty"`
-	NextAttempt time.Time `json:"next_attempt"`
-	Expires     time.Time `json:"expires"`
+	ID          queueid.ID `json:"id"`
+	Envelope    Envelope   `json:"envelope"`
+	Attempts    int        `json:"attempts"`
+	LastError   string     `json:"last_error,omitempty"`
+	NextAttempt time.Time  `json:"next_attempt"`
+	Expires     time.Time  `json:"expires"`
 }
 
 // ErrTooLarge is returned when a message exceeds the caller's byte budget.
@@ -159,8 +161,8 @@ type Spool struct {
 	// mu guards the live queue: index, leased, indexBytes and the depth
 	// cache derived from them.
 	mu     sync.Mutex
-	index  map[ID]*Meta
-	leased map[ID]bool
+	index  map[queueid.ID]*Meta
+	leased map[queueid.ID]bool
 
 	// indexBytes is the sum of Envelope.Size over index, maintained by
 	// putLocked and dropLocked. Kept as a running total because the quota
@@ -179,6 +181,22 @@ type Spool struct {
 	// and quota.go.
 	failed *failedStore
 	quota  *quotaLedger
+
+	// wake lets Commit nudge the delivery dispatcher without it waiting out
+	// pollInterval. Buffered by one and only ever sent to non-blocking: a
+	// send is dropped only when a signal is already pending, and the
+	// dispatch pass that consumes that pending signal still sees this
+	// commit's message, since putLocked below runs before the send -- so a
+	// dropped send loses nothing.
+	wake chan struct{}
+
+	// syncDir is syncDir, the package function, indirected so that a test can
+	// make it fail. The only thing that reads it is Commit, whose behaviour
+	// when the directory sync fails -- unlinking a pair that is already
+	// renamed into place, so recover() cannot re-index a message the client
+	// was told was not accepted -- is otherwise unreachable without a
+	// filesystem that refuses fsync on demand.
+	syncDir func(string) error
 }
 
 // putLocked inserts or replaces a message in the live index, keeping
@@ -193,7 +211,7 @@ func (s *Spool) putLocked(m *Meta) {
 
 // dropLocked removes a message from the live index, keeping indexBytes in
 // step. Callers hold s.mu.
-func (s *Spool) dropLocked(id ID) {
+func (s *Spool) dropLocked(id queueid.ID) {
 	if old, ok := s.index[id]; ok {
 		s.indexBytes -= old.Envelope.Size
 		delete(s.index, id)
@@ -203,13 +221,15 @@ func (s *Spool) dropLocked(id ID) {
 // Open prepares the spool directories and recovers any prior state.
 func Open(dataDir string) (*Spool, error) {
 	s := &Spool{
-		root:   dataDir,
-		tmp:    filepath.Join(dataDir, "spool", "tmp"),
-		queue:  filepath.Join(dataDir, "spool", "queue"),
-		index:  map[ID]*Meta{},
-		leased: map[ID]bool{},
-		failed: newFailedStore(filepath.Join(dataDir, "spool", "failed")),
-		quota:  newQuotaLedger(),
+		root:    dataDir,
+		tmp:     filepath.Join(dataDir, "spool", "tmp"),
+		queue:   filepath.Join(dataDir, "spool", "queue"),
+		index:   map[queueid.ID]*Meta{},
+		leased:  map[queueid.ID]bool{},
+		failed:  newFailedStore(filepath.Join(dataDir, "spool", "failed")),
+		quota:   newQuotaLedger(),
+		wake:    make(chan struct{}, 1),
+		syncDir: syncDir,
 	}
 	for _, d := range []string{s.tmp, s.queue, s.failed.dir} {
 		if err := os.MkdirAll(d, 0o700); err != nil {
@@ -240,7 +260,7 @@ func (s *Spool) recover() error {
 		return err
 	}
 
-	indexed := make(map[ID]bool, len(metas))
+	indexed := make(map[queueid.ID]bool, len(metas))
 	for _, id := range metas {
 		if !bodies[id] {
 			// Metadata without a body cannot be delivered and cannot be
@@ -277,13 +297,6 @@ func (s *Spool) recover() error {
 	return s.failed.reindex()
 }
 
-// syncDirFn is syncDir, indirected so that a test can make it fail. The only
-// thing that reads it is Commit, whose behaviour when the directory sync
-// fails -- unlinking a pair that is already renamed into place, so recover()
-// cannot re-index a message the client was told was not accepted -- is
-// otherwise unreachable without a filesystem that refuses fsync on demand.
-var syncDirFn = syncDir
-
 // recoverBatch is how many directory entries one ReadDir call returns.
 const recoverBatch = 4096
 
@@ -294,25 +307,25 @@ const recoverBatch = 4096
 // materialises it, and recover needs neither. At 200 000 queued messages
 // (400 000 files) the sorted whole-directory read measured 191ms against
 // 126ms for batches, and the slice it builds is one entry per file.
-func (s *Spool) scanQueue() (metas []ID, bodies map[ID]bool, err error) {
+func (s *Spool) scanQueue() (metas []queueid.ID, bodies map[queueid.ID]bool, err error) {
 	d, err := os.Open(s.queue)
 	if err != nil {
 		return nil, nil, err
 	}
 	defer d.Close()
 
-	bodies = map[ID]bool{}
+	bodies = map[queueid.ID]bool{}
 	for {
 		batch, err := d.ReadDir(recoverBatch)
 		for _, e := range batch {
 			name := e.Name()
 			switch {
 			case strings.HasSuffix(name, ".json"):
-				if id, err := ParseID(strings.TrimSuffix(name, ".json")); err == nil {
+				if id, err := queueid.Parse(strings.TrimSuffix(name, ".json")); err == nil {
 					metas = append(metas, id)
 				}
 			case strings.HasSuffix(name, ".eml"):
-				if id, err := ParseID(strings.TrimSuffix(name, ".eml")); err == nil {
+				if id, err := queueid.Parse(strings.TrimSuffix(name, ".eml")); err == nil {
 					bodies[id] = true
 				} else {
 					// A body whose name is not a queue id can never be
@@ -331,8 +344,8 @@ func (s *Spool) scanQueue() (metas []ID, bodies map[ID]bool, err error) {
 	return metas, bodies, nil
 }
 
-func (s *Spool) metaPath(id ID) string { return filepath.Join(s.queue, id.String()+".json") }
-func (s *Spool) dataPath(id ID) string { return filepath.Join(s.queue, id.String()+".eml") }
+func (s *Spool) metaPath(id queueid.ID) string { return filepath.Join(s.queue, id.String()+".json") }
+func (s *Spool) dataPath(id queueid.ID) string { return filepath.Join(s.queue, id.String()+".eml") }
 
 // Staged is a message body written to the spool's temporary area so that it
 // can be committed once per route without being read from the client twice.
@@ -358,7 +371,7 @@ func (st *Staged) Discard() {
 // Stage streams a message body to disk. maxBytes of zero means no limit
 // beyond the caller's own enforcement.
 func (s *Spool) Stage(body io.Reader, maxBytes int64) (*Staged, error) {
-	id, err := NewID()
+	id, err := queueid.New()
 	if err != nil {
 		return nil, err
 	}
@@ -396,7 +409,7 @@ func (s *Spool) Stage(body io.Reader, maxBytes int64) (*Staged, error) {
 // queue ID so that a Received header can name the copy it belongs to. The
 // prefix is why each copy is written rather than renamed: prepending to an
 // existing file is not cheaper than copying it.
-func (s *Spool) Commit(st *Staged, env Envelope, lifetime time.Duration, prefix func(ID) string) (ID, error) {
+func (s *Spool) Commit(st *Staged, env Envelope, lifetime time.Duration, prefix func(queueid.ID) string) (queueid.ID, error) {
 	if st == nil || st.path == "" {
 		return "", errors.New("spool: commit of a discarded stage")
 	}
@@ -410,7 +423,7 @@ func (s *Spool) Commit(st *Staged, env Envelope, lifetime time.Duration, prefix 
 	}
 	defer s.releaseQuota(st.size)
 
-	id, err := NewID()
+	id, err := queueid.New()
 	if err != nil {
 		return "", err
 	}
@@ -449,7 +462,7 @@ func (s *Spool) Commit(st *Staged, env Envelope, lifetime time.Duration, prefix 
 		_ = os.Remove(s.dataPath(id))
 		return "", err
 	}
-	if err := syncDirFn(s.queue); err != nil {
+	if err := s.syncDir(s.queue); err != nil {
 		// Both files are in place, and the caller is about to be told the
 		// commit failed -- so they must not stay. recover() re-indexes a
 		// metadata/body pair at the next start, while the listener has
@@ -465,8 +478,21 @@ func (s *Spool) Commit(st *Staged, env Envelope, lifetime time.Duration, prefix 
 	s.mu.Lock()
 	s.putLocked(m)
 	s.mu.Unlock()
+
+	select {
+	case s.wake <- struct{}{}:
+	default:
+	}
+
 	return id, nil
 }
+
+// Wake reports when a message has been committed, so the dispatcher can act
+// on it without waiting out pollInterval. The channel is not closed and is
+// only ever read from Manager.Run's select; Commit's send above is dropped
+// only when a signal is already pending, and that pending dispatch pass
+// still sees this commit's message, since it was indexed before the send.
+func (s *Spool) Wake() <-chan struct{} { return s.wake }
 
 // writeStagedCopy writes one route copy's tmp file: head first if non-empty,
 // then src, synced and closed before the caller renames it into place.
@@ -504,7 +530,7 @@ func writeStagedCopy(tmpPath string, src io.Reader, head string) (n int64, err e
 
 // Enqueue stages and commits a single copy. It is the path used by callers
 // that deliver a message to exactly one route.
-func (s *Spool) Enqueue(env Envelope, body io.Reader, maxBytes int64, lifetime time.Duration) (ID, error) {
+func (s *Spool) Enqueue(env Envelope, body io.Reader, maxBytes int64, lifetime time.Duration) (queueid.ID, error) {
 	st, err := s.Stage(body, maxBytes)
 	if err != nil {
 		return "", err
@@ -515,8 +541,8 @@ func (s *Spool) Enqueue(env Envelope, body io.Reader, maxBytes int64, lifetime t
 
 // writeMeta replaces the metadata file atomically.
 func (s *Spool) writeMeta(m *Meta) error {
-	if !m.ID.valid() {
-		return ErrInvalidID
+	if !m.ID.Valid() {
+		return queueid.ErrInvalid
 	}
 	// So that a version reading only the legacy booleans still sees the
 	// kind; see the note on Envelope.Notification.
@@ -552,9 +578,9 @@ func (s *Spool) writeMeta(m *Meta) error {
 	return nil
 }
 
-func (s *Spool) readMeta(id ID) (*Meta, error) {
-	if !id.valid() {
-		return nil, ErrInvalidID
+func (s *Spool) readMeta(id queueid.ID) (*Meta, error) {
+	if !id.Valid() {
+		return nil, queueid.ErrInvalid
 	}
 	b, err := os.ReadFile(s.metaPath(id))
 	if err != nil {
@@ -574,9 +600,9 @@ func (s *Spool) readMeta(id ID) (*Meta, error) {
 // OpenBody returns the message body for reading. Named apart from the
 // package-level Open, which prepares a spool directory: the two used to share
 // a name and mean different things.
-func (s *Spool) OpenBody(id ID) (*os.File, error) {
-	if !id.valid() {
-		return nil, ErrInvalidID
+func (s *Spool) OpenBody(id queueid.ID) (*os.File, error) {
+	if !id.Valid() {
+		return nil, queueid.ErrInvalid
 	}
 	return os.OpenFile(s.dataPath(id), os.O_RDONLY|noFollow, 0)
 }
@@ -682,29 +708,24 @@ const releaseRetryDelay = time.Minute
 
 // Release returns a message to the queue with an updated retry state.
 func (s *Spool) Release(m *Meta) error {
-	if err := s.writeMeta(m); err != nil {
-		s.mu.Lock()
-		c := *m
+	err := s.writeMeta(m)
+	c := *m
+	if err != nil {
 		if floor := time.Now().Add(releaseRetryDelay); c.NextAttempt.Before(floor) {
 			c.NextAttempt = floor
 		}
-		s.putLocked(&c)
-		delete(s.leased, m.ID)
-		s.mu.Unlock()
-		return err
 	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	c := *m
 	s.putLocked(&c)
 	delete(s.leased, m.ID)
-	return nil
+	s.mu.Unlock()
+	return err
 }
 
 // Remove deletes a delivered message.
-func (s *Spool) Remove(id ID) error {
-	if !id.valid() {
-		return ErrInvalidID
+func (s *Spool) Remove(id queueid.ID) error {
+	if !id.Valid() {
+		return queueid.ErrInvalid
 	}
 	s.mu.Lock()
 	s.dropLocked(id)
@@ -772,8 +793,8 @@ func (s *Spool) Len() int {
 // permanently failed. The queue view is built from the history store, which
 // can list a message the spool no longer holds; this is what lets the view
 // say so instead of offering a requeue that can only fail.
-func (s *Spool) Has(id ID) bool {
-	if !id.valid() {
+func (s *Spool) Has(id queueid.ID) bool {
+	if !id.Valid() {
 		return false
 	}
 	s.mu.Lock()
@@ -884,6 +905,14 @@ var ErrBusy = errors.New("spool: message is currently being delivered")
 // whether the message is currently active (queued or deferred) or was moved
 // aside to spool/failed after a permanent failure or expiry.
 //
+// committed, if non-nil, runs after the requeue has succeeded but before the
+// lease below is released: the message is back in the index but still
+// leased, so ClaimBatch cannot claim and attempt it yet. That is what lets a
+// caller journal its own requeue row without a dispatcher pass racing ahead
+// of it and journaling a delivery attempt first, which would leave the
+// requeue's row on top and the message reading "queued" forever after it is
+// actually delivered or bounced. Pass nil when there is no journal involved.
+//
 // The message is leased for the duration rather than the mutex being held
 // across the file operations. Until 2026-09-18 s.mu covered writeMeta's
 // fsync and, for a failed message, a rename and two directory syncs -- and
@@ -892,9 +921,9 @@ var ErrBusy = errors.New("spool: message is currently being delivered")
 // the whole relay for a thousand fsyncs. The lease gives the same guarantee
 // the lock did: ClaimBatch skips a leased message, and Discard or a second
 // Requeue answer ErrBusy instead of racing the renames below.
-func (s *Spool) Requeue(id ID) error {
-	if !id.valid() {
-		return ErrInvalidID
+func (s *Spool) Requeue(id queueid.ID, committed func()) error {
+	if !id.Valid() {
+		return queueid.ErrInvalid
 	}
 	s.mu.Lock()
 	if s.leased[id] {
@@ -914,10 +943,19 @@ func (s *Spool) Requeue(id ID) error {
 		s.mu.Unlock()
 	}()
 
+	var err error
 	if live {
-		return s.requeueLive(&reset)
+		err = s.requeueLive(&reset)
+	} else {
+		err = s.requeueFailed(id)
 	}
-	return s.requeueFailed(id)
+	if err != nil {
+		return err
+	}
+	if committed != nil {
+		committed()
+	}
+	return nil
 }
 
 // requeueLive resets a queued or deferred message in place. The caller holds
@@ -935,9 +973,9 @@ func (s *Spool) requeueLive(m *Meta) error {
 
 // requeueFailed moves a message from spool/failed back into the queue. The
 // caller holds the lease, which is what keeps Discard away from the renames.
-func (s *Spool) requeueFailed(id ID) error {
+func (s *Spool) requeueFailed(id queueid.ID) error {
 	failedMeta := s.failed.path(id, ".json")
-	//#nosec G304 -- failedMeta is spool/failed joined with an ID the caller has already put through ParseID
+	//#nosec G304 -- failedMeta is spool/failed joined with an ID the caller has already put through queueid.Parse
 	b, err := os.ReadFile(failedMeta)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -1002,9 +1040,9 @@ func (s *Spool) requeueFailed(id ID) error {
 // currently sits (queued, deferred or failed), without touching its history
 // in the store: the admin "delete" action retains history by design, and
 // only the store's own retention job ever purges a history row.
-func (s *Spool) Discard(id ID) error {
-	if !id.valid() {
-		return ErrInvalidID
+func (s *Spool) Discard(id queueid.ID) error {
+	if !id.Valid() {
+		return queueid.ErrInvalid
 	}
 	// Leased for the duration, the way Requeue takes one, rather than dropped
 	// from the index up front. The lease is what keeps ClaimBatch and a

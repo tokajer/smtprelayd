@@ -120,16 +120,23 @@ func New(deadlines []expiry.Item, sp *spool.Spool, routes, canaryNames []string,
 	return r
 }
 
-// RegisterTokenAger attaches the token source whose age the route's gauge
-// reports. Called by cmd/smtprelayd's buildTokenSources for each xoauth2
-// route it builds.
-func (r *Registry) RegisterTokenAger(route string, t TokenAger) {
+// locked runs f while holding r.mu, or does nothing for a nil registry --
+// shared so the nil check and the lock/defer/unlock pair cannot drift out of
+// one of the counter methods below.
+func (r *Registry) locked(f func()) {
 	if r == nil {
 		return
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.tokens[route] = t
+	f()
+}
+
+// RegisterTokenAger attaches the token source whose age the route's gauge
+// reports. Called by cmd/smtprelayd's buildTokenSources for each xoauth2
+// route it builds.
+func (r *Registry) RegisterTokenAger(route string, t TokenAger) {
+	r.locked(func() { r.tokens[route] = t })
 }
 
 // SessionPanic records a listener session that ended in a recovered panic.
@@ -137,12 +144,7 @@ func (r *Registry) RegisterTokenAger(route string, t TokenAger) {
 // only logs hides a parser bug that an attacker can trigger at will, and a
 // counter is what a monitoring system can alert on.
 func (r *Registry) SessionPanic() {
-	if r == nil {
-		return
-	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.sessionPanics++
+	r.locked(func() { r.sessionPanics++ })
 }
 
 // JournalWriteFailure records a history-store write the listener, the
@@ -152,56 +154,33 @@ func (r *Registry) SessionPanic() {
 // precisely why a broken database has to be visible somewhere other than an
 // empty dashboard.
 func (r *Registry) JournalWriteFailure() {
-	if r == nil {
-		return
-	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.journalWriteFails++
+	r.locked(func() { r.journalWriteFails++ })
 }
 
 // Delivered records a successful delivery on route.
 func (r *Registry) Delivered(route string) {
-	if r == nil {
-		return
-	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	rc := r.route(route)
-	rc.delivered++
-	rc.lastDelivery = time.Now()
+	r.locked(func() {
+		rc := r.route(route)
+		rc.delivered++
+		rc.lastDelivery = time.Now()
+	})
 }
 
 // Bounced records a permanent failure or an expiry in queue on route.
 func (r *Registry) Bounced(route string) {
-	if r == nil {
-		return
-	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.route(route).bounced++
+	r.locked(func() { r.route(route).bounced++ })
 }
 
 // Deferred records a temporary failure that returned the message to the
 // spool for retry on route.
 func (r *Registry) Deferred(route string) {
-	if r == nil {
-		return
-	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.route(route).deferred++
+	r.locked(func() { r.route(route).deferred++ })
 }
 
 // AuthFailure records a delivery attempt that failed because of the relay's
 // own credentials rather than the message.
 func (r *Registry) AuthFailure(route string) {
-	if r == nil {
-		return
-	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.route(route).authFailures++
+	r.locked(func() { r.route(route).authFailures++ })
 }
 
 // RecipientsRefused records recipients a smarthost refused permanently while
@@ -214,12 +193,11 @@ func (r *Registry) AuthFailure(route string) {
 // the mail loss removed the only signal an operator had, and /metrics is what
 // docs/guides/API.md points monitoring at. This is that signal.
 func (r *Registry) RecipientsRefused(route string, n int) {
-	if r == nil || n <= 0 {
+	if n <= 0 {
 		return
 	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.route(route).recipientsRefused += uint64(n) //#nosec G115 -- n is a slice length, checked positive above
+	//#nosec G115 -- n is a slice length, checked positive above
+	r.locked(func() { r.route(route).recipientsRefused += uint64(n) })
 }
 
 // APIAuthFailure records a rejected bearer token on the HTTP API. It has no
@@ -228,12 +206,7 @@ func (r *Registry) RecipientsRefused(route string, n int) {
 // source address is still logged, per docs/guides/API.md; only the metric itself
 // stays a single counter.
 func (r *Registry) APIAuthFailure() {
-	if r == nil {
-		return
-	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.apiAuthFailure++
+	r.locked(func() { r.apiAuthFailure++ })
 }
 
 // NotificationFailure records a delivery attempt for a bounce-digest
@@ -243,12 +216,7 @@ func (r *Registry) APIAuthFailure() {
 // otherwise be indistinguishable from a real production delivery problem on
 // that route.
 func (r *Registry) NotificationFailure() {
-	if r == nil {
-		return
-	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.notificationFailure++
+	r.locked(func() { r.notificationFailure++ })
 }
 
 // CanaryDelivered records one canary's own successful delivery, and when it
@@ -259,12 +227,7 @@ func (r *Registry) NotificationFailure() {
 // message that was delivered), not the route it happened to test — the two
 // can differ if more than one canary shares a route.
 func (r *Registry) CanaryDelivered(name string) {
-	if r == nil {
-		return
-	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.lastCanaryDelivery[name] = time.Now()
+	r.locked(func() { r.lastCanaryDelivery[name] = time.Now() })
 }
 
 // CanaryFailure records one canary's own delivery attempt failing, whether
@@ -275,12 +238,7 @@ func (r *Registry) CanaryDelivered(name string) {
 // without adding anything this dedicated counter does not already say more
 // precisely.
 func (r *Registry) CanaryFailure(name string) {
-	if r == nil {
-		return
-	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.canaryFailure[name]++
+	r.locked(func() { r.canaryFailure[name]++ })
 }
 
 // JournalWriteFailures reports how many history-store writes have failed

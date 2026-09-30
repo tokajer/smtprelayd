@@ -17,15 +17,23 @@ import (
 	"github.com/tokajer/smtprelayd/internal/config"
 	"github.com/tokajer/smtprelayd/internal/delivery/smarthost"
 	"github.com/tokajer/smtprelayd/internal/metrics"
+	"github.com/tokajer/smtprelayd/internal/queueid"
 	"github.com/tokajer/smtprelayd/internal/ratelimit"
 	"github.com/tokajer/smtprelayd/internal/spool"
 	"github.com/tokajer/smtprelayd/internal/store"
 )
 
-// pollInterval bounds how long a freshly queued message waits before a worker
-// notices it. Enqueue also signals the dispatcher, so this only matters after
-// a restart or a missed wakeup.
+// pollInterval bounds how long a message waits for the next dispatch pass
+// when nothing wakes one sooner. Spool.Wake covers a freshly committed
+// message, not one that becomes due on its own later -- an operator's
+// requeue, or a held/deferred message whose backoff has elapsed -- so the
+// ticker is what notices those, and what recovers dispatch after a restart.
 const pollInterval = 5 * time.Second
+
+// wakeDebounce coalesces a burst of Wake signals into one dispatch pass: a
+// listener accepting many messages back to back would otherwise cost one
+// full index scan under the spool mutex per message committed.
+const wakeDebounce = 100 * time.Millisecond
 
 // Journal is what this package needs from the history store to record one
 // delivery attempt. Declared here, on the consumer side, the way
@@ -33,7 +41,7 @@ const pollInterval = 5 * time.Second
 // fake that returns an error, which a real *store.Store backed by SQLite is
 // not a state a test can put on demand.
 type Journal interface {
-	RecordAttempt(queueID string, attemptNum int, smtpCode int, smtpResponse string, class store.Class, nextAttemptAt *time.Time) error
+	RecordAttempt(queueID queueid.ID, attemptNum int, smtpCode int, smtpResponse string, class store.Class, nextAttemptAt *time.Time) error
 }
 
 // FailRecorder is told about every message that failed permanently or
@@ -43,7 +51,7 @@ type Journal interface {
 // message composition path -- out of the delivery manager's imports for the
 // sake of one callback.
 type FailRecorder interface {
-	RecordFail(client, queueID string)
+	RecordFail(origin string, id queueid.ID)
 }
 
 // Manager drains the spool into the configured routes.
@@ -156,6 +164,16 @@ func (m *Manager) Run(ctx context.Context) {
 			m.wg.Wait()
 			return
 		case <-t.C:
+		case <-m.spool.Wake():
+			// A burst of commits wakes this once each; waiting wakeDebounce
+			// out before dispatching coalesces them into one pass instead of
+			// one full index scan per message.
+			select {
+			case <-time.After(wakeDebounce):
+			case <-ctx.Done():
+				m.wg.Wait()
+				return
+			}
 		}
 	}
 }
@@ -174,9 +192,6 @@ func (m *Manager) dispatch(ctx context.Context) bool {
 
 	for {
 		batch := m.spool.ClaimBatch(m.now(), claimBatchSize, skip)
-		if len(batch) == 0 {
-			return true
-		}
 		for i, meta := range batch {
 			if !m.dispatchOne(ctx, meta, saturated) {
 				// Cancelled: every message still in this batch is leased and
@@ -184,6 +199,14 @@ func (m *Manager) dispatch(ctx context.Context) bool {
 				m.releaseFrom(batch, i)
 				return false
 			}
+		}
+		if len(batch) < claimBatchSize {
+			// A short batch means the index had nothing left to give, so
+			// scanning again to confirm that would cost a second pass under
+			// the spool mutex for nothing: anything committed since this scan
+			// started left its own pending Wake, and that message was
+			// indexed before the send, so the pass it wakes will see it.
+			return true
 		}
 	}
 }
@@ -195,9 +218,13 @@ func (m *Manager) dispatch(ctx context.Context) bool {
 // re-finding that position by comparing pointers made the correctness of this
 // depend on ClaimBatch handing out distinct copies -- true today, stated
 // nowhere, and wrong by one suffix if it ever stops being true.
+//
+// Defer, not Release: a cancelled dispatch changed nothing about these
+// messages, so putting them back needs no metadata write or fsync, only
+// clearing the lease.
 func (m *Manager) releaseFrom(batch []*spool.Meta, first int) {
 	for _, meta := range batch[first:] {
-		_ = m.spool.Release(meta)
+		m.spool.Defer(meta, meta.NextAttempt)
 	}
 }
 
@@ -205,12 +232,19 @@ func (m *Manager) releaseFrom(batch []*spool.Meta, first int) {
 // cannot be delivered now. It reports false only when ctx was cancelled, in
 // which case the caller releases this message and the rest of its batch.
 func (m *Manager) dispatchOne(ctx context.Context, meta *spool.Meta, saturated map[string]bool) bool {
+	if ctx.Err() != nil {
+		// A message that was only just held or deferred (now due again on
+		// the next scan) must go back rather than be re-claimed and attempted
+		// during shutdown; the caller releases it exactly as it does for a
+		// cancellation found later in this batch.
+		return false
+	}
 	route := meta.Envelope.Route
 	budget, ok := m.routes[route]
 	if !ok {
-		m.log.Error("queued message references unknown route",
-			"queue_id", meta.ID.String(), "route", route)
-		m.fail(meta, "route no longer configured")
+		log := m.log.With("queue_id", meta.ID.String(), "route", route)
+		log.Error("queued message references unknown route")
+		m.failUnsendable(log, meta, "route no longer configured")
 		return true
 	}
 	// Slot first, rate limit second; see the note at the Allow call below for
@@ -266,11 +300,18 @@ func (m *Manager) attempt(ctx context.Context, meta *spool.Meta) {
 
 	route, ok := m.cfg.Route(meta.Envelope.Route)
 	if !ok {
-		m.fail(meta, "route no longer configured")
+		m.failUnsendable(log, meta, "route no longer configured")
 		return
 	}
 	res, ok := m.send(ctx, log, route, meta)
 	if !ok {
+		return
+	}
+	if res.err != nil && ctx.Err() != nil {
+		// Cancellation expires the smarthost connection, which would
+		// otherwise be recorded as a temporary failure and burn a retry step
+		// on every restart.
+		m.hold(meta, 0)
 		return
 	}
 	meta.Attempts++
@@ -300,7 +341,7 @@ func (m *Manager) send(ctx context.Context, log *slog.Logger, route config.Route
 	f, err := m.spool.OpenBody(meta.ID)
 	if err != nil {
 		log.Error("cannot open queued message", "error", err)
-		m.fail(meta, "message body unreadable")
+		m.failUnsendable(log, meta, "message body unreadable")
 		return attemptResult{}, false
 	}
 	// The handle is closed explicitly once the body has been sent, before
@@ -380,15 +421,13 @@ func (m *Manager) record(log *slog.Logger, meta *spool.Meta, res attemptResult) 
 		log.Warn("permanent delivery failure", "attempts", meta.Attempts, "error", err.Error())
 		m.recordOutcome(meta, outcomeBounced, err)
 		code, resp := extractSMTPError(err)
-		m.journal(log, meta, code, resp, store.ClassPermanent, nil)
-		m.fail(meta, err.Error())
+		m.fail(log, meta, store.ClassPermanent, code, resp, err.Error())
 
 	case m.now().After(meta.Expires):
 		log.Warn("message expired in queue", "attempts", meta.Attempts, "error", err.Error())
 		m.recordOutcome(meta, outcomeBounced, err)
 		code, resp := extractSMTPError(err)
-		m.journal(log, meta, code, resp, store.ClassExpired, nil)
-		m.fail(meta, "expired in queue: "+err.Error())
+		m.fail(log, meta, store.ClassExpired, code, resp, "expired in queue: "+err.Error())
 
 	default:
 		m.deferRetry(log, meta, err)
@@ -468,7 +507,7 @@ func (m *Manager) recordOutcome(meta *spool.Meta, o outcome, err error) {
 // stopped accepting writes otherwise shows up only as a dashboard that slowly
 // empties, which nobody reports.
 func (m *Manager) journal(log *slog.Logger, meta *spool.Meta, code int, resp string, class store.Class, next *time.Time) {
-	if err := m.history.RecordAttempt(meta.ID.String(), meta.Attempts, code, resp, class, next); err != nil {
+	if err := m.history.RecordAttempt(meta.ID, meta.Attempts, code, resp, class, next); err != nil {
 		log.Warn("history journal write failed", "class", class, "error", err)
 		m.metrics.JournalWriteFailure()
 	}
@@ -509,19 +548,30 @@ func (m *Manager) hold(meta *spool.Meta, d time.Duration) {
 	m.spool.Defer(meta, until)
 }
 
-func (m *Manager) fail(meta *spool.Meta, reason string) {
+// failUnsendable is the terminal path for a message that failed before it
+// could even be offered to a smarthost -- an unknown route, an unreadable
+// body -- so there is no SMTP response to record, only the reason.
+func (m *Manager) failUnsendable(log *slog.Logger, meta *spool.Meta, reason string) {
+	meta.Attempts++
+	m.recordOutcome(meta, outcomeBounced, nil)
+	m.fail(log, meta, store.ClassPermanent, 0, reason, reason)
+}
+
+// fail is the terminal path for a message that will not be retried.
+func (m *Manager) fail(log *slog.Logger, meta *spool.Meta, class store.Class, code int, resp, reason string) {
+	m.journal(log, meta, code, resp, class, nil)
 	// The message is moved aside into spool/failed rather than deleted, so
 	// that nothing is lost without a trace, and reported through the bounce
 	// digest via FailRecorder below.
 	if err := m.spool.Fail(meta, reason); err != nil {
-		m.log.Error("cannot move failed message aside", "queue_id", meta.ID.String(), "error", err)
+		log.Error("cannot move failed message aside", "error", err)
 		return
 	}
 	// A notification message failing is never recorded as a bounce to
 	// notify about: that is exactly how a notification loop would start. A
 	// canary's failure is, deliberately -- being reported is its purpose.
 	if meta.Envelope.Kind != spool.KindNotification && m.fails != nil {
-		m.fails.RecordFail(meta.Envelope.Origin, meta.ID.String())
+		m.fails.RecordFail(meta.Envelope.Origin, meta.ID)
 	}
 }
 

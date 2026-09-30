@@ -11,8 +11,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/tokajer/smtprelayd/internal/httpx"
 	"github.com/tokajer/smtprelayd/internal/queueaction"
-	"github.com/tokajer/smtprelayd/internal/spool"
+	"github.com/tokajer/smtprelayd/internal/queueid"
 	"github.com/tokajer/smtprelayd/internal/store"
 )
 
@@ -63,48 +64,17 @@ type flash struct {
 	Text  string
 }
 
-// bulkAction is one of the two actions the queue page can apply to a set of
-// messages.
-//
-// Dispatch used to be the bare string "requeue" tested in three separate
-// places: the CSRF field name, the delete-all confirmation, and an if/else
-// whose else branch silently meant "delete" for any value that was not
-// "requeue". A value carries all three, so a third action cannot be added
-// with one of them left behind.
-type bulkAction struct {
-	// name appears in the CSRF field and action, and in the redirect's
-	// ?done= parameter that bulkFlash reads back.
-	name string
-
-	// confirmAll marks an action whose "all" scope is irreversible and so
-	// needs the confirmation interstitial's own field as well as the CSRF
-	// token.
-	confirmAll bool
-
-	apply func(*Server, *http.Request, spool.ID, string) queueaction.Outcome
-}
-
-var (
-	bulkRequeue = bulkAction{name: "requeue", apply: (*Server).requeueMessage}
-	bulkDelete  = bulkAction{name: "delete", confirmAll: true, apply: (*Server).deleteMessage}
-)
-
 func (s *Server) handleQueueRequeue(w http.ResponseWriter, r *http.Request) {
-	s.handleQueueBulk(w, r, bulkRequeue)
+	s.handleQueueBulk(w, r, requeueAction)
 }
 
 func (s *Server) handleQueueDelete(w http.ResponseWriter, r *http.Request) {
-	s.handleQueueBulk(w, r, bulkDelete)
+	s.handleQueueBulk(w, r, deleteAction)
 }
 
 // handleQueueBulk applies one action to a set of messages: either the rows
 // the operator ticked, or every message the queue view currently lists.
-//
-// "All" is resolved from the history store rather than from the spool index
-// because the queue view is what the operator is looking at when they ask
-// for it, and the two can differ -- a message with no spool copy is listed
-// there and is precisely the kind of entry that needs clearing.
-func (s *Server) handleQueueBulk(w http.ResponseWriter, r *http.Request, a bulkAction) {
+func (s *Server) handleQueueBulk(w http.ResponseWriter, r *http.Request, a messageAction) {
 	// PostFormValue, not FormValue: the token and the selection must come
 	// from the submitted body, so a bare GET-shaped link carrying the same
 	// parameters cannot drive a bulk action.
@@ -113,45 +83,12 @@ func (s *Server) handleQueueBulk(w http.ResponseWriter, r *http.Request, a bulkA
 		return
 	}
 
-	var (
-		ids   []spool.ID
-		res   bulkCounts
-		scope = r.PostFormValue("scope")
-	)
-	switch scope {
-	case "selected":
-		selected := r.PostForm["id"]
-		if len(selected) > bulkMax {
-			http.Error(w, "too many messages selected", http.StatusBadRequest)
-			return
-		}
-		ids = make([]spool.ID, 0, len(selected))
-		for _, v := range selected {
-			id, err := spool.ParseID(v)
-			if err != nil {
-				http.Error(w, "invalid queue id", http.StatusBadRequest)
-				return
-			}
-			ids = append(ids, id)
-		}
-	case "all":
-		// Emptying the whole queue is irreversible, so the form that can do
-		// it is only rendered behind the confirmation interstitial. This is
-		// belt and braces for a request built by hand.
-		if a.confirmAll && r.PostFormValue("confirm") != "delete-all" {
-			http.Error(w, "deleting the whole queue must be confirmed", http.StatusBadRequest)
-			return
-		}
-		var err error
-		ids, res.Truncated, err = s.activeQueueIDs()
-		if err != nil {
-			s.serverError(w, "queue", err)
-			return
-		}
-	default:
-		http.Error(w, "scope must be selected or all", http.StatusBadRequest)
+	scope := r.PostFormValue("scope")
+	ids, truncated, ok := s.bulkTargets(w, r, a, scope)
+	if !ok {
 		return
 	}
+	res := bulkCounts{Truncated: truncated}
 
 	details := "bulk (" + scope + ")"
 	deadline := time.Now().Add(bulkBudget)
@@ -181,16 +118,64 @@ func (s *Server) handleQueueBulk(w http.ResponseWriter, r *http.Request, a bulkA
 	// Logged whatever happens to the response: if the budget ran out or the
 	// operator navigated away, this line is the only record of how far an
 	// irreversible action got.
-	s.log.Info("bulk queue action", "action", a.name, "scope", scope, "source", r.RemoteAddr,
+	s.log.Info("bulk queue action", "action", a.name, "scope", scope, "source", httpx.SourceAddr(r),
 		"ok", res.OK, "cleared", res.Cleared, "busy", res.Busy, "missing", res.Missing,
 		"failed", res.Failed, "incomplete", res.Truncated)
 
 	http.Redirect(w, r, "/queue?"+res.query(a.name).Encode(), http.StatusSeeOther)
 }
 
+// bulkTargets resolves which queue IDs a bulk action should act on: either
+// the rows the operator ticked, or every message the queue view currently
+// lists. It writes the HTTP error itself and reports ok=false when the
+// request cannot be satisfied, so the caller only has to check ok.
+//
+// "All" is resolved from the history store rather than from the spool index
+// because the queue view is what the operator is looking at when they ask
+// for it, and the two can differ -- a message with no spool copy is listed
+// there and is precisely the kind of entry that needs clearing.
+func (s *Server) bulkTargets(w http.ResponseWriter, r *http.Request, a messageAction, scope string) (ids []queueid.ID, truncated bool, ok bool) {
+	switch scope {
+	case "selected":
+		selected := r.PostForm["id"]
+		if len(selected) > bulkMax {
+			http.Error(w, "too many messages selected", http.StatusBadRequest)
+			return nil, false, false
+		}
+		ids = make([]queueid.ID, 0, len(selected))
+		for _, v := range selected {
+			id, err := queueid.Parse(v)
+			if err != nil {
+				http.Error(w, "invalid queue id", http.StatusBadRequest)
+				return nil, false, false
+			}
+			ids = append(ids, id)
+		}
+		return ids, false, true
+	case "all":
+		// Emptying the whole queue is irreversible, so the form that can do
+		// it is only rendered behind the confirmation interstitial. This is
+		// belt and braces for a request built by hand.
+		if a.confirmAll && r.PostFormValue("confirm") != "delete-all" {
+			http.Error(w, "deleting the whole queue must be confirmed", http.StatusBadRequest)
+			return nil, false, false
+		}
+		var err error
+		ids, truncated, err = s.activeQueueIDs()
+		if err != nil {
+			s.serverError(w, "queue", err)
+			return nil, false, false
+		}
+		return ids, truncated, true
+	default:
+		http.Error(w, "scope must be selected or all", http.StatusBadRequest)
+		return nil, false, false
+	}
+}
+
 // activeQueueIDs lists the queue IDs the queue view currently shows, capped
 // at bulkMax with a flag saying the cap was hit.
-func (s *Server) activeQueueIDs() ([]spool.ID, bool, error) {
+func (s *Server) activeQueueIDs() ([]queueid.ID, bool, error) {
 	// hasMore is the cap signal: the store fetches one row past the limit to
 	// answer it, which is exactly "there were more than bulkMax active
 	// messages" -- and the caller has to say so, because a bulk action that
@@ -199,17 +184,9 @@ func (s *Server) activeQueueIDs() ([]spool.ID, bool, error) {
 	if err != nil {
 		return nil, false, err
 	}
-	ids := make([]spool.ID, 0, len(msgs))
+	ids := make([]queueid.ID, 0, len(msgs))
 	for _, m := range msgs {
-		id, err := spool.ParseID(m.QueueID)
-		if err != nil {
-			// Nothing the listener writes can produce this; a row that
-			// cannot name a spool file is skipped rather than failing the
-			// whole action for the rows that can.
-			s.log.Warn("queue row skipped: queue id does not parse", "error", err)
-			continue
-		}
-		ids = append(ids, id)
+		ids = append(ids, m.QueueID)
 	}
 	return ids, truncated, nil
 }

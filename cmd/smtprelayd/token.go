@@ -10,6 +10,8 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
+
+	"github.com/tokajer/smtprelayd/internal/config"
 )
 
 // tokenBytes is the entropy behind one API token. docs/guides/SECURITY.md
@@ -27,7 +29,7 @@ const tokenBytes = 32
 // recovered afterwards.
 func newToken(scope string, out io.Writer) error {
 	switch scope {
-	case "read", "admin":
+	case config.ScopeRead, config.ScopeAdmin:
 	default:
 		return fmt.Errorf("token new: scope must be read or admin, got %q", scope)
 	}

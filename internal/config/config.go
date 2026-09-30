@@ -313,25 +313,31 @@ type Theme struct {
 	Danger     string `toml:"danger"`
 }
 
+// fields declares Theme's ten colours once, so Colors and validate.go's own
+// iteration over them cannot drift a key, a CSS variable and a struct field apart.
+func (t Theme) fields() []struct{ key, cssVar, value string } {
+	return []struct{ key, cssVar, value string }{
+		{"accent", "--accent", t.Accent},
+		{"accent_text", "--accent-text", t.AccentText},
+		{"background", "--bg", t.Background},
+		{"surface", "--surface", t.Surface},
+		{"border", "--border", t.Border},
+		{"text", "--text", t.Text},
+		{"muted", "--muted", t.Muted},
+		{"ok", "--ok", t.OK},
+		{"warn", "--warn", t.Warn},
+		{"danger", "--danger", t.Danger},
+	}
+}
+
 // Colors returns the configured overrides keyed by the CSS custom property
-// they set, skipping the empty ones. The key set is fixed here, so no
+// they set, skipping the empty ones. The key set is fixed in fields, so no
 // caller-supplied string can ever become a property name.
 func (t Theme) Colors() map[string]string {
 	out := make(map[string]string, 10)
-	for name, v := range map[string]string{
-		"--accent":      t.Accent,
-		"--accent-text": t.AccentText,
-		"--bg":          t.Background,
-		"--surface":     t.Surface,
-		"--border":      t.Border,
-		"--text":        t.Text,
-		"--muted":       t.Muted,
-		"--ok":          t.OK,
-		"--warn":        t.Warn,
-		"--danger":      t.Danger,
-	} {
-		if v != "" {
-			out[name] = v
+	for _, f := range t.fields() {
+		if f.value != "" {
+			out[f.cssVar] = f.value
 		}
 	}
 	return out

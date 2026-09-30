@@ -156,7 +156,7 @@ attacker-influenced values and writes them into a message.
 - Certificate expiry for the relay's own certificate, and the expiry of any
   Microsoft 365 client secret, are mailed to the `bounce.notify` contacts
   thirty days ahead and daily thereafter, including once the date has passed
-  (`bounce.ExpiryWatcher` over `internal/expiry`), shown on the dashboard's
+  (`internal/expiry`'s `Watcher`, through the bounce notifier), shown on the dashboard's
   Configuration page, and exposed as `smtprelayd_expiry_seconds` on the
   metrics endpoint — negative once the date has passed. The metric matters
   because it does not depend on mail delivery, which is exactly what an

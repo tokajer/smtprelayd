@@ -9,23 +9,25 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/tokajer/smtprelayd/internal/queueid"
 )
 
 // Message represents a stored message record.
 type Message struct {
-	QueueID      string    `json:"queue_id"`
-	Client       string    `json:"client"`
-	Route        string    `json:"route"`
-	EnvelopeFrom string    `json:"envelope_from"`
-	OriginalFrom string    `json:"original_from,omitempty"`
-	Recipients   []string  `json:"recipients"`
-	Subject      string    `json:"subject,omitempty"`
-	Listener     string    `json:"listener"`
-	RemoteAddr   string    `json:"remote_addr"`
-	ReceivedAt   time.Time `json:"received_at"`
-	ExpiresAt    time.Time `json:"expires_at"`
-	TLSUsed      bool      `json:"tls_used"`
-	CreatedAt    time.Time `json:"created_at"`
+	QueueID      queueid.ID `json:"queue_id"`
+	Client       string     `json:"client"`
+	Route        string     `json:"route"`
+	EnvelopeFrom string     `json:"envelope_from"`
+	OriginalFrom string     `json:"original_from,omitempty"`
+	Recipients   []string   `json:"recipients"`
+	Subject      string     `json:"subject,omitempty"`
+	Listener     string     `json:"listener"`
+	RemoteAddr   string     `json:"remote_addr"`
+	ReceivedAt   time.Time  `json:"received_at"`
+	ExpiresAt    time.Time  `json:"expires_at"`
+	TLSUsed      bool       `json:"tls_used"`
+	CreatedAt    time.Time  `json:"created_at"`
 
 	// Journal metadata. A row written before these columns existed reads
 	// back as the zero value; SizeBytes and HeaderCount are omitted from
@@ -174,13 +176,7 @@ type Attempt struct {
 
 // MessageFilter specifies query parameters for FindMessages.
 type MessageFilter struct {
-	Since     *time.Time // inclusive
-	Until     *time.Time // inclusive
-	Client    string     // exact match
-	Route     string     // exact match
-	Sender    string     // substring match on the envelope sender
-	Recipient string     // substring match
-	Subject   string     // substring match; matches nothing meaningful once retain_subjects redacts a row
+	CommonFilter
 	// Status is one of "", "queued", "deferred", "delivered", "bounced",
 	// "removed" (discarded by an operator before reaching an outcome), or
 	// "active" (queued or deferred, i.e. still in the spool) for the live
@@ -202,25 +198,19 @@ var messageSortColumns = map[string]string{
 	"client":      "m.client",
 	"route":       "m.route",
 	// Status is derived, not stored, so sorting by it needs a synthesised
-	// rank rather than a column: queued, then deferred, then delivered,
-	// then bounced/removed sharing the last rank. The mapping is fixed
-	// here, never influenced by request input, so this is as safe to
-	// interpolate as any other allowlisted column.
-	"status": `CASE WHEN m.last_class IS NULL THEN 0 WHEN m.last_class = 'temporary' THEN 1 WHEN m.last_class = 'delivered' THEN 2 ELSE 3 END`,
+	// rank rather than a column: queued (including a requeue), then
+	// deferred, then delivered, then bounced/removed sharing the last rank.
+	// The mapping is fixed here, never influenced by request input, so this
+	// is as safe to interpolate as any other allowlisted column.
+	"status": `CASE WHEN m.last_class IS NULL OR m.last_class = 'requeued' THEN 0 WHEN m.last_class = 'temporary' THEN 1 WHEN m.last_class = 'delivered' THEN 2 ELSE 3 END`,
 }
 
 // BounceFilter specifies query parameters for FindBounces.
 type BounceFilter struct {
-	Since     *time.Time
-	Until     *time.Time
-	Client    string
-	Route     string
-	Sender    string
-	Recipient string
-	Subject   string
-	Class     string // permanent, expired
-	Limit     int
-	Offset    int
+	CommonFilter
+	Class  string // permanent, expired
+	Limit  int
+	Offset int
 }
 
 // timeColumn is the column a Since/Until window applies to. It is a defined
@@ -233,33 +223,20 @@ const (
 	byLastAttempt timeColumn = "m.last_attempt_at"
 )
 
-// commonFilters is the filtering MessageFilter and BounceFilter have in
-// common. The clauses used to be written out once per query builder, three
-// times over, and nothing detected a dropped one: deleting a clause from a
-// single copy left the whole suite green until TestEveryFilterFieldBinds
-// existed. One copy means the clause text -- and, more easily missed, the
-// order the values are bound in -- cannot disagree between them.
-type commonFilters struct {
+// CommonFilter is the filtering MessageFilter and BounceFilter have in
+// common, embedded in both. The clauses used to be written out once per query
+// builder, three times over, and nothing detected a dropped one: deleting a
+// clause from a single copy left the whole suite green until
+// TestEveryFilterFieldBinds existed. One copy means the clause text -- and,
+// more easily missed, the order the values are bound in -- cannot disagree
+// between them.
+type CommonFilter struct {
 	Since, Until *time.Time
 	Client       string
 	Route        string
 	Sender       string
 	Recipient    string
 	Subject      string
-}
-
-func (f MessageFilter) common() commonFilters {
-	return commonFilters{
-		Since: f.Since, Until: f.Until, Client: f.Client, Route: f.Route,
-		Sender: f.Sender, Recipient: f.Recipient, Subject: f.Subject,
-	}
-}
-
-func (f BounceFilter) common() commonFilters {
-	return commonFilters{
-		Since: f.Since, Until: f.Until, Client: f.Client, Route: f.Route,
-		Sender: f.Sender, Recipient: f.Recipient, Subject: f.Subject,
-	}
 }
 
 // builder accumulates a query and the values it binds as one thing.
@@ -303,7 +280,7 @@ func (b *builder) query() (string, []any) { return b.sql.String(), b.args }
 // apply appends the shared clauses and the values they bind. The queue and
 // bounce views window on when a message arrived; the bounce summary windows
 // on when it last failed, which is why the column is a parameter.
-func (f commonFilters) apply(b *builder, col timeColumn) {
+func (f CommonFilter) apply(b *builder, col timeColumn) {
 	if f.Since != nil {
 		b.where(string(col)+" >= ?", f.Since.UTC().Format(time.RFC3339))
 	}
@@ -331,7 +308,7 @@ func (f commonFilters) apply(b *builder, col timeColumn) {
 }
 
 // FindMessageByID retrieves a single message with all its attempts.
-func (s *Store) FindMessageByID(queueID string) (*Message, error) {
+func (s *Store) FindMessageByID(queueID queueid.ID) (*Message, error) {
 	var sc messageScan
 
 	//#nosec G202 -- messageColumns is a package constant column list, not input; the only bound value is queueID
@@ -474,14 +451,17 @@ func (s *Store) FindMessages(filter MessageFilter) ([]*Message, bool, error) {
 		WHERE 1=1
 	`)
 
-	filter.common().apply(b, byReceivedAt)
+	filter.CommonFilter.apply(b, byReceivedAt)
 	switch filter.Status {
 	case "":
 		// No filter.
 	case StatusQueued:
-		b.where("m.last_class IS NULL")
+		// NULL is a message with no attempt yet; ClassRequeued is one an
+		// operator put back into the queue, which must read as queued again
+		// until its next real delivery attempt overwrites last_class.
+		b.where("(m.last_class IS NULL OR m.last_class = ?)", ClassRequeued)
 	case StatusActive:
-		b.where("(m.last_class IS NULL OR m.last_class = 'temporary')")
+		b.where("(m.last_class IS NULL OR m.last_class IN (?, ?))", ClassRequeued, ClassTemporary)
 	default:
 		classes, ok := statusClasses[filter.Status]
 		if !ok {
@@ -546,12 +526,12 @@ func (s *Store) FindBounces(filter BounceFilter) ([]*Message, bool, error) {
 	// Find queue IDs that have a final attempt with class='permanent' or 'expired'.
 	//#nosec G202 -- as in FindMessages: literal fragments, bound values, code-side column list
 	b := newBuilder(`
-		SELECT ` + messageColumns("m.") + `, m.last_smtp_code, m.last_smtp_response, m.attempt_count
+		SELECT ` + messageColumns("m.") + `, m.last_class, m.last_smtp_code, m.last_smtp_response, m.attempt_count
 		FROM messages m
 		WHERE m.has_bounced = 1
 	`)
 
-	filter.common().apply(b, byReceivedAt)
+	filter.CommonFilter.apply(b, byReceivedAt)
 	if filter.Class != "" {
 		// The filter is on the latest attempt's class, which is what the
 		// bounce view displays, and not on has_bounced: the two answer
@@ -572,10 +552,10 @@ func (s *Store) FindBounces(filter BounceFilter) ([]*Message, bool, error) {
 	var messages []*Message
 	for rows.Next() {
 		var sc messageScan
-		var lastResp sql.NullString
+		var lastClass, lastResp sql.NullString
 		var lastCode, attemptCount sql.NullInt64
 
-		if err := rows.Scan(sc.dest(&lastCode, &lastResp, &attemptCount)...); err != nil {
+		if err := rows.Scan(sc.dest(&lastClass, &lastCode, &lastResp, &attemptCount)...); err != nil {
 			return nil, false, fmt.Errorf("store: scan bounce: %w", err)
 		}
 
@@ -583,7 +563,10 @@ func (s *Store) FindBounces(filter BounceFilter) ([]*Message, bool, error) {
 		m.LastCode = int(lastCode.Int64)
 		m.LastErr = lastResp.String
 		m.AttemptCount = int(attemptCount.Int64)
-		m.Status = StatusBounced
+		// Not the constant StatusBounced: a message that failed permanently
+		// and was then requeued and delivered is in this list too, and must
+		// read the status its latest attempt actually left it in.
+		m.Status = classToStatus(Class(lastClass.String), lastClass.Valid)
 
 		messages = append(messages, m)
 	}
@@ -599,19 +582,19 @@ func (s *Store) FindBounces(filter BounceFilter) ([]*Message, bool, error) {
 // (docs/guides/API.md): the final attempt's class and SMTP response plus a total
 // attempt count, rather than the full attempt history FindMessageByID gives.
 type BounceSummary struct {
-	QueueID      string    `json:"queue_id"`
-	Class        string    `json:"class"`
-	Client       string    `json:"client"`
-	Route        string    `json:"route"`
-	EnvelopeFrom string    `json:"envelope_from"`
-	OriginalFrom string    `json:"original_from,omitempty"`
-	Recipients   []string  `json:"recipients"`
-	Subject      string    `json:"subject,omitempty"`
-	Attempts     int       `json:"attempts"`
-	FirstAttempt time.Time `json:"first_attempt"`
-	LastAttempt  time.Time `json:"last_attempt"`
-	SMTPCode     int       `json:"smtp_code,omitempty"`
-	SMTPResponse string    `json:"smtp_response,omitempty"`
+	QueueID      queueid.ID `json:"queue_id"`
+	Class        string     `json:"class"`
+	Client       string     `json:"client"`
+	Route        string     `json:"route"`
+	EnvelopeFrom string     `json:"envelope_from"`
+	OriginalFrom string     `json:"original_from,omitempty"`
+	Recipients   []string   `json:"recipients"`
+	Subject      string     `json:"subject,omitempty"`
+	Attempts     int        `json:"attempts"`
+	FirstAttempt time.Time  `json:"first_attempt"`
+	LastAttempt  time.Time  `json:"last_attempt"`
+	SMTPCode     int        `json:"smtp_code,omitempty"`
+	SMTPResponse string     `json:"smtp_response,omitempty"`
 }
 
 // FindBounceSummaries returns the API's flattened bounce view with
@@ -626,7 +609,7 @@ func (s *Store) FindBounceSummaries(filter BounceFilter) ([]BounceSummary, bool,
 		FROM messages m
 		WHERE m.has_bounced = 1
 	`)
-	filter.common().apply(b, byLastAttempt)
+	filter.CommonFilter.apply(b, byLastAttempt)
 	if filter.Class != "" {
 		b.where("m.last_class = ?", filter.Class)
 	}

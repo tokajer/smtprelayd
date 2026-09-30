@@ -20,6 +20,7 @@ import (
 	"github.com/tokajer/smtprelayd/internal/delivery/smarthost"
 	"github.com/tokajer/smtprelayd/internal/expiry"
 	"github.com/tokajer/smtprelayd/internal/metrics"
+	"github.com/tokajer/smtprelayd/internal/queueid"
 	"github.com/tokajer/smtprelayd/internal/spool"
 	"github.com/tokajer/smtprelayd/internal/store"
 )
@@ -92,7 +93,7 @@ func TestFailRecordsRealClientFailureButNotANotificationsOwn(t *testing.T) {
 	if !ok {
 		t.Fatal("claim failed")
 	}
-	m.fail(meta, "smarthost rejected it")
+	m.fail(discardLog(), meta, store.ClassPermanent, 0, "smarthost rejected it", "smarthost rejected it")
 
 	if got := notifier.Pending(); got != 1 {
 		t.Fatalf("pending = %d after a real client failure, want 1", got)
@@ -106,7 +107,7 @@ func TestFailRecordsRealClientFailureButNotANotificationsOwn(t *testing.T) {
 	if !ok {
 		t.Fatal("claim failed")
 	}
-	m.fail(notifMeta, "notify route unreachable")
+	m.fail(discardLog(), notifMeta, store.ClassPermanent, 0, "notify route unreachable", "notify route unreachable")
 
 	if got := notifier.Pending(); got != 1 {
 		t.Fatalf("pending = %d after a notification's own failure, want still 1 (no loop)", got)
@@ -130,7 +131,7 @@ func TestFailRecordsACanarysOwnFailureUnlikeANotifications(t *testing.T) {
 	if !ok {
 		t.Fatal("claim failed")
 	}
-	m.fail(meta, "smarthost rejected the canary")
+	m.fail(discardLog(), meta, store.ClassPermanent, 0, "smarthost rejected the canary", "smarthost rejected the canary")
 
 	if got := notifier.Pending(); got != 1 {
 		t.Fatalf("pending = %d after a canary's own failure, want 1 (reported like a real failure)", got)
@@ -347,7 +348,7 @@ func TestHoldNeverDefersPastExpiry(t *testing.T) {
 // real SQLite file can be put into on demand.
 type failingJournal struct{}
 
-func (failingJournal) RecordAttempt(string, int, int, string, store.Class, *time.Time) error {
+func (failingJournal) RecordAttempt(queueid.ID, int, int, string, store.Class, *time.Time) error {
 	return errors.New("history store unavailable")
 }
 
@@ -363,7 +364,7 @@ func TestJournalWriteFailureIsCounted(t *testing.T) {
 	reg := testRegistry(cfg, sp)
 	m := New(cfg, sp, failingJournal{}, reg, nil, nil, discardLog())
 
-	id, err := spool.NewID()
+	id, err := queueid.New()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -407,7 +408,7 @@ func TestExpiredTemporaryFailureIsRecordedAsExpiredNotDeferred(t *testing.T) {
 	// in production the listener creates it via journalAccepted before the
 	// delivery manager ever sees the message.
 	if err := st.RecordMessage(store.MessageRecord{
-		QueueID: id.String(), Client: "printers", Route: "m365",
+		QueueID: id, Origin: "printers", Route: "m365",
 		EnvelopeFrom: "a@example.at", Recipients: []string{"b@example.net"},
 		Listener: "smtp", RemoteAddr: "127.0.0.1", ReceivedAt: now, ExpiresAt: now.Add(time.Hour),
 	}); err != nil {
@@ -433,7 +434,7 @@ func TestExpiredTemporaryFailureIsRecordedAsExpiredNotDeferred(t *testing.T) {
 		t.Fatal("the message is gone entirely; an expiry should move it to spool/failed, not delete it")
 	}
 
-	msg, err := st.FindMessageByID(id.String())
+	msg, err := st.FindMessageByID(id)
 	if err != nil {
 		t.Fatal(err)
 	}

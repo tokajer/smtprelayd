@@ -6,12 +6,11 @@ package web
 import (
 	"net/http"
 	"net/url"
-	"strings"
 	"time"
 
 	"github.com/tokajer/smtprelayd/internal/expiry"
 	"github.com/tokajer/smtprelayd/internal/httpx"
-	"github.com/tokajer/smtprelayd/internal/spool"
+	"github.com/tokajer/smtprelayd/internal/queueid"
 	"github.com/tokajer/smtprelayd/internal/store"
 )
 
@@ -47,11 +46,7 @@ func (s *Server) handleQueue(w http.ResponseWriter, r *http.Request) {
 	}
 	rows := make([]queueRow, 0, len(msgs))
 	for _, m := range msgs {
-		row := queueRow{Message: m}
-		if id, err := spool.ParseID(m.QueueID); err == nil {
-			row.Stale = !s.spool.Has(id)
-		}
-		rows = append(rows, row)
+		rows = append(rows, queueRow{Message: m, Stale: !s.spool.Has(m.QueueID)})
 	}
 
 	now := time.Now()
@@ -127,17 +122,18 @@ type searchFilterView struct {
 func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	offset := parseOffset(q.Get("offset"))
-	filter := store.MessageFilter{
-		Sender:    strings.TrimSpace(q.Get("sender")),
-		Recipient: strings.TrimSpace(q.Get("recipient")),
-		Subject:   strings.TrimSpace(q.Get("subject")),
-		Client:    strings.TrimSpace(q.Get("client")),
-		Route:     strings.TrimSpace(q.Get("route")),
-		Status:    q.Get("status"),
-		Limit:     pageSize,
-		Offset:    offset,
+	common, filterErr := httpx.ParseCommonFilter(q)
+
+	status := q.Get("status")
+	if filterErr == "" && !store.ValidStatus(status) {
+		filterErr = "status must be queued, deferred, delivered, bounced or removed"
+		status = ""
 	}
-	filterErr := httpx.ParseTimeRange(q, &filter.Since, &filter.Until)
+
+	filter := store.MessageFilter{
+		CommonFilter: common, Status: status,
+		Limit: pageSize, Offset: offset,
+	}
 
 	var msgs []*store.Message
 	var hasMore bool
@@ -182,19 +178,13 @@ func (s *Server) handleBounces(w http.ResponseWriter, r *http.Request) {
 		filterErrClass = "class must be permanent or expired"
 		class = ""
 	}
-	filter := store.BounceFilter{
-		Sender:    strings.TrimSpace(q.Get("sender")),
-		Recipient: strings.TrimSpace(q.Get("recipient")),
-		Subject:   strings.TrimSpace(q.Get("subject")),
-		Client:    strings.TrimSpace(q.Get("client")),
-		Route:     strings.TrimSpace(q.Get("route")),
-		Class:     class,
-		Limit:     pageSize,
-		Offset:    offset,
-	}
-	filterErr := httpx.ParseTimeRange(q, &filter.Since, &filter.Until)
+	common, filterErr := httpx.ParseCommonFilter(q)
 	if filterErr == "" {
 		filterErr = filterErrClass
+	}
+	filter := store.BounceFilter{
+		CommonFilter: common, Class: class,
+		Limit: pageSize, Offset: offset,
 	}
 
 	var msgs []*store.Message
@@ -225,16 +215,16 @@ func (s *Server) handleBounces(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleMessage shows one message's full envelope and attempt history. The
-// path value is validated through spool.ParseID before it ever reaches a
+// path value is validated through queueid.Parse before it ever reaches a
 // query, per the rule that a queue ID is a validated type and never a raw
 // string.
 func (s *Server) handleMessage(w http.ResponseWriter, r *http.Request) {
-	id, err := spool.ParseID(r.PathValue("id"))
+	id, err := queueid.Parse(r.PathValue("id"))
 	if err != nil {
 		http.Error(w, "invalid queue id", http.StatusBadRequest)
 		return
 	}
-	msg, err := s.store.FindMessageByID(id.String())
+	msg, err := s.store.FindMessageByID(id)
 	if err != nil {
 		s.serverError(w, "message", err)
 		return

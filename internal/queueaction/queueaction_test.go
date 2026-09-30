@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/tokajer/smtprelayd/internal/queueid"
 	"github.com/tokajer/smtprelayd/internal/spool"
 	"github.com/tokajer/smtprelayd/internal/store"
 )
@@ -33,7 +34,7 @@ func testActor(t *testing.T) (*Actor, *spool.Spool, *store.Store) {
 
 // queued puts one message in the spool and in history, the way the listener
 // does when it accepts a submission.
-func queued(t *testing.T, sp *spool.Spool, st *store.Store) spool.ID {
+func queued(t *testing.T, sp *spool.Spool, st *store.Store) queueid.ID {
 	t.Helper()
 	now := time.Now().UTC()
 	env := spool.Envelope{From: "device@example.at", To: []string{"ops@example.net"},
@@ -44,7 +45,7 @@ func queued(t *testing.T, sp *spool.Spool, st *store.Store) spool.ID {
 		t.Fatal(err)
 	}
 	if err := st.RecordMessage(store.MessageRecord{
-		QueueID: id.String(), Client: "printers", Route: "m365",
+		QueueID: id, Origin: "printers", Route: "m365",
 		EnvelopeFrom: "device@example.at", Recipients: []string{"ops@example.net"},
 		Listener: "smtp", RemoteAddr: "10.10.5.9",
 		ReceivedAt: now, ExpiresAt: now.Add(time.Hour),
@@ -69,7 +70,7 @@ func TestDeleteOutcomes(t *testing.T) {
 			t.Error("the spool copy survived")
 		}
 		// History is kept by design; only retention ever purges a row.
-		if msg, err := st.FindMessageByID(id.String()); err != nil || msg == nil {
+		if msg, err := st.FindMessageByID(id); err != nil || msg == nil {
 			t.Error("the history row was removed, which delete must not do")
 		}
 	})
@@ -89,7 +90,7 @@ func TestDeleteOutcomes(t *testing.T) {
 
 	t.Run("nothing anywhere", func(t *testing.T) {
 		a, _, _ := testActor(t)
-		if got := a.Delete(spool.ID("AAAAAAAAAAAAAAAA"), "dashboard", "127.0.0.1", ""); got != Missing {
+		if got := a.Delete(queueid.ID("AAAAAAAAAAAAAAAA"), "dashboard", "127.0.0.1", ""); got != Missing {
 			t.Fatalf("outcome %v, want Missing", got)
 		}
 	})
@@ -112,6 +113,19 @@ func TestRequeueOutcomes(t *testing.T) {
 		id := queued(t, sp, st)
 		if got := a.Requeue(id, "dashboard", "127.0.0.1", ""); got != Done {
 			t.Fatalf("outcome %v, want Done", got)
+		}
+		// A successful requeue must be recorded, or the message reads
+		// "bounced" in the history views until its next real delivery
+		// attempt overwrites last_class.
+		msg, err := st.FindMessageByID(id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if msg == nil || len(msg.Attempts) == 0 {
+			t.Fatal("no attempt was journalled for the requeue")
+		}
+		if last := msg.Attempts[len(msg.Attempts)-1]; last.Class != store.ClassRequeued {
+			t.Errorf("journalled class = %q, want %q", last.Class, store.ClassRequeued)
 		}
 	})
 
@@ -152,7 +166,7 @@ func TestAuditRecordsWhoActed(t *testing.T) {
 	if got := a.Delete(id, "ops-token", "10.0.0.5", "bulk"); got != Done {
 		t.Fatalf("outcome %v, want Done", got)
 	}
-	entries, err := st.FindAuditByQueueID(id.String())
+	entries, err := st.FindAuditByQueueID(id)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -170,10 +184,10 @@ func TestAuditRecordsWhoActed(t *testing.T) {
 	}
 
 	// A requeue of something that is not there changed nothing.
-	if got := a.Requeue(spool.ID("BBBBBBBBBBBBBBBB"), "ops-token", "10.0.0.5", ""); got != Missing {
+	if got := a.Requeue(queueid.ID("BBBBBBBBBBBBBBBB"), "ops-token", "10.0.0.5", ""); got != Missing {
 		t.Fatal("expected Missing")
 	}
-	if entries, err := st.FindAuditByQueueID("BBBBBBBBBBBBBBBB"); err != nil || len(entries) != 0 {
+	if entries, err := st.FindAuditByQueueID(queueid.ID("BBBBBBBBBBBBBBBB")); err != nil || len(entries) != 0 {
 		t.Errorf("an action that changed nothing was audited: %d entries", len(entries))
 	}
 }
@@ -185,23 +199,26 @@ func TestAuditRecordsWhoActed(t *testing.T) {
 // 404 an unreconciled message would have produced.
 type failingJournal struct{ err error }
 
-func (j failingJournal) RecordRemoval(string) error { return j.err }
-func (j failingJournal) ReconcileRemoved(string) (bool, error) {
+func (j failingJournal) RecordRemoval(queueid.ID) error { return j.err }
+func (j failingJournal) RecordRequeue(queueid.ID) error { return j.err }
+func (j failingJournal) ReconcileRemoved(queueid.ID) (bool, error) {
 	return false, j.err
 }
-func (j failingJournal) RecordAudit(_, _, _, _, _ string) error { return j.err }
+func (j failingJournal) RecordAudit(_, _, _ string, _ queueid.ID, _ string) error { return j.err }
 
 // emptyQueue holds nothing, so every action against it reports ErrNotFound.
+// It never succeeds, so committed is never invoked -- but taking the
+// parameter is what a real Queue.Requeue implementation must do.
 type emptyQueue struct{}
 
-func (emptyQueue) Requeue(spool.ID) error { return spool.ErrNotFound }
-func (emptyQueue) Discard(spool.ID) error { return spool.ErrNotFound }
+func (emptyQueue) Requeue(_ queueid.ID, committed func()) error { return spool.ErrNotFound }
+func (emptyQueue) Discard(queueid.ID) error                     { return spool.ErrNotFound }
 
 func TestDeleteReportsFailedWhenReconciliationCannotBeWritten(t *testing.T) {
 	a := New(emptyQueue{}, failingJournal{err: errors.New("database is locked")},
 		slog.New(slog.NewTextHandler(io.Discard, nil)))
 
-	id, err := spool.ParseID("AAAAAAAAAAAAAAAA")
+	id, err := queueid.Parse("AAAAAAAAAAAAAAAA")
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -1,12 +1,13 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Tokajer
 
-package bounce
+package expiry
 
 import (
 	"bytes"
 	"crypto/x509"
 	"encoding/pem"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -16,13 +17,43 @@ import (
 
 	"github.com/tokajer/smtprelayd/internal/certgen"
 	"github.com/tokajer/smtprelayd/internal/config"
-	"github.com/tokajer/smtprelayd/internal/expiry"
 )
+
+// countingNotifier is a fake expiry.Notifier: it counts calls instead of
+// actually queuing mail, so this package's tests do not have to depend on
+// internal/bounce (which imports internal/metrics, which imports
+// internal/expiry -- a real notifier here would be an import cycle).
+type countingNotifier struct{ sent int }
+
+func (n *countingNotifier) Notify(source, subject, bodyText string, now time.Time) error {
+	n.sent++
+	return nil
+}
+
+func discardLog() *slog.Logger {
+	return slog.New(slog.NewTextHandler(io.Discard, nil))
+}
+
+func baseCfg() *config.Config {
+	return &config.Config{
+		Queue:   config.Queue{MaxLifetimeHours: 96},
+		History: config.History{RetainSubjects: true},
+		Bounce: config.Bounce{
+			Sender: "bounce@example.at", NotifyRoute: "m365",
+			DigestMinutes: 15, MaxPerHour: 2,
+			Notify: []string{"ops@example.at"},
+		},
+		Clients: []config.Client{
+			{Name: "printers", Route: "m365"},
+			{Name: "erp", Route: "m365", Bounce: config.ClientBounce{Notify: []string{"erp-admins@example.at"}}},
+		},
+	}
+}
 
 // certExpiringIn writes a real certificate to disk, expiring at the given
 // offset from now, and returns both its path (for cfg.TLS.CertFile) and its
 // parsed leaf (what cmd/smtprelayd's loadCertificate would hand to
-// expiry.Items as the served certificate).
+// Items as the served certificate).
 func certExpiringIn(t *testing.T, d time.Duration) (path string, leaf *x509.Certificate) {
 	t.Helper()
 	certPEM, _, err := certgen.Generate(certgen.Options{Hosts: []string{"relay"}, Validity: d})
@@ -46,10 +77,10 @@ func certExpiringIn(t *testing.T, d time.Duration) (path string, leaf *x509.Cert
 
 // watcherFor builds a watcher over the deadlines computed from cfg and the
 // served certificate, the way cmd/smtprelayd's serve does once at startup.
-func watcherFor(t *testing.T, cfg *config.Config, leaf *x509.Certificate) *ExpiryWatcher {
+func watcherFor(t *testing.T, cfg *config.Config, leaf *x509.Certificate) *Watcher {
 	t.Helper()
-	// A nil notifier is fine for collect and compose: they never send.
-	return NewExpiryWatcher(cfg, expiry.Items(cfg, leaf), nil, discardLog())
+	// A nil Notifier is fine for collect and compose: they never send.
+	return NewWatcher(cfg, Items(cfg, leaf), nil, discardLog())
 }
 
 // warn_days is the lead time, so raising it must pull a distant deadline into
@@ -119,8 +150,8 @@ func TestAnItemIsNotRepeatedWithinTheResendInterval(t *testing.T) {
 	certFile, leaf := certExpiringIn(t, 10*24*time.Hour)
 	cfg.TLS = config.TLS{CertFile: certFile}
 	cfg.Expiry = config.Expiry{WarnDays: 30}
-	n, sp, _ := testNotifier(t, cfg)
-	w := NewExpiryWatcher(cfg, expiry.Items(cfg, leaf), n, discardLog())
+	n := &countingNotifier{}
+	w := NewWatcher(cfg, Items(cfg, leaf), n, discardLog())
 	now := time.Now()
 
 	for _, step := range []struct {
@@ -133,8 +164,8 @@ func TestAnItemIsNotRepeatedWithinTheResendInterval(t *testing.T) {
 		{25 * time.Hour, 2}, // a day on, it is due again
 	} {
 		w.check(now.Add(step.after))
-		if got := sp.Len(); got != step.want {
-			t.Fatalf("after check at +%v: %d warning(s) queued, want %d", step.after, got, step.want)
+		if got := n.sent; got != step.want {
+			t.Fatalf("after check at +%v: %d warning(s) sent, want %d", step.after, got, step.want)
 		}
 	}
 }
@@ -151,7 +182,7 @@ func TestCheckLogsWithoutMailingWhenNoNotifyIsConfigured(t *testing.T) {
 		TLS:    config.TLS{CertFile: certFile},
 		Expiry: config.Expiry{WarnDays: 30},
 	}
-	w := NewExpiryWatcher(cfg, expiry.Items(cfg, leaf), nil, log)
+	w := NewWatcher(cfg, Items(cfg, leaf), nil, log)
 	w.check(time.Now())
 
 	out := buf.String()
@@ -165,7 +196,7 @@ func TestCheckLogsWithoutMailingWhenNoNotifyIsConfigured(t *testing.T) {
 
 func TestComposeExpiryNamesTheItemAndItsDeadline(t *testing.T) {
 	now := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
-	due := []expiry.Item{{
+	due := []Item{{
 		Key: "tls-certificate", What: "the listener TLS certificate",
 		Detail: "/etc/smtprelayd/tls/relay.crt", Expires: now.Add(7 * 24 * time.Hour),
 	}}
@@ -187,7 +218,7 @@ func TestComposeExpiryNamesTheItemAndItsDeadline(t *testing.T) {
 // An already-lapsed item must read as lapsed, not as "0 days left".
 func TestComposeExpiryMarksAnExpiredItem(t *testing.T) {
 	now := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
-	due := []expiry.Item{{
+	due := []Item{{
 		Key: "oauth2-secret:m365", What: `the Microsoft 365 client secret for route "m365"`,
 		Detail: "tenant contoso.onmicrosoft.com", Expires: now.Add(-3 * 24 * time.Hour),
 	}}
@@ -203,7 +234,7 @@ func TestComposeExpiryMarksAnExpiredItem(t *testing.T) {
 
 func TestComposeExpiryBatchesSeveralItems(t *testing.T) {
 	now := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
-	due := []expiry.Item{
+	due := []Item{
 		{Key: "a", What: "item A", Detail: "d", Expires: now.Add(2 * 24 * time.Hour)},
 		{Key: "b", What: "item B", Detail: "d", Expires: now.Add(9 * 24 * time.Hour)},
 	}

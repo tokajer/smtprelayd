@@ -21,6 +21,7 @@ import (
 	"github.com/tokajer/smtprelayd/internal/config"
 	"github.com/tokajer/smtprelayd/internal/expiry"
 	"github.com/tokajer/smtprelayd/internal/metrics"
+	"github.com/tokajer/smtprelayd/internal/queueid"
 	"github.com/tokajer/smtprelayd/internal/spool"
 	"github.com/tokajer/smtprelayd/internal/store"
 )
@@ -153,7 +154,7 @@ func TestAdminScopeCanRequeueAndAudits(t *testing.T) {
 		t.Fatalf("requeue: status = %d, body = %s", rec.Code, rec.Body.String())
 	}
 
-	entries, err := st.FindAuditByQueueID(id)
+	entries, err := st.FindAuditByQueueID(queueid.ID(id))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -174,7 +175,7 @@ func TestAdminScopeCanDeleteAndAudits(t *testing.T) {
 		t.Fatalf("spool still has %d messages after delete", sp.Len())
 	}
 
-	msg, err := st.FindMessageByID(id)
+	msg, err := st.FindMessageByID(queueid.ID(id))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -185,7 +186,7 @@ func TestAdminScopeCanDeleteAndAudits(t *testing.T) {
 		t.Fatalf("status = %q, want removed", msg.Status)
 	}
 
-	entries, err := st.FindAuditByQueueID(id)
+	entries, err := st.FindAuditByQueueID(queueid.ID(id))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -204,7 +205,7 @@ func TestDeleteClearsAMessageWithNoSpoolCopy(t *testing.T) {
 	const id = "GHOSTAPIAAAAAAAA"
 	now := time.Now()
 	if err := st.RecordMessage(store.MessageRecord{
-		QueueID: id, Client: "client", Route: "m365", EnvelopeFrom: "a@example.at",
+		QueueID: id, Origin: "client", Route: "m365", EnvelopeFrom: "a@example.at",
 		Recipients: []string{"b@example.net"}, Subject: "ghost", Listener: "smtp",
 		RemoteAddr: "10.0.0.1", ReceivedAt: now, ExpiresAt: now.Add(time.Hour),
 	}); err != nil {
@@ -376,6 +377,17 @@ func TestDashboardConvenienceStatusRejectedByAPI(t *testing.T) {
 	}
 }
 
+// docs/guides/API.md documents "removed" as a valid status for GET
+// /messages; validMessageStatus must accept it like every other status
+// store.ValidStatus does, not just the four it originally hand-listed.
+func TestRemovedStatusIsAccepted(t *testing.T) {
+	srv, _, _ := testServer(t)
+	rec := doReq(srv.Handler(), http.MethodGet, "/messages?status=removed", readToken)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 for the documented \"removed\" status", rec.Code)
+	}
+}
+
 // enqueueTestMessage puts one message in both the spool and the history
 // store, as the listener does, so requeue/delete tests exercise both layers
 // together rather than one in isolation.
@@ -387,7 +399,7 @@ func enqueueTestMessage(t *testing.T, st *store.Store, sp *spool.Spool, route st
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := st.RecordMessage(store.MessageRecord{QueueID: id.String(), Client: "client", Route: route, EnvelopeFrom: "a@example.at", OriginalFrom: "", Recipients: []string{"b@example.net"}, Subject: "Test", Listener: "smtp", RemoteAddr: "10.0.0.1", ReceivedAt: time.Now(), ExpiresAt: time.Now().Add(time.Hour), TLSUsed: false}); err != nil {
+	if err := st.RecordMessage(store.MessageRecord{QueueID: id, Origin: "client", Route: route, EnvelopeFrom: "a@example.at", OriginalFrom: "", Recipients: []string{"b@example.net"}, Subject: "Test", Listener: "smtp", RemoteAddr: "10.0.0.1", ReceivedAt: time.Now(), ExpiresAt: time.Now().Add(time.Hour), TLSUsed: false}); err != nil {
 		t.Fatal(err)
 	}
 	return id.String()

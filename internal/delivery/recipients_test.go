@@ -11,13 +11,14 @@ import (
 	"time"
 
 	"github.com/tokajer/smtprelayd/internal/delivery/smarthost"
+	"github.com/tokajer/smtprelayd/internal/queueid"
 	"github.com/tokajer/smtprelayd/internal/spool"
 	"github.com/tokajer/smtprelayd/internal/store"
 )
 
 // queueList spools one message addressed to several recipients on one route,
 // which is what router.Split produces for a distribution list.
-func queueList(t *testing.T, sp *spool.Spool, st *store.Store, to ...string) (spool.ID, *spool.Meta) {
+func queueList(t *testing.T, sp *spool.Spool, st *store.Store, to ...string) (queueid.ID, *spool.Meta) {
 	t.Helper()
 	now := time.Now().UTC()
 	env := spool.Envelope{
@@ -29,7 +30,7 @@ func queueList(t *testing.T, sp *spool.Spool, st *store.Store, to ...string) (sp
 		t.Fatal(err)
 	}
 	if err := st.RecordMessage(store.MessageRecord{
-		QueueID: id.String(), Client: "printers", Route: "smarthost",
+		QueueID: id, Origin: "printers", Route: "smarthost",
 		EnvelopeFrom: "device@example.at", Recipients: to,
 		Listener: "l", RemoteAddr: "127.0.0.1", ReceivedAt: now, ExpiresAt: now.Add(time.Hour),
 	}); err != nil {
@@ -68,7 +69,7 @@ func TestOneDeadRecipientDoesNotStopTheOthers(t *testing.T) {
 
 	// The refusal has to survive somewhere an operator looks, or a mail that
 	// did not arrive has no trace at all.
-	msg, err := st.FindMessageByID(id.String())
+	msg, err := st.FindMessageByID(id)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -134,7 +135,7 @@ func TestAFullDeliveryRecordsNoRefusal(t *testing.T) {
 
 	m.attempt(context.Background(), meta)
 
-	msg, err := st.FindMessageByID(id.String())
+	msg, err := st.FindMessageByID(id)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -217,7 +218,7 @@ func TestEveryRefusedRecipientIsRecorded(t *testing.T) {
 
 	m.attempt(context.Background(), meta)
 
-	msg, err := st.FindMessageByID(id.String())
+	msg, err := st.FindMessageByID(id)
 	if err != nil {
 		t.Fatal(err)
 	}

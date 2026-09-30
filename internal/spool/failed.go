@@ -9,6 +9,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/tokajer/smtprelayd/internal/queueid"
 )
 
 // spool/failed: what a permanently failed message costs on disk, how it gets
@@ -47,22 +49,22 @@ type failedStore struct {
 	dir string
 
 	mu    sync.Mutex
-	index map[ID]failedEntry
+	index map[queueid.ID]failedEntry
 	bytes int64
 	ttl   time.Duration
 }
 
 func newFailedStore(dir string) *failedStore {
-	return &failedStore{dir: dir, index: map[ID]failedEntry{}}
+	return &failedStore{dir: dir, index: map[queueid.ID]failedEntry{}}
 }
 
 // path is the name of one of a failed message's two files.
-func (f *failedStore) path(id ID, ext string) string {
+func (f *failedStore) path(id queueid.ID, ext string) string {
 	return filepath.Join(f.dir, id.String()+ext)
 }
 
 // put records a message now sitting in spool/failed.
-func (f *failedStore) put(id ID, e failedEntry) {
+func (f *failedStore) put(id queueid.ID, e failedEntry) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if old, ok := f.index[id]; ok {
@@ -73,7 +75,7 @@ func (f *failedStore) put(id ID, e failedEntry) {
 }
 
 // drop removes a message from the mirror, reporting what it had been costing.
-func (f *failedStore) drop(id ID) (failedEntry, bool) {
+func (f *failedStore) drop(id queueid.ID) (failedEntry, bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	e, ok := f.index[id]
@@ -85,7 +87,7 @@ func (f *failedStore) drop(id ID) (failedEntry, bool) {
 }
 
 // has reports whether spool/failed still holds this message.
-func (f *failedStore) has(id ID) bool {
+func (f *failedStore) has(id queueid.ID) bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	_, ok := f.index[id]
@@ -122,7 +124,7 @@ func (f *failedStore) reindex() error {
 		if !strings.HasSuffix(name, ".json") {
 			continue
 		}
-		id, err := ParseID(strings.TrimSuffix(name, ".json"))
+		id, err := queueid.Parse(strings.TrimSuffix(name, ".json"))
 		if err != nil {
 			continue
 		}
@@ -166,7 +168,7 @@ func (f *failedStore) sweep(now time.Time) (removed int, freed int64) {
 		f.mu.Unlock()
 		return 0, 0
 	}
-	var expired []ID
+	var expired []queueid.ID
 	for id, e := range f.index {
 		if now.Sub(e.at) > ttl {
 			expired = append(expired, id)

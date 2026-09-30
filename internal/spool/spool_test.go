@@ -14,6 +14,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/tokajer/smtprelayd/internal/queueid"
 )
 
 func TestEnqueueClaimRemove(t *testing.T) {
@@ -188,7 +190,7 @@ func TestRequeueFromFailedResetsAttemptsAndMovesFiles(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := s.Requeue(id); err != nil {
+	if err := s.Requeue(id, nil); err != nil {
 		t.Fatalf("Requeue: %v", err)
 	}
 
@@ -231,7 +233,7 @@ func TestRequeueActiveMessageResetsAttempts(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := s.Requeue(id); err != nil {
+	if err := s.Requeue(id, nil); err != nil {
 		t.Fatalf("Requeue: %v", err)
 	}
 	got, ok := s.Claim(time.Now())
@@ -243,11 +245,11 @@ func TestRequeueActiveMessageResetsAttempts(t *testing.T) {
 func TestRequeueUnknownIDReturnsNotFound(t *testing.T) {
 	dir := t.TempDir()
 	s, _ := Open(dir)
-	id, err := NewID()
+	id, err := queueid.New()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := s.Requeue(id); err != ErrNotFound {
+	if err := s.Requeue(id, nil); err != ErrNotFound {
 		t.Fatalf("got %v, want ErrNotFound", err)
 	}
 }
@@ -262,7 +264,7 @@ func TestRequeueAndDiscardRefuseALeasedMessage(t *testing.T) {
 	if _, ok := s.Claim(time.Now()); !ok {
 		t.Fatal("claim failed")
 	}
-	if err := s.Requeue(id); err != ErrBusy {
+	if err := s.Requeue(id, nil); err != ErrBusy {
 		t.Fatalf("Requeue on a leased message: got %v, want ErrBusy", err)
 	}
 	if err := s.Discard(id); err != ErrBusy {
@@ -335,7 +337,7 @@ func TestHasCoversQueuedFailedAndDiscarded(t *testing.T) {
 	if s.Has(id) {
 		t.Fatal("a discarded message still reported as present")
 	}
-	if s.Has(ID("../../etc/passwd")) {
+	if s.Has(queueid.ID("../../etc/passwd")) {
 		t.Fatal("an invalid queue id reported as present")
 	}
 }
@@ -343,7 +345,7 @@ func TestHasCoversQueuedFailedAndDiscarded(t *testing.T) {
 func TestDiscardUnknownIDReturnsNotFound(t *testing.T) {
 	dir := t.TempDir()
 	s, _ := Open(dir)
-	id, err := NewID()
+	id, err := queueid.New()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -372,7 +374,7 @@ func TestQueueDepthOldestQueuedTracksEarliestClaimable(t *testing.T) {
 
 // enqueueAndFail puts one message through the queue and into spool/failed,
 // which is where the quota used to lose sight of it.
-func enqueueAndFail(t *testing.T, s *Spool, body string) ID {
+func enqueueAndFail(t *testing.T, s *Spool, body string) queueid.ID {
 	t.Helper()
 	env := Envelope{From: "a@example.at", To: []string{"b@example.net"}, Origin: "c", Route: "r",
 		Received: time.Now().UTC()}
@@ -418,10 +420,10 @@ func TestFailedMessagesStillCountTowardsTheQuota(t *testing.T) {
 func TestQuotaIsReleasedWhenFailedFilesGo(t *testing.T) {
 	for _, tc := range []struct {
 		name string
-		out  func(*Spool, ID) error
+		out  func(*Spool, queueid.ID) error
 	}{
-		{"discard", func(s *Spool, id ID) error { return s.Discard(id) }},
-		{"requeue", func(s *Spool, id ID) error { return s.Requeue(id) }},
+		{"discard", func(s *Spool, id queueid.ID) error { return s.Discard(id) }},
+		{"requeue", func(s *Spool, id queueid.ID) error { return s.Requeue(id, nil) }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			s, err := Open(t.TempDir())
@@ -972,7 +974,7 @@ func TestRequeueFromFailedPutsTheBodyBackWhenTheMetadataWriteFails(t *testing.T)
 	// the body's two renames.
 	obstruct(t, filepath.Join(dir, "spool", "tmp", id.String()+".json"))
 
-	if err := s.Requeue(id); err == nil {
+	if err := s.Requeue(id, nil); err == nil {
 		t.Fatal("Requeue reported success without writing the metadata")
 	}
 	failedBody := filepath.Join(dir, "spool", "failed", id.String()+".eml")
@@ -995,7 +997,7 @@ func TestRequeueFromFailedPutsTheBodyBackWhenTheMetadataWriteFails(t *testing.T)
 	if err := os.RemoveAll(filepath.Join(dir, "spool", "tmp", id.String()+".json")); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.Requeue(id); err != nil {
+	if err := s.Requeue(id, nil); err != nil {
 		t.Fatalf("the message could not be requeued after the obstruction went: %v", err)
 	}
 	if !s.Has(id) {
@@ -1015,7 +1017,7 @@ func TestClaimReturnsTheOldestDueMessage(t *testing.T) {
 	base := time.Now().UTC().Add(-time.Hour)
 	// Enqueued youngest first, so insertion order cannot stand in for the
 	// answer and neither can map iteration order.
-	want := make([]ID, 3)
+	want := make([]queueid.ID, 3)
 	for i, age := range []time.Duration{0, time.Minute, 2 * time.Minute} {
 		env := Envelope{From: "a@example.at", To: []string{"b@example.net"},
 			Origin: "c", Route: "r", Received: base.Add(-age)}
@@ -1104,7 +1106,7 @@ func TestConcurrentRequeueResolvesToOne(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			results <- s.Requeue(id)
+			results <- s.Requeue(id, nil)
 		}()
 	}
 	wg.Wait()
@@ -1156,7 +1158,7 @@ func TestClaimBatchReturnsTheGloballyOldest(t *testing.T) {
 		t.Fatal(err)
 	}
 	base := time.Now().UTC().Add(-time.Hour)
-	want := make([]ID, 0, 5)
+	want := make([]queueid.ID, 0, 5)
 	for i := 0; i < 50; i++ {
 		env := Envelope{From: "a@example.at", To: []string{"b@example.net"}, Origin: "c", Route: "r",
 			Received: base.Add(time.Duration(i) * time.Minute)}
@@ -1259,13 +1261,13 @@ func TestConcurrentCommitsCannotOvershootTheQuota(t *testing.T) {
 
 // leasedFor and enqueueOneForTest keep the assertions above off the spool's
 // internals beyond the one lock they have to take.
-func (s *Spool) leasedFor(id ID) bool {
+func (s *Spool) leasedFor(id queueid.ID) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.leased[id]
 }
 
-func enqueueOneForTest(t *testing.T, s *Spool) ID {
+func enqueueOneForTest(t *testing.T, s *Spool) queueid.ID {
 	t.Helper()
 	env := Envelope{From: "a@example.at", To: []string{"b@example.net"}, Origin: "c", Route: "r",
 		Received: time.Now().UTC()}
@@ -1532,16 +1534,16 @@ func TestRecoverReadsEveryBatch(t *testing.T) {
 	}
 }
 
-// loadIDForTest builds a queue id from a counter, in the alphabet ParseID
+// loadIDForTest builds a queue id from a counter, in the alphabet queueid.Parse
 // accepts. Ids outside it are skipped by recover, which would make the test
 // above pass for the wrong reason.
-func loadIDForTest(i int) ID {
+func loadIDForTest(i int) queueid.ID {
 	const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567"
 	var b [16]byte
 	for k := 0; k < 16; k++ {
 		b[k] = alphabet[(i>>(5*k))&31]
 	}
-	return ID(b[:])
+	return queueid.ID(b[:])
 }
 
 // Envelope.Origin was called Client until 2026-09-21 and kept the old JSON
@@ -1580,7 +1582,7 @@ func TestPreRenameMetadataRecoversItsOrigin(t *testing.T) {
 	if _, err := Open(dir); err != nil {
 		t.Fatal(err)
 	}
-	id, err := NewID()
+	id, err := queueid.New()
 	if err != nil {
 		t.Fatal(err)
 	}

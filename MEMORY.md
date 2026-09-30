@@ -58,6 +58,45 @@ libraries that do not exist understated it in the one direction that matters.
 
 ## 3. Component layout
 
+**Amended 2026-09-30, second pass.** A third architectural review, acted on
+in full. Structure: `internal/queueid` is a new stdlib-only leaf holding the
+queue ID type, so `internal/store`, the consumer-side `Journal` interfaces,
+`delivery.FailRecorder` and the bounce notifier take `queueid.ID` instead of
+a string -- the rule in CLAUDE.md now holds past the spool. The spool/failed
+sweep, history retention and quota warning moved from `internal/delivery` to
+`internal/housekeeping` (still logging as `component=delivery`), and the
+expiry watcher from `internal/bounce` to `internal/expiry` (`expiry.Watcher`,
+behind a one-method `Notifier` interface). `listener` takes a consumer-side
+`Queue` interface, which is what made the multi-route withdraw testable end
+to end. `store.CommonFilter` is embedded in both filter types and parsed once
+by `httpx.ParseCommonFilter`. `config.Normalize` now also owns the hostname
+fallback and route-domain lowercasing; `Validate` writes nothing else.
+
+Decided the same day, schema-adjacent: **an operator requeue is journaled as
+an attempt row of class `requeued`**, which reads as status `queued`.
+Without it a requeued bounce kept `last_class = permanent` and was missing
+from the queue view while live in the spool. The row is written while the
+spool still holds the message's lease (`Spool.Requeue`'s `committed`
+callback), so no delivery attempt can be journaled ahead of it. It does not
+count towards `attempt_count` and leaves the last SMTP code and response in
+place; the bounce digest reports the last permanent or expired attempt, not
+the last row.
+
+Observable consequences: an implicit-TLS connection gets a handshake deadline
+and is admitted (per-client and per-source caps) before the handshake; a
+refusal written before the handshake is bounded at five seconds. A message
+failed before any attempt (route no longer configured, body unreadable) now
+gets a `permanent` history row and counts as bounced. An attempt cut short by
+shutdown is no longer recorded as a deferral and no longer spends a retry
+step. `Spool.Commit` wakes the dispatcher (debounced 100 ms), so a new
+message no longer waits for the 5 s tick. `withdraw` uses `Discard`, which
+honours the delivery lease. `/search` with an unknown status shows a filter
+error instead of answering 500; the API's `GET /messages` now accepts
+`status=removed`, as `docs/guides/API.md` already documented. The bounce list
+shows a row's current status when it is no longer bounced. The Configuration
+page renders every configuration field by reflection over the TOML tags;
+secrets still render only as `[redacted]`.
+
 **Amended 2026-09-30.** A second architectural review, acted on the same day.
 `internal/ostrust` is new: the ownership checks, the Windows data directory
 ACL and the DPAPI binding moved out of `internal/config`, so the package every
@@ -191,11 +230,14 @@ internal/listener     ports 25 / 587 / 465, STARTTLS, client matching by
                       source address, per-client connection caps -- no
                       inbound AUTH is offered
 internal/spool        durable on-disk queue, failed-message mirror, quota ledger
+internal/queueid      queue ID type and syntax, shared by spool, store and
+                      the HTTP surfaces
 internal/mailaddr     address and domain syntax, shared by config and rewrite
 internal/rewrite      per-client sender rewriting, header-block parser
 internal/router       recipient domain -> route
 internal/ratelimit    per-minute token bucket, shared by listener and delivery
 internal/delivery     worker pool, backoff, per-route concurrency
+internal/housekeeping spool/failed sweep, history retention, quota warning
 internal/delivery/smarthost  SMTP client, PLAIN / LOGIN / XOAUTH2
 internal/authms365    Entra ID token acquisition and caching
 internal/store        SQLite message and attempt history
@@ -204,7 +246,8 @@ internal/metrics      in-memory counters, Status() read model,
                       Prometheus text exposition (exposition.go)
 internal/api          JSON API, admin actions, audit log
 internal/bounce       bounce digest notification, loop prevention, volume cap
-internal/expiry       what is about to stop working: certificate, client secret
+internal/expiry       what is about to stop working: certificate, client secret;
+                      the daily watcher that mails about it
 internal/selfmail     spools mail the relay composed itself (digest, warning,
                       canary), so the three cannot drift apart
 internal/canary       periodic synthetic message per [[canary]] entry

@@ -17,6 +17,7 @@ import (
 	"github.com/tokajer/smtprelayd/internal/bounce"
 	"github.com/tokajer/smtprelayd/internal/config"
 	"github.com/tokajer/smtprelayd/internal/metrics"
+	"github.com/tokajer/smtprelayd/internal/queueid"
 	"github.com/tokajer/smtprelayd/internal/spool"
 	"github.com/tokajer/smtprelayd/internal/store"
 )
@@ -187,7 +188,7 @@ func managerAgainst(t *testing.T, f *fakeSmarthost) (*Manager, *spool.Spool, *st
 // first: store.RecordAttempt refuses an unknown queue ID, and attempt
 // deliberately ignores that error, so without this the outcome would be
 // written nowhere and the assertions would pass against an empty table.
-func queueOne(t *testing.T, sp *spool.Spool, st *store.Store, lifetime time.Duration) (spool.ID, *spool.Meta) {
+func queueOne(t *testing.T, sp *spool.Spool, st *store.Store, lifetime time.Duration) (queueid.ID, *spool.Meta) {
 	t.Helper()
 	now := time.Now().UTC()
 	env := spool.Envelope{From: "device@example.at", To: []string{"ops@example.net"},
@@ -197,7 +198,7 @@ func queueOne(t *testing.T, sp *spool.Spool, st *store.Store, lifetime time.Dura
 		t.Fatal(err)
 	}
 	if err := st.RecordMessage(store.MessageRecord{
-		QueueID: id.String(), Client: "printers", Route: "smarthost",
+		QueueID: id, Origin: "printers", Route: "smarthost",
 		EnvelopeFrom: "device@example.at", Recipients: []string{"ops@example.net"},
 		Listener: "l", RemoteAddr: "127.0.0.1", ReceivedAt: now, ExpiresAt: now.Add(lifetime),
 	}); err != nil {
@@ -210,9 +211,9 @@ func queueOne(t *testing.T, sp *spool.Spool, st *store.Store, lifetime time.Dura
 	return id, meta
 }
 
-func statusOf(t *testing.T, st *store.Store, id spool.ID) string {
+func statusOf(t *testing.T, st *store.Store, id queueid.ID) string {
 	t.Helper()
-	msg, err := st.FindMessageByID(id.String())
+	msg, err := st.FindMessageByID(id)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -293,6 +294,72 @@ func TestAttemptTemporaryFailureDefersWithBackoff(t *testing.T) {
 	}
 }
 
+// A queued message whose route was removed from the configuration between
+// being queued and being attempted must still get a journal row -- the two
+// paths that fail before ever reaching the smarthost used to leave none,
+// which made the dashboard show nothing for a message that provably existed.
+func TestAttemptUnknownRouteRecordsAPermanentJournalRow(t *testing.T) {
+	f := startFakeSmarthost(t, "250 2.0.0 accepted")
+	m, sp, st, _, _ := managerAgainst(t, f)
+	id, meta := queueOne(t, sp, st, time.Hour)
+	meta.Envelope.Route = "no-such-route"
+
+	m.attempt(context.Background(), meta)
+
+	msg, err := st.FindMessageByID(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if msg == nil || len(msg.Attempts) != 1 || msg.Attempts[0].Class != store.ClassPermanent {
+		t.Fatalf("journal row = %+v, want exactly one attempt of class permanent", msg)
+	}
+	if !sp.Has(id) {
+		t.Error("a message failed for an unknown route must still be kept under spool/failed")
+	}
+}
+
+// A context cancelled mid-attempt -- shutdown racing an in-flight send -- must
+// not be recorded as a delivery attempt: the smarthost connection failing
+// because the context expired is not the smarthost saying "try later", and
+// counting it would burn a retry step and write a spurious journal row on
+// every restart that catches a send in flight.
+func TestAttemptCancelledContextLeavesNoAttemptOrJournalRow(t *testing.T) {
+	f := startFakeSmarthost(t, "250 2.0.0 accepted")
+	m, sp, st, _, _ := managerAgainst(t, f)
+	id, meta := queueOne(t, sp, st, time.Hour)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	m.attempt(ctx, meta)
+
+	if meta.Attempts != 0 {
+		t.Errorf("attempts = %d after a cancelled attempt, want 0", meta.Attempts)
+	}
+	msg, err := st.FindMessageByID(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// queueOne already wrote the journal row via RecordMessage, so a nil
+	// result here means the row vanished, not that there was never one to
+	// check -- either way this must not pass silently.
+	if msg == nil {
+		t.Fatal("no journal row at all for a message that was queued and journalled before the attempt")
+	}
+	if len(msg.Attempts) != 0 {
+		t.Errorf("journal holds %d attempt row(s) for a cancelled attempt, want 0", len(msg.Attempts))
+	}
+	if !sp.Has(id) {
+		t.Error("a cancelled attempt must leave the message in the spool")
+	}
+	// The lease queueOne's Claim took must be cleared, or the message can
+	// never be attempted again.
+	claimed, ok := sp.Claim(time.Now())
+	if !ok || claimed.ID != id {
+		t.Errorf("message not claimable after a cancelled attempt: got %v, %v -- the lease was not cleared", claimed, ok)
+	}
+}
+
 // Past its lifetime a message is given up on even though the failure is
 // retryable: queue.max_lifetime_hours is what stops a permanently unreachable
 // smarthost from holding mail forever.
@@ -312,5 +379,64 @@ func TestAttemptPastExpiryIsGivenUpOn(t *testing.T) {
 	}
 	if got := statusOf(t, st, id); got != "bounced" {
 		t.Errorf("journal status %q, want bounced", got)
+	}
+}
+
+// Two paths fail a message before it is ever offered to a smarthost --
+// dispatchOne's own unknown-route check, ahead of claiming a worker slot, and
+// send's OpenBody failure -- and both go through failUnsendable. Both must
+// still leave the counter and the journal in the same state fail() leaves
+// them in for any other permanent failure, or an operator sees a message
+// that provably existed and produced no history row at all.
+func TestUnsendablePathsRecordAPermanentJournalRow(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		run  func(t *testing.T, m *Manager, sp *spool.Spool, meta *spool.Meta)
+	}{
+		{
+			name: "dispatchOne: unknown route",
+			run: func(t *testing.T, m *Manager, sp *spool.Spool, meta *spool.Meta) {
+				meta.Envelope.Route = "no-such-route"
+				if ok := m.dispatchOne(context.Background(), meta, map[string]bool{}); !ok {
+					t.Fatal("dispatchOne reported cancellation on a live context")
+				}
+			},
+		},
+		{
+			name: "send: unreadable body",
+			run: func(t *testing.T, m *Manager, sp *spool.Spool, meta *spool.Meta) {
+				// The metadata stays in meta (the caller's own copy); only the
+				// body backing it is gone, which is what OpenBody sees.
+				if err := sp.Remove(meta.ID); err != nil {
+					t.Fatal(err)
+				}
+				route, ok := m.cfg.Route(meta.Envelope.Route)
+				if !ok {
+					t.Fatal("route not found")
+				}
+				if _, ok := m.send(context.Background(), discardLog(), route, meta); ok {
+					t.Fatal("send reported success for an unreadable body")
+				}
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := startFakeSmarthost(t, "250 2.0.0 accepted")
+			m, sp, st, _, _ := managerAgainst(t, f)
+			id, meta := queueOne(t, sp, st, time.Hour)
+
+			tc.run(t, m, sp, meta)
+
+			if meta.Attempts != 1 {
+				t.Errorf("Attempts = %d, want 1", meta.Attempts)
+			}
+			msg, err := st.FindMessageByID(id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if msg == nil || len(msg.Attempts) != 1 || msg.Attempts[0].Class != store.ClassPermanent {
+				t.Fatalf("journal row = %+v, want exactly one attempt of class permanent", msg)
+			}
+		})
 	}
 }

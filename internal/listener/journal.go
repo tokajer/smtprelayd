@@ -8,9 +8,9 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/tokajer/smtprelayd/internal/queueid"
 	"github.com/tokajer/smtprelayd/internal/rewrite"
 	"github.com/tokajer/smtprelayd/internal/router"
-	"github.com/tokajer/smtprelayd/internal/spool"
 	"github.com/tokajer/smtprelayd/internal/store"
 )
 
@@ -67,10 +67,10 @@ func (s *session) journalMetaOf(headers string) journalMeta {
 // before the loop over route groups. size is the staged size rather than the
 // size the client announced, for the reason journalMetaOf reads the rewritten
 // headers.
-func (s *session) journalAccepted(id spool.ID, g router.Group, res rewrite.Result, meta journalMeta, received time.Time, size int64, lifetime time.Duration) {
+func (s *session) journalAccepted(id queueid.ID, g router.Group, res rewrite.Result, meta journalMeta, received time.Time, size int64, lifetime time.Duration) {
 	err := s.srv.store.RecordMessage(store.MessageRecord{
-		QueueID:      id.String(),
-		Client:       s.client.Name,
+		QueueID:      id,
+		Origin:       s.client.Name,
 		Route:        g.Route,
 		EnvelopeFrom: res.EnvelopeFrom,
 		OriginalFrom: res.OriginalFrom,

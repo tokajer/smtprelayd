@@ -14,12 +14,14 @@ import (
 	"sort"
 	"testing"
 	"time"
+
+	"github.com/tokajer/smtprelayd/internal/queueid"
 )
 
 // buildIndex fills the in-memory index the dispatcher works against, without
 // touching disk: this measures the data structure, not the filesystem.
 func buildIndex(n int) (*Spool, time.Time) {
-	s := &Spool{index: make(map[ID]*Meta, n), leased: map[ID]bool{}}
+	s := &Spool{index: make(map[queueid.ID]*Meta, n), leased: map[queueid.ID]bool{}}
 	base := time.Now().UTC().Add(-2 * time.Hour)
 	for i := 0; i < n; i++ {
 		id := loadID(i)

@@ -9,7 +9,7 @@ import (
 
 	"github.com/tokajer/smtprelayd/internal/httpx"
 	"github.com/tokajer/smtprelayd/internal/queueaction"
-	"github.com/tokajer/smtprelayd/internal/spool"
+	"github.com/tokajer/smtprelayd/internal/queueid"
 )
 
 // The dashboard's state-changing actions: requeue and delete, for one
@@ -21,48 +21,53 @@ import (
 // copy is gone, live in internal/queueaction: the JSON API makes exactly the
 // same decisions and the two must not drift apart. What stays here is how an
 // outcome becomes a redirect, a status code or a tally.
-//
-// The outcomes are named as queueaction.Done and so on rather than aliased
-// into a local vocabulary. The aliases read a little shorter here and cost a
-// reader of bulk.go two names for one enum, which is the worse trade for five
-// constants that are only ever switched on.
 
 // requeueMessage and deleteMessage name the acting party for the audit row.
 // The dashboard has no login, so every action it takes is "dashboard"; the
 // JSON API passes its token's name instead.
-func (s *Server) requeueMessage(r *http.Request, id spool.ID, details string) queueaction.Outcome {
+func (s *Server) requeueMessage(r *http.Request, id queueid.ID, details string) queueaction.Outcome {
 	return s.actions.Requeue(id, "dashboard", httpx.SourceAddr(r), details)
 }
 
-func (s *Server) deleteMessage(r *http.Request, id spool.ID, details string) queueaction.Outcome {
+func (s *Server) deleteMessage(r *http.Request, id queueid.ID, details string) queueaction.Outcome {
 	return s.actions.Delete(id, "dashboard", httpx.SourceAddr(r), details)
 }
 
-// messageAction is one of the two actions the message detail page offers.
-// The two handlers were the same twenty lines twice -- parse the id, verify
-// the CSRF token, switch on the outcome -- differing only in the CSRF action
-// name, which primitive they call and where a success redirects to. A value
-// carries those three, the way bulkAction does for the queue page's set
-// actions.
+// messageAction is one of the two actions the message detail page and the
+// queue page's bulk form both offer, kept as one type so a change to one of
+// its fields cannot drift out of step between the two forms.
 type messageAction struct {
-	// name is the CSRF action the form's token is scoped to. It is bound to
-	// the queue ID as well, so a token for one message cannot act on
-	// another; see csrf.go.
-	name     string
-	apply    func(*Server, *http.Request, spool.ID, string) queueaction.Outcome
-	redirect func(spool.ID) string
+	// name is the CSRF action the single-message form's token is scoped to
+	// (bound to the queue ID as well, so a token for one message cannot act
+	// on another; see csrf.go), and, as "queue-"+name, the bulk form's. It
+	// also names the bulk form's csrf_<name> field and the redirect's
+	// ?done= parameter that bulkFlash reads back.
+	name string
+
+	apply func(*Server, *http.Request, queueid.ID, string) queueaction.Outcome
+
+	// redirect names where a successful single-message action sends the
+	// operator. The bulk path ignores it: it always redirects to /queue with
+	// the tallied outcome instead.
+	redirect func(queueid.ID) string
+
+	// confirmAll marks a bulk action whose "all" scope is irreversible and so
+	// needs the confirmation interstitial's own field as well as the CSRF
+	// token. Meaningless for a single-message action, which always names one
+	// message.
+	confirmAll bool
 }
 
 var (
-	requeueOne = messageAction{
+	requeueAction = messageAction{
 		name: "requeue", apply: (*Server).requeueMessage,
-		redirect: func(id spool.ID) string { return "/messages/" + id.String() },
+		redirect: func(id queueid.ID) string { return "/messages/" + id.String() },
 	}
-	deleteOne = messageAction{
-		name: "delete", apply: (*Server).deleteMessage,
+	deleteAction = messageAction{
+		name: "delete", confirmAll: true, apply: (*Server).deleteMessage,
 		// Back to the queue rather than to a message that is no longer
 		// there to render.
-		redirect: func(spool.ID) string { return "/queue" },
+		redirect: func(queueid.ID) string { return "/queue" },
 	}
 )
 
@@ -72,17 +77,17 @@ var (
 // authenticate against, so loopback binding plus a per-process CSRF secret
 // is its trust boundary, distinct from the JSON API's bearer-token model.
 func (s *Server) handleRequeueAction(w http.ResponseWriter, r *http.Request) {
-	s.handleMessageAction(w, r, requeueOne)
+	s.handleMessageAction(w, r, requeueAction)
 }
 
 // handleDeleteAction removes a message from the spool, wherever it
 // currently sits, while retaining its history row.
 func (s *Server) handleDeleteAction(w http.ResponseWriter, r *http.Request) {
-	s.handleMessageAction(w, r, deleteOne)
+	s.handleMessageAction(w, r, deleteAction)
 }
 
 func (s *Server) handleMessageAction(w http.ResponseWriter, r *http.Request, a messageAction) {
-	id, err := spool.ParseID(r.PathValue("id"))
+	id, err := queueid.Parse(r.PathValue("id"))
 	if err != nil {
 		http.Error(w, "invalid queue id", http.StatusBadRequest)
 		return
@@ -97,7 +102,7 @@ func (s *Server) handleMessageAction(w http.ResponseWriter, r *http.Request, a m
 	// a message with no body cannot be requeued. Both are a success for the
 	// operator, so both redirect.
 	case queueaction.Done, queueaction.Cleared:
-		//#nosec G710 -- the destination is a fixed path plus a spool.ID that ParseID already validated; nothing from the request reaches it
+		//#nosec G710 -- the destination is a fixed path plus a queueid.ID that Parse already validated; nothing from the request reaches it
 		http.Redirect(w, r, a.redirect(id), http.StatusSeeOther)
 	case queueaction.Missing:
 		http.Error(w, "message not found", http.StatusNotFound)

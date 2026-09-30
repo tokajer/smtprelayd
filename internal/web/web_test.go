@@ -21,6 +21,7 @@ import (
 	"github.com/tokajer/smtprelayd/internal/config"
 	"github.com/tokajer/smtprelayd/internal/expiry"
 	"github.com/tokajer/smtprelayd/internal/metrics"
+	"github.com/tokajer/smtprelayd/internal/queueid"
 	"github.com/tokajer/smtprelayd/internal/spool"
 	"github.com/tokajer/smtprelayd/internal/store"
 )
@@ -144,7 +145,7 @@ func TestXSSShapedSubjectIsEscaped(t *testing.T) {
 	// does, so they are filled with the same payload here rather than
 	// trusting that a header is somehow safer than a subject.
 	if err := st.RecordMessage(store.MessageRecord{
-		QueueID: "XSSTESTAAAAAAAAA", Client: "printers", Route: "m365",
+		QueueID: "XSSTESTAAAAAAAAA", Origin: "printers", Route: "m365",
 		EnvelopeFrom: "relay@example.com", Recipients: []string{"user@example.com"},
 		Subject: evilSubject, Listener: "smtp", RemoteAddr: "10.10.5.5",
 		MessageID: evilSubject, ContentType: evilSubject, Helo: evilSubject,
@@ -179,7 +180,7 @@ func TestSubjectRedactedWhenRetentionDisabled(t *testing.T) {
 	// store.RecordMessage itself already redacts when retain_subjects is
 	// false, so this proves the display layer's fallback matches, not that
 	// it does the only redaction.
-	if err := st.RecordMessage(store.MessageRecord{QueueID: "REDACTEDAAAAAAAA", Client: "printers", Route: "m365", EnvelopeFrom: "relay@example.com", OriginalFrom: "", Recipients: []string{"user@example.com"}, Subject: "should never appear", Listener: "smtp", RemoteAddr: "10.10.5.5", ReceivedAt: now, ExpiresAt: now.Add(time.Hour), TLSUsed: false}); err != nil {
+	if err := st.RecordMessage(store.MessageRecord{QueueID: "REDACTEDAAAAAAAA", Origin: "printers", Route: "m365", EnvelopeFrom: "relay@example.com", OriginalFrom: "", Recipients: []string{"user@example.com"}, Subject: "should never appear", Listener: "smtp", RemoteAddr: "10.10.5.5", ReceivedAt: now, ExpiresAt: now.Add(time.Hour), TLSUsed: false}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -228,8 +229,8 @@ func TestQueueStatusFilterOnlyShowsActiveMessages(t *testing.T) {
 	srv, st, _ := testServer(t, cfg, nil)
 
 	now := time.Now()
-	_ = st.RecordMessage(store.MessageRecord{QueueID: "QUEUEDAAAAAAAAAA", Client: "printers", Route: "m365", EnvelopeFrom: "relay@example.com", OriginalFrom: "", Recipients: []string{"user@example.com"}, Subject: "still queued", Listener: "smtp", RemoteAddr: "10.10.5.5", ReceivedAt: now, ExpiresAt: now.Add(time.Hour), TLSUsed: false})
-	_ = st.RecordMessage(store.MessageRecord{QueueID: "DELIVEREDAAAAAAA", Client: "printers", Route: "m365", EnvelopeFrom: "relay@example.com", OriginalFrom: "", Recipients: []string{"user@example.com"}, Subject: "already gone", Listener: "smtp", RemoteAddr: "10.10.5.5", ReceivedAt: now, ExpiresAt: now.Add(time.Hour), TLSUsed: false})
+	_ = st.RecordMessage(store.MessageRecord{QueueID: "QUEUEDAAAAAAAAAA", Origin: "printers", Route: "m365", EnvelopeFrom: "relay@example.com", OriginalFrom: "", Recipients: []string{"user@example.com"}, Subject: "still queued", Listener: "smtp", RemoteAddr: "10.10.5.5", ReceivedAt: now, ExpiresAt: now.Add(time.Hour), TLSUsed: false})
+	_ = st.RecordMessage(store.MessageRecord{QueueID: "DELIVEREDAAAAAAA", Origin: "printers", Route: "m365", EnvelopeFrom: "relay@example.com", OriginalFrom: "", Recipients: []string{"user@example.com"}, Subject: "already gone", Listener: "smtp", RemoteAddr: "10.10.5.5", ReceivedAt: now, ExpiresAt: now.Add(time.Hour), TLSUsed: false})
 	_ = st.RecordAttempt("DELIVEREDAAAAAAA", 1, 250, "ok", "delivered", nil)
 
 	rec := get(t, srv.Handler(), "/queue")
@@ -250,6 +251,22 @@ func TestSearchInvalidTimeRangeShowsErrorNotCrash(t *testing.T) {
 		t.Fatalf("status = %d, want 200 with an inline error", rec.Code)
 	}
 	if !strings.Contains(rec.Body.String(), "RFC 3339") {
+		t.Fatalf("expected a validation message:\n%s", rec.Body.String())
+	}
+}
+
+// An invalid status used to reach FindMessages, which errored on the unknown
+// value and turned into a 500 -- the same class of bug handleBounces already
+// guarded against for an invalid class. handleSearch must mirror it: render
+// the page with the filter error and skip the query, rather than crash.
+func TestSearchInvalidStatusShowsErrorNotCrash(t *testing.T) {
+	cfg := testConfig(t, "")
+	srv, _, _ := testServer(t, cfg, nil)
+	rec := get(t, srv.Handler(), "/search?status=bogus")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 with an inline error", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "status must be queued, deferred, delivered, bounced or removed") {
 		t.Fatalf("expected a validation message:\n%s", rec.Body.String())
 	}
 }
@@ -296,7 +313,7 @@ func TestMessagePageIncludesCSRFTokens(t *testing.T) {
 	cfg := testConfig(t, "")
 	srv, st, _ := testServer(t, cfg, nil)
 	now := time.Now()
-	if err := st.RecordMessage(store.MessageRecord{QueueID: "CSRFPAGEAAAAAAAA", Client: "printers", Route: "m365", EnvelopeFrom: "relay@example.com", OriginalFrom: "", Recipients: []string{"user@example.com"}, Subject: "s", Listener: "smtp", RemoteAddr: "10.10.5.5", ReceivedAt: now, ExpiresAt: now.Add(time.Hour), TLSUsed: false}); err != nil {
+	if err := st.RecordMessage(store.MessageRecord{QueueID: "CSRFPAGEAAAAAAAA", Origin: "printers", Route: "m365", EnvelopeFrom: "relay@example.com", OriginalFrom: "", Recipients: []string{"user@example.com"}, Subject: "s", Listener: "smtp", RemoteAddr: "10.10.5.5", ReceivedAt: now, ExpiresAt: now.Add(time.Hour), TLSUsed: false}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -326,10 +343,10 @@ func TestMessagePageHidesActionsForTerminalStatus(t *testing.T) {
 		{"TERMDELIVERED222", "delivered"},
 		{"TERMREMOVED22222", "removed"},
 	} {
-		if err := st.RecordMessage(store.MessageRecord{QueueID: tc.id, Client: "printers", Route: "m365", EnvelopeFrom: "relay@example.com", Recipients: []string{"user@example.com"}, Subject: "s", Listener: "smtp", RemoteAddr: "10.10.5.5", ReceivedAt: now, ExpiresAt: now.Add(time.Hour)}); err != nil {
+		if err := st.RecordMessage(store.MessageRecord{QueueID: queueid.ID(tc.id), Origin: "printers", Route: "m365", EnvelopeFrom: "relay@example.com", Recipients: []string{"user@example.com"}, Subject: "s", Listener: "smtp", RemoteAddr: "10.10.5.5", ReceivedAt: now, ExpiresAt: now.Add(time.Hour)}); err != nil {
 			t.Fatal(err)
 		}
-		if err := st.RecordAttempt(tc.id, 1, 0, "", tc.class, nil); err != nil {
+		if err := st.RecordAttempt(queueid.ID(tc.id), 1, 0, "", tc.class, nil); err != nil {
 			t.Fatal(err)
 		}
 
@@ -389,7 +406,7 @@ func TestRequeueActionSucceedsAndAudits(t *testing.T) {
 		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
 	}
 
-	entries, err := st.FindAuditByQueueID(id)
+	entries, err := st.FindAuditByQueueID(queueid.ID(id))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -411,7 +428,7 @@ func TestDeleteActionRemovesFromSpoolKeepsHistory(t *testing.T) {
 	if sp.Len() != 0 {
 		t.Fatalf("spool still has %d messages after delete", sp.Len())
 	}
-	msg, err := st.FindMessageByID(id)
+	msg, err := st.FindMessageByID(queueid.ID(id))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -427,7 +444,7 @@ func TestDeleteActionRemovesFromSpoolKeepsHistory(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, m := range active {
-		if m.QueueID == id {
+		if m.QueueID == queueid.ID(id) {
 			t.Fatal("deleted message still matches the /queue active filter")
 		}
 	}
@@ -444,7 +461,7 @@ func enqueueMessage(t *testing.T, st *store.Store, sp *spool.Spool, route string
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := st.RecordMessage(store.MessageRecord{QueueID: id.String(), Client: "client", Route: route, EnvelopeFrom: "a@example.at", OriginalFrom: "", Recipients: []string{"b@example.net"}, Subject: "Test", Listener: "smtp", RemoteAddr: "10.0.0.1", ReceivedAt: time.Now(), ExpiresAt: time.Now().Add(time.Hour), TLSUsed: false}); err != nil {
+	if err := st.RecordMessage(store.MessageRecord{QueueID: id, Origin: "client", Route: route, EnvelopeFrom: "a@example.at", OriginalFrom: "", Recipients: []string{"b@example.net"}, Subject: "Test", Listener: "smtp", RemoteAddr: "10.0.0.1", ReceivedAt: time.Now(), ExpiresAt: time.Now().Add(time.Hour), TLSUsed: false}); err != nil {
 		t.Fatal(err)
 	}
 	return id.String()
@@ -469,7 +486,7 @@ func recordGhost(t *testing.T, st *store.Store, id string) string {
 	t.Helper()
 	now := time.Now()
 	if err := st.RecordMessage(store.MessageRecord{
-		QueueID: id, Client: "printers", Route: "m365", EnvelopeFrom: "a@example.at",
+		QueueID: queueid.ID(id), Origin: "printers", Route: "m365", EnvelopeFrom: "a@example.at",
 		Recipients: []string{"b@example.net"}, Subject: "ghost", Listener: "smtp",
 		RemoteAddr: "10.10.5.5", ReceivedAt: now, ExpiresAt: now.Add(time.Hour),
 	}); err != nil {
@@ -566,7 +583,7 @@ func TestQueueBulkDeleteRemovesOnlySelected(t *testing.T) {
 		t.Fatalf("spool holds %d messages, want only the unselected one", sp.Len())
 	}
 	for _, id := range []string{gone1, gone2} {
-		msg, err := st.FindMessageByID(id)
+		msg, err := st.FindMessageByID(queueid.ID(id))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -574,7 +591,7 @@ func TestQueueBulkDeleteRemovesOnlySelected(t *testing.T) {
 			t.Fatalf("%s: history row is %+v, want a retained row with status removed", id, msg)
 		}
 	}
-	msg, err := st.FindMessageByID(keep)
+	msg, err := st.FindMessageByID(queueid.ID(keep))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -596,7 +613,7 @@ func TestQueueBulkRequeueSelectedAudits(t *testing.T) {
 	if rec.Code != http.StatusSeeOther {
 		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
 	}
-	entries, err := st.FindAuditByQueueID(id)
+	entries, err := st.FindAuditByQueueID(queueid.ID(id))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -676,14 +693,14 @@ func TestDeleteClearsAQueueRowWithNoSpoolCopy(t *testing.T) {
 	}
 
 	for _, id := range []string{single, bulk} {
-		msg, err := st.FindMessageByID(id)
+		msg, err := st.FindMessageByID(queueid.ID(id))
 		if err != nil {
 			t.Fatal(err)
 		}
 		if msg.Status != "removed" {
 			t.Fatalf("%s: status = %q, want removed", id, msg.Status)
 		}
-		entries, err := st.FindAuditByQueueID(id)
+		entries, err := st.FindAuditByQueueID(queueid.ID(id))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -716,7 +733,7 @@ func TestQueueBulkRequeueReportsMessagesWithNoSpoolCopy(t *testing.T) {
 	if loc := rec.Header().Get("Location"); !strings.Contains(loc, "missing=1") {
 		t.Fatalf("Location = %q, want missing=1", loc)
 	}
-	msg, err := st.FindMessageByID(id)
+	msg, err := st.FindMessageByID(queueid.ID(id))
 	if err != nil {
 		t.Fatal(err)
 	}

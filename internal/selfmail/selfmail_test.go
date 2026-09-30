@@ -167,7 +167,7 @@ func TestJournalRecordsWhatWasSpooled(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	m, err := st.FindMessageByID(id.String())
+	m, err := st.FindMessageByID(id)
 	if err != nil {
 		t.Fatal(err)
 	}

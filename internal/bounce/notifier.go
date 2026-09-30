@@ -13,6 +13,7 @@ import (
 
 	"github.com/tokajer/smtprelayd/internal/config"
 	"github.com/tokajer/smtprelayd/internal/metrics"
+	"github.com/tokajer/smtprelayd/internal/queueid"
 	"github.com/tokajer/smtprelayd/internal/selfmail"
 	"github.com/tokajer/smtprelayd/internal/spool"
 	"github.com/tokajer/smtprelayd/internal/store"
@@ -31,7 +32,7 @@ type Notifier struct {
 	log    *slog.Logger
 
 	mu      sync.Mutex
-	pending map[string][]string // client name -> queue IDs awaiting the next digest
+	pending map[string][]queueid.ID // origin -> queue IDs awaiting the next digest
 	// overflow counts the failures past maxPendingPerClient, whose IDs are
 	// not kept. The digest reports them as a number so its total still
 	// matches what actually failed.
@@ -47,7 +48,7 @@ func New(cfg *config.Config, sp *spool.Spool, st *store.Store, reg *metrics.Regi
 	return &Notifier{
 		cfg: cfg, store: st, mailer: selfmail.New(sp, st, reg, log.With("component", "bounce")),
 		log:     log.With("component", "bounce"),
-		pending: map[string][]string{}, overflow: map[string]int{}, hourStart: time.Now(),
+		pending: map[string][]queueid.ID{}, overflow: map[string]int{}, hourStart: time.Now(),
 	}
 }
 
@@ -64,14 +65,14 @@ const maxPendingPerClient = 10 * maxDigestEntries
 // digest. Callers must only invoke this when a message has actually been
 // moved to spool/failed — a merely deferred message has not failed yet, and
 // must not be recorded as a bounce.
-func (n *Notifier) RecordFail(client, queueID string) {
+func (n *Notifier) RecordFail(origin string, id queueid.ID) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
-	if len(n.pending[client]) >= maxPendingPerClient {
-		n.overflow[client]++
+	if len(n.pending[origin]) >= maxPendingPerClient {
+		n.overflow[origin]++
 		return
 	}
-	n.pending[client] = append(n.pending[client], queueID)
+	n.pending[origin] = append(n.pending[origin], id)
 }
 
 // Pending reports how many failures are currently queued for the next
@@ -122,9 +123,9 @@ func (n *Notifier) Flush() { n.dispatch(time.Now()) }
 // bounce.notify override if it set one, otherwise the global bounce.notify
 // list. Config validation guarantees no client sets any other bounce.* field,
 // so this is the only override that can apply.
-func (n *Notifier) recipientsFor(client string) []string {
+func (n *Notifier) recipientsFor(origin string) []string {
 	for _, cl := range n.cfg.Clients {
-		if cl.Name == client && len(cl.Bounce.Notify) > 0 {
+		if cl.Name == origin && len(cl.Bounce.Notify) > 0 {
 			return cl.Bounce.Notify
 		}
 	}
@@ -140,12 +141,12 @@ func (n *Notifier) dispatch(now time.Time) {
 	}
 	pending := n.pending
 	overflow := n.overflow
-	n.pending = map[string][]string{}
+	n.pending = map[string][]queueid.ID{}
 	n.overflow = map[string]int{}
 	n.mu.Unlock()
 
-	for client, ids := range pending {
-		recipients := n.recipientsFor(client)
+	for origin, ids := range pending {
+		recipients := n.recipientsFor(origin)
 		if len(recipients) == 0 {
 			// Notifications are effectively disabled for this client: no
 			// global list and no override. The failures are not retried
@@ -165,13 +166,13 @@ func (n *Notifier) dispatch(now time.Time) {
 			// Recorded for the next hour rather than dropped, per the
 			// volume cap's design: exceeding it suppresses sending, not
 			// the underlying record of what failed.
-			n.requeuePending(client, ids, overflow[client])
+			n.requeuePending(origin, ids, overflow[origin])
 			n.log.Warn("bounce notification suppressed: hourly volume cap reached",
-				"client", client, "queued_failures", len(ids)+overflow[client])
+				"client", origin, "queued_failures", len(ids)+overflow[origin])
 			continue
 		}
 
-		if err := n.send(client, recipients, ids, overflow[client], now); err != nil {
+		if err := n.send(origin, recipients, ids, overflow[origin], now); err != nil {
 			// Put back, for the same reason the volume cap puts its own back:
 			// no mail went out, so the record of what failed must not go with
 			// it. A spool full enough to reject a digest, or a store that
@@ -187,8 +188,8 @@ func (n *Notifier) dispatch(now time.Time) {
 				n.sentThisHour--
 			}
 			n.mu.Unlock()
-			n.requeuePending(client, ids, overflow[client])
-			n.log.Error("sending bounce digest failed", "client", client, "error", err)
+			n.requeuePending(origin, ids, overflow[origin])
+			n.log.Error("sending bounce digest failed", "client", origin, "error", err)
 		}
 	}
 }
@@ -198,16 +199,16 @@ func (n *Notifier) dispatch(now time.Time) {
 // overflow instead of kept, so the digest's total stays honest and a client
 // whose digests keep being suppressed or keep failing cannot grow this
 // without limit.
-func (n *Notifier) requeuePending(client string, ids []string, overflow int) {
+func (n *Notifier) requeuePending(origin string, ids []queueid.ID, overflow int) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
-	room := max(maxPendingPerClient-len(n.pending[client]), 0)
+	room := max(maxPendingPerClient-len(n.pending[origin]), 0)
 	if len(ids) > room {
 		overflow += len(ids) - room
 		ids = ids[:room]
 	}
-	n.pending[client] = append(n.pending[client], ids...)
-	n.overflow[client] += overflow
+	n.pending[origin] = append(n.pending[origin], ids...)
+	n.overflow[origin] += overflow
 }
 
 // maxDigestEntries bounds how many failures one digest lists in full.
@@ -233,12 +234,12 @@ const maxDigestEntries = 200
 // Notification flag (so the delivery manager never treats its own failure
 // as another bounce to notify about), and never having passed through the
 // listener at all, which is what keeps it out of sender rewriting.
-func (n *Notifier) send(client string, recipients, ids []string, overflow int, now time.Time) error {
+func (n *Notifier) send(origin string, recipients []string, ids []queueid.ID, overflow int, now time.Time) error {
 	total := len(ids) + overflow
-	subject := fmt.Sprintf("[smtprelayd] %d delivery failure(s) for %s", total, client)
+	subject := fmt.Sprintf("[smtprelayd] %d delivery failure(s) for %s", total, origin)
 
 	var body strings.Builder
-	fmt.Fprintf(&body, "%d message(s) from client %q could not be delivered:\r\n", total, client)
+	fmt.Fprintf(&body, "%d message(s) from client %q could not be delivered:\r\n", total, origin)
 
 	listed := ids
 	if len(listed) > maxDigestEntries {
@@ -256,11 +257,19 @@ func (n *Notifier) send(client string, recipients, ids []string, overflow int, n
 		// where it was consolidated to precisely so that no caller has to
 		// remember. Re-applying it here was a fourth copy of the policy that
 		// happened to agree.
+		// The last attempt is not necessarily the one that failed: a message
+		// requeued after RecordFail put it in this digest but before the
+		// digest went out now has a trailing "requeued" (or later) attempt
+		// with no code, which would otherwise report "Response: 0" for a
+		// message that did in fact bounce. Walk back to the attempt that
+		// actually failed permanently.
 		var code int
 		var resp string
-		if len(msg.Attempts) > 0 {
-			last := msg.Attempts[len(msg.Attempts)-1]
-			code, resp = last.SMTPCode, last.SMTPResp
+		for i := len(msg.Attempts) - 1; i >= 0; i-- {
+			if a := msg.Attempts[i]; a.Class == store.ClassPermanent || a.Class == store.ClassExpired {
+				code, resp = a.SMTPCode, a.SMTPResp
+				break
+			}
 		}
 		fmt.Fprintf(&body, "\r\nQueue ID:   %s\r\nFrom:       %s\r\nTo:         %s\r\nSubject:    %s\r\nResponse:   %d %s\r\n",
 			id, msg.EnvelopeFrom, strings.Join(msg.Recipients, ", "), msg.Subject, code, resp)
@@ -268,14 +277,14 @@ func (n *Notifier) send(client string, recipients, ids []string, overflow int, n
 
 	if omitted := total - len(listed); omitted > 0 {
 		fmt.Fprintf(&body, "\r\n... and %d more, not listed here. All %d are in the history:\r\n"+
-			"the bounces view, filtered by client %q.\r\n", omitted, total, client)
+			"the bounces view, filtered by client %q.\r\n", omitted, total, origin)
 	}
 
-	queueID, err := n.enqueue(client, recipients, subject, body.String(), now)
+	queueID, err := n.enqueue(origin, recipients, subject, body.String(), now)
 	if err != nil {
 		return err
 	}
-	n.log.Info("bounce digest queued", "client", client, "queue_id", queueID,
+	n.log.Info("bounce digest queued", "client", origin, "queue_id", queueID,
 		"failures", total, "listed", len(listed))
 	return nil
 }

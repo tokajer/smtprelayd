@@ -18,6 +18,7 @@ import (
 	"errors"
 	"log/slog"
 
+	"github.com/tokajer/smtprelayd/internal/queueid"
 	"github.com/tokajer/smtprelayd/internal/spool"
 )
 
@@ -44,19 +45,19 @@ const (
 // declares TokenAger -- *spool.Spool satisfies it without knowing this
 // exists.
 type Queue interface {
-	Requeue(id spool.ID) error
-	Discard(id spool.ID) error
+	Requeue(id queueid.ID, committed func()) error
+	Discard(id queueid.ID) error
 }
 
-// Journal is what this package needs from the history store: the three
-// writes that record what an action did. Declared here for the reason Queue
-// is, and with a second one: the Failed outcome is reached only when one of
-// these fails, which against a real SQLite file is not a state a test can ask
-// for.
+// Journal is what this package needs from the history store: the writes that
+// record what an action did. Declared here for the reason Queue is, and with
+// a second one: the Failed outcome is reached only when one of these fails,
+// which against a real SQLite file is not a state a test can ask for.
 type Journal interface {
-	RecordRemoval(queueID string) error
-	ReconcileRemoved(queueID string) (bool, error)
-	RecordAudit(tokenName, sourceAddr, action, queueID, details string) error
+	RecordRemoval(queueID queueid.ID) error
+	RecordRequeue(queueID queueid.ID) error
+	ReconcileRemoved(queueID queueid.ID) (bool, error)
+	RecordAudit(tokenName, sourceAddr, action string, queueID queueid.ID, details string) error
 }
 
 // Actor performs the actions and writes the audit row that records them.
@@ -78,8 +79,15 @@ func New(q Queue, j Journal, log *slog.Logger) *Actor {
 //
 // by names who acted ("dashboard", or an API token's name) and source is the
 // address they acted from; both go into the audit row.
-func (a *Actor) Requeue(id spool.ID, by, source, details string) Outcome {
-	switch err := a.spool.Requeue(id); {
+func (a *Actor) Requeue(id queueid.ID, by, source, details string) Outcome {
+	// Journaled through spool.Requeue's committed hook, while the lease is
+	// still held, so a dispatcher pass cannot claim and attempt the message
+	// first and journal over this with a newer "queued" row.
+	switch err := a.spool.Requeue(id, func() {
+		if rerr := a.store.RecordRequeue(id); rerr != nil {
+			a.log.Warn("requeue record write failed", "queue_id", id.String(), "error", rerr)
+		}
+	}); {
 	case err == nil:
 		a.audit(by, source, "requeue", id, details)
 		return Done
@@ -110,16 +118,16 @@ func (a *Actor) Requeue(id spool.ID, by, source, details string) Outcome {
 // way in is a message with no lease, no files and a history row that still
 // calls it active. ReconcileRemoved re-checks that last part itself and
 // writes nothing otherwise.
-func (a *Actor) Delete(id spool.ID, by, source, details string) Outcome {
+func (a *Actor) Delete(id queueid.ID, by, source, details string) Outcome {
 	switch err := a.spool.Discard(id); {
 	case err == nil:
-		if rerr := a.store.RecordRemoval(id.String()); rerr != nil {
+		if rerr := a.store.RecordRemoval(id); rerr != nil {
 			a.log.Warn("removal record write failed", "queue_id", id.String(), "error", rerr)
 		}
 		a.audit(by, source, "delete", id, details)
 		return Done
 	case errors.Is(err, spool.ErrNotFound):
-		cleared, rerr := a.store.ReconcileRemoved(id.String())
+		cleared, rerr := a.store.ReconcileRemoved(id)
 		if rerr != nil {
 			a.log.Error("reconciling a message with no spool copy failed",
 				"queue_id", id.String(), "error", rerr)
@@ -143,8 +151,8 @@ func (a *Actor) Delete(id spool.ID, by, source, details string) Outcome {
 // audit records an operator action. A failure to write it is logged and not
 // returned: the action itself already happened, and reporting it as failed
 // would invite the operator to repeat something irreversible.
-func (a *Actor) audit(by, source, action string, id spool.ID, details string) {
-	if err := a.store.RecordAudit(by, source, action, id.String(), details); err != nil {
+func (a *Actor) audit(by, source, action string, id queueid.ID, details string) {
+	if err := a.store.RecordAudit(by, source, action, id, details); err != nil {
 		a.log.Warn("audit log write failed", "action", action, "queue_id", id.String(), "error", err)
 	}
 }

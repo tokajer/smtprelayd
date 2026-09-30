@@ -12,22 +12,23 @@ live deployment: the Microsoft 365 route delivers with both `file:` and
 the Burn `setup.exe`, `.rpm` and `.deb` (install, upgrade in every
 combination, uninstall with and without purging the data directory).
 
-**Last session**: 2026-09-30 — Second architectural review, findings acted
-on (branch `new-features`, not yet committed). Structure and observable
-changes are recorded in the `MEMORY.md` §3 amendment of the same date. In
-short:
+**Last session**: 2026-09-30 — Third architectural review, every finding
+acted on (branch `new-features`, not yet committed). Structure, the
+`requeued` journal class decision and the observable changes are in the
+`MEMORY.md` §3 "second pass" amendment of the same date. In short:
 
-- `internal/ostrust` split out of `config` (trust checks, ACL, DPAPI).
-- The TLS key pair is loaded once in `serve()`; expiry deadlines are computed
-  once from the served certificate.
-- `store.Class` and one class-to-status table; `RetentionSweep` takes a
-  context, which closes the item deferred on 2026-09-29.
-- `spool.Release` and `spool.Fail` no longer strand a message when the
-  metadata write fails.
-- `listener.withdraw` records the removal; `bounce.Notifier.Flush` runs at
-  shutdown.
-- `listener.Journal` and `selfmail.Journal` interfaces, `delivery.Manager.now`.
-- `config.ClientBounce`, shared rewrite constants and `config.ParseReplyTo`.
+- `internal/queueid` leaf; the store and every journal interface take
+  `queueid.ID`.
+- Implicit-TLS handshake deadline, admission before the handshake, 5 s bound
+  on pre-handshake refusals (security fix).
+- `delivery.Manager.fail` owns the journal row; shutdown is not an attempt;
+  `Spool.Commit` wakes the dispatcher (debounced); a short batch ends a pass.
+- `listener.Queue` interface; `withdraw` uses `Discard` and is tested end to
+  end, closing the item left open in the previous session.
+- `requeued` class, written under the spool lease.
+- `store.CommonFilter` + `httpx.ParseCommonFilter`; `store.ValidStatus`.
+- `internal/housekeeping` and `expiry.Watcher` moved out of `delivery` and
+  `bounce`; configuration page rendered by reflection.
 
 Verified: gofmt, `go vet` and `go build` clean on linux and windows,
 `go test -race ./...` green, banned imports clean. `govulncheck` and `gosec`
@@ -42,9 +43,17 @@ Considered and left alone, with the reason:
 - `spool.Open` still derives the `spool/` layout from the data directory.
 - Components still hold the whole `*config.Config`; narrow one when it is next
   touched.
-- The multi-route commit failure that reaches `listener.withdraw` has a unit
-  test on `withdraw` only; driving it end to end needs a spool quota finer
-  than 1 GiB or a failure seam in `spool.Commit`.
+- `Spool` reads the wall clock directly; add a `now` field when a test first
+  needs one.
+- `spool.Claim`, `Notifier.Pending` and `FindAuditByQueueID` are used only by
+  tests, but by tests in other packages, so they cannot move to
+  `export_test.go`.
+- `rewrite.Compile` still re-validates what `config.Validate` checks: defence
+  in depth on the highest-risk code, deliberately.
+- Comments that narrate dated history are trimmed only where a change touched
+  them; a tree-wide sweep into `docs/dev/HISTORY.md` was not done.
+- The status sort in `store/query.go` still spells class names in its `CASE`
+  literal; binding them would mean a second argument list for `ORDER BY`.
 
 **Nothing else is open.** Every remaining item is a deferred feature the operator
 chose not to pursue yet, each of which would be its own phase. The scoping

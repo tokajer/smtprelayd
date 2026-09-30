@@ -15,6 +15,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/tokajer/smtprelayd/internal/queueid"
 )
 
 // TestLoadRecoveryAtOneMillion measures only what a restart costs: Open
@@ -83,13 +85,13 @@ func TestLoadRecoveryAtOneMillion(t *testing.T) {
 
 // loadID turns a counter into a queue ID in the alphabet the spool actually
 // uses: sixteen characters of [A-Z2-7]. A generated id outside that set is
-// refused by ParseID, which recovery calls on every filename -- so a spool
-// full of them reads back as empty.
-func loadID(i int) ID {
+// refused by queueid.Parse, which recovery calls on every filename -- so a
+// spool full of them reads back as empty.
+func loadID(i int) queueid.ID {
 	const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567"
 	var b [16]byte
 	for k := 0; k < 16; k++ {
 		b[k] = alphabet[(i>>(5*k))&31]
 	}
-	return ID(b[:])
+	return queueid.ID(b[:])
 }

@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/tokajer/smtprelayd/internal/queueid"
 	"github.com/tokajer/smtprelayd/internal/store"
 )
 
@@ -22,7 +23,7 @@ func seedMessages(t *testing.T, st *store.Store, n int) {
 	for i := 0; i < n; i++ {
 		id := fmt.Sprintf("QPAGE%021d", i)
 		if err := st.RecordMessage(store.MessageRecord{
-			QueueID: id, Client: "printers", Route: "m365",
+			QueueID: queueid.ID(id), Origin: "printers", Route: "m365",
 			EnvelopeFrom: "device@example.at", Recipients: []string{"x@example.net"},
 			Listener: "smtp", RemoteAddr: "10.10.5.9",
 			ReceivedAt: now.Add(-time.Duration(i) * time.Minute),

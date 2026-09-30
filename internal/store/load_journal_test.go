@@ -16,6 +16,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/tokajer/smtprelayd/internal/queueid"
 )
 
 func loadStore(t *testing.T) (*Store, string) {
@@ -51,14 +53,14 @@ func TestLoadRecordThroughput(t *testing.T) {
 	for i := 0; i < n; i++ {
 		id := fmt.Sprintf("QT%024d", i)
 		if err := s.RecordMessage(MessageRecord{
-			QueueID: id, Client: "printers", Route: "m365",
+			QueueID: queueid.ID(id), Origin: "printers", Route: "m365",
 			EnvelopeFrom: "device@example.at", Recipients: []string{"someone@partner.example"},
 			Subject: "Scan job 4711", Listener: "smtp", RemoteAddr: "10.10.5.42",
 			ReceivedAt: now, ExpiresAt: now.Add(96 * time.Hour), SizeBytes: 48000,
 		}); err != nil {
 			t.Fatal(err)
 		}
-		if err := s.RecordAttempt(id, 1, 250, "2.0.0 OK", "delivered", nil); err != nil {
+		if err := s.RecordAttempt(queueid.ID(id), 1, 250, "2.0.0 OK", "delivered", nil); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -133,14 +135,14 @@ func TestLoadQueriesAtOneMillion(t *testing.T) {
 	for i := 0; i < writes; i++ {
 		id := fmt.Sprintf("QW%024d", i)
 		if err := s.RecordMessage(MessageRecord{
-			QueueID: id, Client: "printers", Route: "m365",
+			QueueID: queueid.ID(id), Origin: "printers", Route: "m365",
 			EnvelopeFrom: "device@example.at", Recipients: []string{"someone@partner.example"},
 			Subject: "Scan job 4711", Listener: "smtp", RemoteAddr: "10.10.5.42",
 			ReceivedAt: now, ExpiresAt: now.Add(96 * time.Hour), SizeBytes: 48000,
 		}); err != nil {
 			t.Fatal(err)
 		}
-		if err := s.RecordAttempt(id, 1, 250, "2.0.0 OK", "delivered", nil); err != nil {
+		if err := s.RecordAttempt(queueid.ID(id), 1, 250, "2.0.0 OK", "delivered", nil); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -170,11 +172,11 @@ func TestLoadQueriesAtOneMillion(t *testing.T) {
 		return err
 	})
 	timed("FindMessages, sender substring filter", func() error {
-		_, _, err := s.FindMessages(MessageFilter{Sender: "device@", Limit: 50})
+		_, _, err := s.FindMessages(MessageFilter{CommonFilter: CommonFilter{Sender: "device@"}, Limit: 50})
 		return err
 	})
 	timed("FindMessages, subject substring filter", func() error {
-		_, _, err := s.FindMessages(MessageFilter{Subject: "4711", Limit: 50})
+		_, _, err := s.FindMessages(MessageFilter{CommonFilter: CommonFilter{Subject: "4711"}, Limit: 50})
 		return err
 	})
 	timed("FindBounces, first page", func() error {
@@ -186,7 +188,7 @@ func TestLoadQueriesAtOneMillion(t *testing.T) {
 		return err
 	})
 	timed("FindMessageByID", func() error {
-		_, err := s.FindMessageByID("QL" + fmt.Sprintf("%024d", 999_999))
+		_, err := s.FindMessageByID(queueid.ID("QL" + fmt.Sprintf("%024d", 999_999)))
 		return err
 	})
 	// The cutoff has to be past the rows' own age or this measures a no-op:

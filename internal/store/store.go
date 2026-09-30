@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/tokajer/smtprelayd/internal/fsmode"
+	"github.com/tokajer/smtprelayd/internal/queueid"
 
 	_ "modernc.org/sqlite"
 )
@@ -174,8 +175,8 @@ func (s *Store) Close() error {
 // call site would still compile and would silently store a sender as a
 // route.
 type MessageRecord struct {
-	QueueID      string
-	Client       string
+	QueueID      queueid.ID
+	Origin       string
 	Route        string
 	EnvelopeFrom string
 	OriginalFrom string
@@ -220,7 +221,7 @@ func (s *Store) RecordMessage(rec MessageRecord) error {
 		INSERT INTO messages (queue_id, client, route, envelope_from, original_from, recipients, subject, listener, remote_addr, received_at, expires_at, tls_used, created_at, message_id, content_type, size_bytes, header_count, helo)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`,
-		rec.QueueID, rec.Client, rec.Route, rec.EnvelopeFrom, rec.OriginalFrom, string(recipientsJSON), subject, rec.Listener, rec.RemoteAddr,
+		rec.QueueID, rec.Origin, rec.Route, rec.EnvelopeFrom, rec.OriginalFrom, string(recipientsJSON), subject, rec.Listener, rec.RemoteAddr,
 		rec.ReceivedAt.UTC().Format(time.RFC3339), rec.ExpiresAt.UTC().Format(time.RFC3339), tlsInt, now.Format(time.RFC3339),
 		rec.MessageID, rec.ContentType, rec.SizeBytes, rec.HeaderCount, rec.Helo,
 	)
@@ -238,7 +239,7 @@ func (s *Store) RecordMessage(rec MessageRecord) error {
 
 // RecordAttempt inserts a delivery attempt record. class is ClassRemoved only
 // when written by RecordRemoval, never by the delivery worker.
-func (s *Store) RecordAttempt(queueID string, attemptNum int, smtpCode int, smtpResponse string, class Class, nextAttemptAt *time.Time) error {
+func (s *Store) RecordAttempt(queueID queueid.ID, attemptNum int, smtpCode int, smtpResponse string, class Class, nextAttemptAt *time.Time) error {
 	now := s.now().UTC()
 	var nextStr *string
 	if nextAttemptAt != nil {
@@ -298,7 +299,7 @@ func (s *Store) RecordAttempt(queueID string, attemptNum int, smtpCode int, smtp
 // an hour however often it is called. It returns how many messages went.
 // Measured on a million rows the delete took 15.6 seconds.
 //
-// It runs on delivery.Housekeeper's own goroutine, concurrently with the
+// It runs on housekeeping.Housekeeper's own goroutine, concurrently with the
 // delivery workers and the listener writing to the same database. SQLite has
 // one writer, so contention is bounded by retentionChunk's 5000-row DELETEs
 // waiting inside busy_timeout(5000), not by anything pausing for the whole
@@ -333,13 +334,63 @@ func (s *Store) claimCleanup(now time.Time) bool {
 // real delivery attempt left behind (or none at all), so a discarded message
 // would keep matching the "active"/"queued"/"deferred" filters indefinitely
 // even though it no longer exists in the spool.
-func (s *Store) RecordRemoval(queueID string) error {
-	var next int
-	row := s.db.QueryRow(`SELECT COALESCE(MAX(attempt_num), 0) + 1 FROM attempts WHERE queue_id = ?`, queueID)
-	if err := row.Scan(&next); err != nil {
+func (s *Store) RecordRemoval(queueID queueid.ID) error {
+	next, err := s.nextAttemptNum(queueID)
+	if err != nil {
 		return fmt.Errorf("store: record removal: %w", err)
 	}
 	return s.RecordAttempt(queueID, next, 0, "", ClassRemoved, nil)
+}
+
+// RecordRequeue records that an operator requeued a message. Unlike
+// RecordRemoval this does not go through RecordAttempt: a requeue is not a
+// delivery attempt, so it must not increment attempt_count or overwrite
+// last_smtp_code/last_smtp_response with empty values -- doing so erased the
+// last real attempt's response, which the bounce digest and any operator
+// looking at the message's history still need to see. Without this write at
+// all the message keeps showing whatever class its last real attempt left
+// behind -- typically "permanent" -- so it is live in the spool again but
+// absent from the queue view until its next delivery attempt overwrites
+// last_class.
+func (s *Store) RecordRequeue(queueID queueid.ID) error {
+	next, err := s.nextAttemptNum(queueID)
+	if err != nil {
+		return fmt.Errorf("store: record requeue: %w", err)
+	}
+	at := s.now().UTC().Format(time.RFC3339)
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		return fmt.Errorf("store: record requeue: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if _, err := tx.Exec(`
+		INSERT INTO attempts (queue_id, attempt_num, at_time, smtp_code, smtp_response, class, next_attempt_at, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+	`, queueID, next, at, sql.NullInt64{}, "", ClassRequeued, nil, at); err != nil {
+		return fmt.Errorf("store: record requeue: %w", err)
+	}
+	if _, err := tx.Exec(`UPDATE messages SET last_class = ?, last_attempt_at = ? WHERE queue_id = ?`,
+		ClassRequeued, at, queueID); err != nil {
+		return fmt.Errorf("store: record requeue: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("store: record requeue: %w", err)
+	}
+	return nil
+}
+
+// nextAttemptNum is the attempt_num the next RecordAttempt row for queueID
+// must use, shared by RecordRemoval and RecordRequeue so the two cannot
+// compute it differently.
+func (s *Store) nextAttemptNum(queueID queueid.ID) (int, error) {
+	var next int
+	row := s.db.QueryRow(`SELECT COALESCE(MAX(attempt_num), 0) + 1 FROM attempts WHERE queue_id = ?`, queueID)
+	if err := row.Scan(&next); err != nil {
+		return 0, err
+	}
+	return next, nil
 }
 
 // ReconcileRemoved marks a message removed when its spool copy is already
@@ -356,7 +407,7 @@ func (s *Store) RecordRemoval(queueID string) error {
 // It returns false, and writes nothing, for a message that is unknown or has
 // already reached an outcome: a delivered or bounced row must not be
 // rewritten into a removal just because its spool copy is (correctly) gone.
-func (s *Store) ReconcileRemoved(queueID string) (bool, error) {
+func (s *Store) ReconcileRemoved(queueID queueid.ID) (bool, error) {
 	msg, err := s.FindMessageByID(queueID)
 	if err != nil {
 		return false, err
@@ -376,7 +427,7 @@ func (s *Store) ReconcileRemoved(queueID string) (bool, error) {
 }
 
 // RecordAudit inserts an audit log entry.
-func (s *Store) RecordAudit(tokenName, sourceAddr, action, queueID, details string) error {
+func (s *Store) RecordAudit(tokenName, sourceAddr, action string, queueID queueid.ID, details string) error {
 	now := s.now().UTC()
 	_, err := s.db.Exec(`
 		INSERT INTO audit (at_time, token_name, source_addr, action, queue_id, details, created_at)
@@ -393,7 +444,7 @@ func (s *Store) RecordAudit(tokenName, sourceAddr, action, queueID, details stri
 // FindAuditByQueueID returns audit entries for one queue ID, most recent
 // first. Not exposed via the API, kept for a future audit view; used directly
 // by tests to confirm an admin action was actually recorded.
-func (s *Store) FindAuditByQueueID(queueID string) ([]AuditEntry, error) {
+func (s *Store) FindAuditByQueueID(queueID queueid.ID) ([]AuditEntry, error) {
 	rows, err := s.db.Query(`
 		SELECT at_time, token_name, source_addr, action, details
 		FROM audit WHERE queue_id = ? ORDER BY at_time DESC, id DESC

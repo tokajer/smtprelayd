@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Tokajer
 
-package bounce
+package expiry
 
 import (
 	"context"
@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/tokajer/smtprelayd/internal/config"
-	"github.com/tokajer/smtprelayd/internal/expiry"
 )
 
 const (
@@ -33,15 +32,23 @@ const (
 	expirySource = config.SourceExpiryWatch
 )
 
-// ExpiryWatcher mails the operator before something the relay depends on
-// stops working: its own TLS certificate, or a Microsoft 365 client secret.
+// Notifier is the whole of what Watcher needs to send a warning mail.
+// Declared here, on the consumer side, so that internal/expiry does not
+// import internal/bounce: a *bounce.Notifier satisfies it, and the mail
+// composition path stays out of this package's imports for the sake of one
+// call.
+type Notifier interface {
+	Notify(source, subject, bodyText string, now time.Time) error
+}
+
+// Watcher mails the operator before something the relay depends on stops
+// working: its own TLS certificate, or a Microsoft 365 client secret.
 //
-// It lives here rather than in internal/expiry because deciding that a
-// deadline is worth a mail, and sending one, is this package's job -- it
-// already owns the operator notification channel and the bounce.notify
-// contacts. internal/expiry answers only "what expires and when", which is
-// what lets the dashboard and the metrics endpoint read the same deadlines
-// without pulling the mail path in behind them.
+// It lives apart from Items, which only answers "what expires and when" --
+// deciding that a deadline is worth a mail, and sending one, is this type's
+// job, through the Notifier it is given. That split is what lets the
+// dashboard and the metrics endpoint read the same deadlines without pulling
+// the mail path in behind them.
 //
 // Both failures are total: an expired certificate refuses every TLS
 // submission, an expired secret fails every delivery on that route. Before
@@ -51,10 +58,10 @@ const (
 // It holds no state that must survive a restart: a restart re-checks
 // immediately and mails again if anything is inside the window, which is the
 // safe direction to err in for a warning.
-type ExpiryWatcher struct {
+type Watcher struct {
 	cfg       *config.Config
-	deadlines []expiry.Item
-	notifier  *Notifier
+	deadlines []Item
+	notifier  Notifier
 	log       *slog.Logger
 
 	// lastSent is read and written only from Run's own goroutine, or
@@ -62,10 +69,10 @@ type ExpiryWatcher struct {
 	lastSent map[string]time.Time
 }
 
-// NewExpiryWatcher builds a watcher over deadlines, computed once in
+// NewWatcher builds a watcher over deadlines, computed once in
 // cmd/smtprelayd. It does nothing until Run is started.
-func NewExpiryWatcher(cfg *config.Config, deadlines []expiry.Item, n *Notifier, log *slog.Logger) *ExpiryWatcher {
-	return &ExpiryWatcher{
+func NewWatcher(cfg *config.Config, deadlines []Item, n Notifier, log *slog.Logger) *Watcher {
+	return &Watcher{
 		cfg: cfg, deadlines: deadlines, notifier: n,
 		log:      log.With("component", "expiry"),
 		lastSent: map[string]time.Time{},
@@ -76,8 +83,8 @@ func NewExpiryWatcher(cfg *config.Config, deadlines []expiry.Item, n *Notifier, 
 // cancelled. The immediate check matters: an operator restarting a service
 // whose certificate expires next week should hear about it now, not in an
 // hour.
-func (w *ExpiryWatcher) Run(ctx context.Context) {
-	if expiry.WarnWindow(w.cfg) <= 0 {
+func (w *Watcher) Run(ctx context.Context) {
+	if WarnWindow(w.cfg) <= 0 {
 		w.log.Info("expiry.warn_days is 0, expiry warnings are disabled")
 		return
 	}
@@ -103,8 +110,8 @@ func (w *ExpiryWatcher) Run(ctx context.Context) {
 // mailed about recently. Items are batched into one message: an operator
 // with a certificate and two secrets all expiring in the same month wants
 // one mail, not three.
-func (w *ExpiryWatcher) check(now time.Time) {
-	due := []expiry.Item{}
+func (w *Watcher) check(now time.Time) {
+	due := []Item{}
 	for _, it := range w.collect(now) {
 		if last, ok := w.lastSent[it.Key]; ok && now.Sub(last) < resendInterval {
 			continue
@@ -124,44 +131,38 @@ func (w *ExpiryWatcher) check(now time.Time) {
 				"expires", it.Expires.Format(time.RFC3339))
 		} else {
 			w.log.Warn("expiry deadline approaching", "item", it.What, "detail", it.Detail,
-				"expires", it.Expires.Format(time.RFC3339), "days_left", int(it.Expires.Sub(now).Hours()/24))
+				"expires", it.Expires.Format(time.RFC3339), "days_left", DaysUntil(it.Expires, now))
 		}
 	}
 
-	if len(w.cfg.Bounce.Notify) == 0 {
-		for _, it := range due {
-			w.lastSent[it.Key] = now
+	if len(w.cfg.Bounce.Notify) > 0 {
+		subject, body := composeExpiry(due, now, w.cfg.Service.Hostname, w.cfg.Expiry.WarnDays)
+		if err := w.notifier.Notify(expirySource, subject, body, now); err != nil {
+			// Not marked as sent, so the next check tries again.
+			w.log.Error("sending expiry warning failed", "error", err)
+			return
 		}
-		return
-	}
-
-	subject, body := composeExpiry(due, now, w.cfg.Service.Hostname, w.cfg.Expiry.WarnDays)
-	if err := w.notifier.Notify(expirySource, subject, body, now); err != nil {
-		// Not marked as sent, so the next check tries again.
-		w.log.Error("sending expiry warning failed", "error", err)
-		return
+		w.log.Warn("expiry warning sent", "count", len(due))
 	}
 	for _, it := range due {
 		w.lastSent[it.Key] = now
 	}
-	w.log.Warn("expiry warning sent", "count", len(due))
 }
 
-// collect returns everything expiring inside the expiry.WarnWindow, already
-// expired included: an expiry that has passed is the case an operator most
-// needs told about, so it is reported rather than dropped for being out of
-// range.
-func (w *ExpiryWatcher) collect(now time.Time) []expiry.Item {
+// collect returns everything expiring inside WarnWindow, already expired
+// included: an expiry that has passed is the case an operator most needs
+// told about, so it is reported rather than dropped for being out of range.
+func (w *Watcher) collect(now time.Time) []Item {
 	// Checked before anything is read. Run already returns early when the
 	// window is zero, so this is unreachable in the service -- but filtering
 	// the stored deadlines hourly for warnings that are switched off is not
 	// what the disabled state should cost.
-	window := expiry.WarnWindow(w.cfg)
+	window := WarnWindow(w.cfg)
 	if window <= 0 {
 		return nil
 	}
 	deadline := now.Add(window)
-	var due []expiry.Item
+	var due []Item
 	for _, it := range w.deadlines {
 		if it.Expires.Before(deadline) {
 			due = append(due, it)
@@ -173,7 +174,7 @@ func (w *ExpiryWatcher) collect(now time.Time) []expiry.Item {
 // composeExpiry renders the message. It says what breaks when each item lapses,
 // because the recipient of this mail is not necessarily the person who
 // configured the relay.
-func composeExpiry(due []expiry.Item, now time.Time, hostname string, windowDays int) (subject, body string) {
+func composeExpiry(due []Item, now time.Time, hostname string, windowDays int) (subject, body string) {
 	expired := 0
 	for _, it := range due {
 		if !it.Expires.After(now) {
@@ -184,7 +185,7 @@ func composeExpiry(due []expiry.Item, now time.Time, hostname string, windowDays
 	case expired > 0:
 		subject = fmt.Sprintf("[smtprelayd] ACTION REQUIRED: %d item(s) expired on %s", expired, hostname)
 	case len(due) == 1:
-		subject = fmt.Sprintf("[smtprelayd] %s expires in %d day(s)", due[0].What, expiry.DaysUntil(due[0].Expires, now))
+		subject = fmt.Sprintf("[smtprelayd] %s expires in %d day(s)", due[0].What, DaysUntil(due[0].Expires, now))
 	default:
 		subject = fmt.Sprintf("[smtprelayd] %d item(s) expire within %d days on %s",
 			len(due), windowDays, hostname)
@@ -193,7 +194,7 @@ func composeExpiry(due []expiry.Item, now time.Time, hostname string, windowDays
 	var b strings.Builder
 	fmt.Fprintf(&b, "smtprelayd on %s is reporting that the following will stop working:\r\n", hostname)
 	for _, it := range due {
-		days := expiry.DaysUntil(it.Expires, now)
+		days := DaysUntil(it.Expires, now)
 		b.WriteString("\r\n")
 		fmt.Fprintf(&b, "  %s\r\n", it.What)
 		fmt.Fprintf(&b, "    %s\r\n", it.Detail)

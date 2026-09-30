@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/tokajer/smtprelayd/internal/config"
+	"github.com/tokajer/smtprelayd/internal/queueid"
 	"github.com/tokajer/smtprelayd/internal/spool"
 	"github.com/tokajer/smtprelayd/internal/store"
 )
@@ -66,10 +67,10 @@ func baseCfg() *config.Config {
 func recordFailed(t *testing.T, st *store.Store, id, client string) {
 	t.Helper()
 	now := time.Now()
-	if err := st.RecordMessage(store.MessageRecord{QueueID: id, Client: client, Route: "m365", EnvelopeFrom: "relay@example.at", OriginalFrom: "orig@local", Recipients: []string{"someone@partner.example"}, Subject: "Scan job", Listener: "smtp", RemoteAddr: "10.0.0.1", ReceivedAt: now, ExpiresAt: now.Add(96 * time.Hour), TLSUsed: true}); err != nil {
+	if err := st.RecordMessage(store.MessageRecord{QueueID: queueid.ID(id), Origin: client, Route: "m365", EnvelopeFrom: "relay@example.at", OriginalFrom: "orig@local", Recipients: []string{"someone@partner.example"}, Subject: "Scan job", Listener: "smtp", RemoteAddr: "10.0.0.1", ReceivedAt: now, ExpiresAt: now.Add(96 * time.Hour), TLSUsed: true}); err != nil {
 		t.Fatal(err)
 	}
-	if err := st.RecordAttempt(id, 1, 550, "5.1.1 User unknown", "permanent", nil); err != nil {
+	if err := st.RecordAttempt(queueid.ID(id), 1, 550, "5.1.1 User unknown", "permanent", nil); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -453,7 +454,7 @@ func TestDigestListsAtMostMaxEntriesAndSaysHowManyItLeftOut(t *testing.T) {
 	for i := 0; i < failures; i++ {
 		id := fmt.Sprintf("QCAP%022d", i)
 		recordFailed(t, st, id, "printers")
-		n.RecordFail("printers", id)
+		n.RecordFail("printers", queueid.ID(id))
 	}
 
 	n.dispatch(time.Now())
@@ -493,7 +494,7 @@ func TestDigestUnderTheCapListsEverythingAndSaysNothingExtra(t *testing.T) {
 	for i := 0; i < failures; i++ {
 		id := fmt.Sprintf("QSML%022d", i)
 		recordFailed(t, st, id, "printers")
-		n.RecordFail("printers", id)
+		n.RecordFail("printers", queueid.ID(id))
 	}
 
 	n.dispatch(time.Now())
@@ -545,7 +546,7 @@ func TestPendingIsBoundedPerClient(t *testing.T) {
 	n := New(&config.Config{}, nil, nil, nil, discardLog())
 	const recorded = maxPendingPerClient + 500
 	for i := 0; i < recorded; i++ {
-		n.RecordFail("printers", fmt.Sprintf("Q%015d", i))
+		n.RecordFail("printers", queueid.ID(fmt.Sprintf("Q%015d", i)))
 	}
 
 	n.mu.Lock()
