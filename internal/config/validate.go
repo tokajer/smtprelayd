@@ -17,6 +17,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/tokajer/smtprelayd/internal/loopback"
 	"github.com/tokajer/smtprelayd/internal/mailaddr"
 )
 
@@ -372,7 +373,7 @@ func (v *validator) listeners() {
 		host, _, err := net.SplitHostPort(l.Address)
 		if err != nil {
 			v.add("%s: address %q: %v", where, l.Address, err)
-		} else if !isLoopbackHost(host) {
+		} else if !loopback.Host(host) {
 			v.anyPublic = true
 		}
 		switch l.TLS {
@@ -744,7 +745,7 @@ func (v *validator) web() {
 	if v.c.Web.Enabled {
 		if host, _, err := net.SplitHostPort(v.c.Web.Address); err != nil {
 			v.add("web.address %q: %v", v.c.Web.Address, err)
-		} else if !isLoopbackHost(host) {
+		} else if !loopback.Host(host) {
 			// The dashboard has no authentication of its own. Its
 			// requeue and delete forms are protected by a CSRF token
 			// fetched from the page itself, which stops another site
@@ -796,7 +797,7 @@ func (v *validator) metrics() {
 	if v.c.Metrics.Enabled {
 		if host, _, err := net.SplitHostPort(v.c.Metrics.Address); err != nil {
 			v.add("metrics.address %q: %v", v.c.Metrics.Address, err)
-		} else if !isLoopbackHost(host) {
+		} else if !loopback.Host(host) {
 			// Unlike the dashboard, this endpoint has a credential it can
 			// actually use: a monitoring system sets a header. So a public
 			// bind is allowed, but only authenticated — and only over TLS,
@@ -1074,44 +1075,4 @@ func printableASCII(s string) bool {
 		}
 	}
 	return true
-}
-
-// IsLoopbackHost reports whether host names the local machine only. Exported
-// because the metrics listener has to make the same distinction at serve time
-// that this package makes at validation time, and two spellings of "is this
-// loopback" is one more than the number that can be right.
-func IsLoopbackHost(host string) bool { return isLoopbackHost(host) }
-
-// IsLoopbackHostHeader reports whether an HTTP Host header names the local
-// machine. It exists because "the listener is bound to loopback" and "this
-// request was addressed to loopback" are different statements: a browser
-// resolves a name the page controls, so a DNS rebind reaches a loopback
-// listener with an attacker's name in the Host header, from inside the
-// boundary the loopback bind was supposed to be.
-//
-// The header may carry a port or not, and an IPv6 literal arrives in
-// brackets, so both shapes are reduced to a bare host before the same
-// loopback test the validator uses.
-func IsLoopbackHostHeader(hostHeader string) bool {
-	h := hostHeader
-	if host, _, err := net.SplitHostPort(h); err == nil {
-		h = host
-	} else {
-		h = strings.TrimSuffix(strings.TrimPrefix(h, "["), "]")
-	}
-	return isLoopbackHost(h)
-}
-
-func isLoopbackHost(host string) bool {
-	if host == "" {
-		return false
-	}
-	if host == "localhost" {
-		return true
-	}
-	addr, err := netip.ParseAddr(host)
-	if err != nil {
-		return false
-	}
-	return addr.IsLoopback()
 }

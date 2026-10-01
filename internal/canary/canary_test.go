@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/tokajer/smtprelayd/internal/config"
+	"github.com/tokajer/smtprelayd/internal/selfmail"
 	"github.com/tokajer/smtprelayd/internal/spool"
 	"github.com/tokajer/smtprelayd/internal/store"
 )
@@ -32,7 +33,8 @@ func testRunner(t *testing.T, cfg *config.Config, c config.Canary) (*Runner, *sp
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = st.Close() })
-	return New(c, cfg.Service.Hostname, time.Duration(cfg.Queue.MaxLifetimeHours)*time.Hour, sp, st, nil, discardLog()), sp, st
+	mailer := selfmail.New(sp, st, nil, discardLog())
+	return New(c, cfg.Service.Hostname, time.Duration(cfg.Queue.MaxLifetimeHours)*time.Hour, mailer, discardLog()), sp, st
 }
 
 func baseCfg() *config.Config {
@@ -142,8 +144,9 @@ func TestSendDistinguishesTwoCanariesByName(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = st.Close() })
 
-	a := New(config.Canary{Name: "m365-daily", Sender: "canary@example.at", Recipient: "ops@example.at", Route: "m365", IntervalMinutes: 1440}, cfg.Service.Hostname, time.Hour, sp, st, nil, discardLog())
-	b := New(config.Canary{Name: "legacy-daily", Sender: "canary@example.at", Recipient: "ops@example.at", Route: "legacy", IntervalMinutes: 1440}, cfg.Service.Hostname, time.Hour, sp, st, nil, discardLog())
+	mailer := selfmail.New(sp, st, nil, discardLog())
+	a := New(config.Canary{Name: "m365-daily", Sender: "canary@example.at", Recipient: "ops@example.at", Route: "m365", IntervalMinutes: 1440}, cfg.Service.Hostname, time.Hour, mailer, discardLog())
+	b := New(config.Canary{Name: "legacy-daily", Sender: "canary@example.at", Recipient: "ops@example.at", Route: "legacy", IntervalMinutes: 1440}, cfg.Service.Hostname, time.Hour, mailer, discardLog())
 
 	if err := a.send(time.Now()); err != nil {
 		t.Fatal(err)

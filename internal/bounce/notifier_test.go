@@ -17,6 +17,7 @@ import (
 
 	"github.com/tokajer/smtprelayd/internal/config"
 	"github.com/tokajer/smtprelayd/internal/queueid"
+	"github.com/tokajer/smtprelayd/internal/selfmail"
 	"github.com/tokajer/smtprelayd/internal/spool"
 	"github.com/tokajer/smtprelayd/internal/store"
 )
@@ -42,7 +43,8 @@ func testNotifier(t *testing.T, cfg *config.Config) (*Notifier, *spool.Spool, *s
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = st.Close() })
-	return New(cfg, sp, st, nil, discardLog()), sp, st
+	mailer := selfmail.New(sp, st, nil, discardLog())
+	return New(cfg, mailer, st, discardLog()), sp, st
 }
 
 func baseCfg() *config.Config {
@@ -70,7 +72,7 @@ func recordFailed(t *testing.T, st *store.Store, id, client string) {
 	if err := st.RecordMessage(store.MessageRecord{QueueID: queueid.ID(id), Origin: client, Route: "m365", EnvelopeFrom: "relay@example.at", OriginalFrom: "orig@local", Recipients: []string{"someone@partner.example"}, Subject: "Scan job", Listener: "smtp", RemoteAddr: "10.0.0.1", ReceivedAt: now, ExpiresAt: now.Add(96 * time.Hour), TLSUsed: true}); err != nil {
 		t.Fatal(err)
 	}
-	if err := st.RecordAttempt(queueid.ID(id), 1, 550, "5.1.1 User unknown", "permanent", nil); err != nil {
+	if err := st.RecordAttempt(queueid.ID(id), 550, "5.1.1 User unknown", "permanent", nil); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -240,7 +242,8 @@ func TestDispatchCarriesOverFailuresWhenSendingFails(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = st.Close() })
-	n := New(cfg, sp, st, nil, discardLog())
+	mailer := selfmail.New(sp, st, nil, discardLog())
+	n := New(cfg, mailer, st, discardLog())
 
 	recordFailed(t, st, "SENDFAILMSGAAAA1", "printers")
 	n.RecordFail("printers", "SENDFAILMSGAAAA1")
@@ -448,7 +451,8 @@ func TestDigestListsAtMostMaxEntriesAndSaysHowManyItLeftOut(t *testing.T) {
 	t.Cleanup(func() { _ = st.Close() })
 
 	cfg := baseCfg()
-	n := New(cfg, sp, st, nil, discardLog())
+	mailer := selfmail.New(sp, st, nil, discardLog())
+	n := New(cfg, mailer, st, discardLog())
 
 	const failures = maxDigestEntries + 37
 	for i := 0; i < failures; i++ {
@@ -489,7 +493,8 @@ func TestDigestUnderTheCapListsEverythingAndSaysNothingExtra(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = st.Close() })
 
-	n := New(baseCfg(), sp, st, nil, discardLog())
+	mailer := selfmail.New(sp, st, nil, discardLog())
+	n := New(baseCfg(), mailer, st, discardLog())
 	const failures = 3
 	for i := 0; i < failures; i++ {
 		id := fmt.Sprintf("QSML%022d", i)
@@ -543,7 +548,7 @@ func tail(s string) string {
 // therefore counted rather than kept: the digest lists at most
 // maxDigestEntries of them anyway, and every failure is a history row.
 func TestPendingIsBoundedPerClient(t *testing.T) {
-	n := New(&config.Config{}, nil, nil, nil, discardLog())
+	n := New(&config.Config{}, nil, nil, discardLog())
 	const recorded = maxPendingPerClient + 500
 	for i := 0; i < recorded; i++ {
 		n.RecordFail("printers", queueid.ID(fmt.Sprintf("Q%015d", i)))

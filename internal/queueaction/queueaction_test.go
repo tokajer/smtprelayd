@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/tokajer/smtprelayd/internal/metrics"
 	"github.com/tokajer/smtprelayd/internal/queueid"
 	"github.com/tokajer/smtprelayd/internal/spool"
 	"github.com/tokajer/smtprelayd/internal/store"
@@ -29,7 +30,7 @@ func testActor(t *testing.T) (*Actor, *spool.Spool, *store.Store) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = st.Close() })
-	return New(sp, st, slog.New(slog.NewTextHandler(io.Discard, nil))), sp, st
+	return New(sp, st, nil, slog.New(slog.NewTextHandler(io.Discard, nil))), sp, st
 }
 
 // queued puts one message in the spool and in history, the way the listener
@@ -215,7 +216,7 @@ func (emptyQueue) Requeue(_ queueid.ID, committed func()) error { return spool.E
 func (emptyQueue) Discard(queueid.ID) error                     { return spool.ErrNotFound }
 
 func TestDeleteReportsFailedWhenReconciliationCannotBeWritten(t *testing.T) {
-	a := New(emptyQueue{}, failingJournal{err: errors.New("database is locked")},
+	a := New(emptyQueue{}, failingJournal{err: errors.New("database is locked")}, nil,
 		slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	id, err := queueid.Parse("AAAAAAAAAAAAAAAA")
@@ -225,5 +226,35 @@ func TestDeleteReportsFailedWhenReconciliationCannotBeWritten(t *testing.T) {
 	if got := a.Delete(id, "dashboard", "127.0.0.1", ""); got != Failed {
 		t.Fatalf("delete outcome = %v, want Failed: a history write that cannot be "+
 			"completed must not read as a message that was never there", got)
+	}
+}
+
+// removalFailsJournal is a real store wrapped to fail only RecordRemoval, so
+// TestFailedRemovalWriteIsCounted isolates that one write's failure instead
+// of also counting the audit write, which a real store still completes.
+type removalFailsJournal struct {
+	*store.Store
+}
+
+func (removalFailsJournal) RecordRemoval(queueid.ID) error {
+	return errors.New("database is locked")
+}
+
+// A journal write that fails must be counted, not only logged: see the note
+// on metrics.(*Registry).JournalWriteFailure.
+func TestFailedRemovalWriteIsCounted(t *testing.T) {
+	a, sp, st := testActor(t)
+	id := queued(t, sp, st)
+
+	reg := metrics.New(nil, sp, nil, nil)
+	a.metrics = reg
+	a.store = removalFailsJournal{st}
+
+	before := reg.JournalWriteFailures()
+	if got := a.Delete(id, "dashboard", "127.0.0.1", ""); got != Done {
+		t.Fatalf("outcome %v, want Done", got)
+	}
+	if got := reg.JournalWriteFailures(); got != before+1 {
+		t.Fatalf("JournalWriteFailures() = %d, want %d", got, before+1)
 	}
 }

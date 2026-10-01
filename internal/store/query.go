@@ -13,41 +13,41 @@ import (
 	"github.com/tokajer/smtprelayd/internal/queueid"
 )
 
-// Message represents a stored message record.
+// Message represents a stored message record. Its JSON wire shape is
+// internal/api's messageView, not tags on this type: the API's contract and
+// the store's own representation are free to diverge.
 type Message struct {
-	QueueID      queueid.ID `json:"queue_id"`
-	Client       string     `json:"client"`
-	Route        string     `json:"route"`
-	EnvelopeFrom string     `json:"envelope_from"`
-	OriginalFrom string     `json:"original_from,omitempty"`
-	Recipients   []string   `json:"recipients"`
-	Subject      string     `json:"subject,omitempty"`
-	Listener     string     `json:"listener"`
-	RemoteAddr   string     `json:"remote_addr"`
-	ReceivedAt   time.Time  `json:"received_at"`
-	ExpiresAt    time.Time  `json:"expires_at"`
-	TLSUsed      bool       `json:"tls_used"`
-	CreatedAt    time.Time  `json:"created_at"`
+	QueueID      queueid.ID
+	Client       string
+	Route        string
+	EnvelopeFrom string
+	OriginalFrom string
+	Recipients   []string
+	Subject      string
+	Listener     string
+	RemoteAddr   string
+	ReceivedAt   time.Time
+	ExpiresAt    time.Time
+	TLSUsed      bool
+	CreatedAt    time.Time
 
 	// Journal metadata. A row written before these columns existed reads
-	// back as the zero value; SizeBytes and HeaderCount are omitted from
-	// JSON when zero, which is also what an empty message would report and
-	// is the reason neither is a useful filter.
-	MessageID   string `json:"message_id,omitempty"`
-	ContentType string `json:"content_type,omitempty"`
-	SizeBytes   int64  `json:"size_bytes,omitempty"`
-	HeaderCount int    `json:"header_count,omitempty"`
-	Helo        string `json:"helo,omitempty"`
+	// back as the zero value.
+	MessageID   string
+	ContentType string
+	SizeBytes   int64
+	HeaderCount int
+	Helo        string
 
-	Status   string    `json:"status,omitempty"`   // queued, deferred, delivered, bounced
-	Attempts []Attempt `json:"attempts,omitempty"` // per-message details query
+	Status   string    // queued, deferred, delivered, bounced
+	Attempts []Attempt // per-message details query
 
 	// Outcome of the most recent attempt, carried on the message itself so
 	// that a list view can show why something is deferred or bounced
 	// without a per-row query for its attempt history.
-	AttemptCount int    `json:"attempt_count,omitempty"`
-	LastCode     int    `json:"last_smtp_code,omitempty"`
-	LastErr      string `json:"last_error,omitempty"`
+	AttemptCount int
+	LastCode     int
+	LastErr      string
 }
 
 // journalScan receives the journal columns during a row scan. They are
@@ -164,14 +164,15 @@ func (j *journalScan) apply(m *Message) {
 	m.Helo = j.helo.String
 }
 
-// Attempt represents a single delivery attempt.
+// Attempt represents a single delivery attempt. Its JSON wire shape is
+// internal/api's attemptView; see the note on Message.
 type Attempt struct {
-	AttemptNum int        `json:"attempt_num"`
-	AtTime     time.Time  `json:"at_time"`
-	SMTPCode   int        `json:"smtp_code,omitempty"`
-	SMTPResp   string     `json:"smtp_response,omitempty"`
-	Class      Class      `json:"class"`
-	NextAt     *time.Time `json:"next_attempt_at,omitempty"`
+	AttemptNum int
+	AtTime     time.Time
+	SMTPCode   int
+	SMTPResp   string
+	Class      Class
+	NextAt     *time.Time
 }
 
 // MessageFilter specifies query parameters for FindMessages.
@@ -578,23 +579,22 @@ func (s *Store) FindBounces(filter BounceFilter) ([]*Message, bool, error) {
 	return messages, hasMore, nil
 }
 
-// BounceSummary is the flattened view of a bounce the HTTP API returns
-// (docs/guides/API.md): the final attempt's class and SMTP response plus a total
-// attempt count, rather than the full attempt history FindMessageByID gives.
+// BounceSummary is the store's flattened bounce row -- the final attempt's
+// class and SMTP response plus a total attempt count, not the full history.
 type BounceSummary struct {
-	QueueID      queueid.ID `json:"queue_id"`
-	Class        string     `json:"class"`
-	Client       string     `json:"client"`
-	Route        string     `json:"route"`
-	EnvelopeFrom string     `json:"envelope_from"`
-	OriginalFrom string     `json:"original_from,omitempty"`
-	Recipients   []string   `json:"recipients"`
-	Subject      string     `json:"subject,omitempty"`
-	Attempts     int        `json:"attempts"`
-	FirstAttempt time.Time  `json:"first_attempt"`
-	LastAttempt  time.Time  `json:"last_attempt"`
-	SMTPCode     int        `json:"smtp_code,omitempty"`
-	SMTPResponse string     `json:"smtp_response,omitempty"`
+	QueueID      queueid.ID
+	Class        string
+	Client       string
+	Route        string
+	EnvelopeFrom string
+	OriginalFrom string
+	Recipients   []string
+	Subject      string
+	Attempts     int
+	FirstAttempt time.Time
+	LastAttempt  time.Time
+	SMTPCode     int
+	SMTPResponse string
 }
 
 // FindBounceSummaries returns the API's flattened bounce view with

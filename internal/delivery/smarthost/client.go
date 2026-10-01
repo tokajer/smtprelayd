@@ -132,9 +132,9 @@ type Message struct {
 	Helo string
 }
 
-// tlsConfigFor builds the TLS configuration for route, or returns nil, nil
-// for tls = "none".
-func tlsConfigFor(route config.Route) (*tls.Config, error) {
+// TLSConfig builds the TLS configuration for route, or returns nil, nil for
+// tls = "none". Built once per route by delivery.New.
+func TLSConfig(route config.Route) (*tls.Config, error) {
 	if route.TLS == config.TLSNone {
 		return nil, nil
 	}
@@ -186,11 +186,11 @@ func dial(ctx context.Context, route config.Route, tlsConf *tls.Config, timeout 
 // path here that negotiates TLS and then skips the check. A route may opt out
 // of TLS entirely with tls = "none", which the loader restricts to routes
 // that do not authenticate with XOAUTH2.
-// tokens may be nil for routes that do not use XOAUTH2.
-func Deliver(ctx context.Context, route config.Route, msg Message, timeout time.Duration, tokens TokenSource) error {
-	tlsConf, err := tlsConfigFor(route)
-	if err != nil {
-		return perm("route %s: %w", route.Name, err)
+// tlsConf is route's compiled TLS configuration (see TLSConfig), nil for
+// tls = "none". tokens may be nil for routes that do not use XOAUTH2.
+func Deliver(ctx context.Context, route config.Route, tlsConf *tls.Config, msg Message, timeout time.Duration, tokens TokenSource) error {
+	if route.TLS != config.TLSNone && tlsConf == nil {
+		return perm("route %s: no TLS configuration", route.Name)
 	}
 
 	conn, err := dial(ctx, route, tlsConf, timeout)

@@ -277,6 +277,9 @@ func checkToken(token string) error {
 	return nil
 }
 
+// oneLine has a byte-identical copy in internal/delivery/smarthost/xoauth2.go:
+// the two packages must not import each other, so fix any change here there
+// too.
 func oneLine(s string, max int) string {
 	s = strings.Map(func(r rune) rune {
 		if r == '\r' || r == '\n' || r == '\t' {

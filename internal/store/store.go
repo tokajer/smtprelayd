@@ -239,7 +239,7 @@ func (s *Store) RecordMessage(rec MessageRecord) error {
 
 // RecordAttempt inserts a delivery attempt record. class is ClassRemoved only
 // when written by RecordRemoval, never by the delivery worker.
-func (s *Store) RecordAttempt(queueID queueid.ID, attemptNum int, smtpCode int, smtpResponse string, class Class, nextAttemptAt *time.Time) error {
+func (s *Store) RecordAttempt(queueID queueid.ID, smtpCode int, smtpResponse string, class Class, nextAttemptAt *time.Time) error {
 	now := s.now().UTC()
 	var nextStr *string
 	if nextAttemptAt != nil {
@@ -261,10 +261,15 @@ func (s *Store) RecordAttempt(queueID queueid.ID, attemptNum int, smtpCode int, 
 	}
 	defer func() { _ = tx.Rollback() }()
 
+	// attempt_num is computed inside this INSERT, not read by a SELECT
+	// before it, so the transaction's first statement is a write: it takes
+	// SQLite's write lock immediately instead of a read lock that a second
+	// writer's own transaction cannot then upgrade without SQLITE_BUSY, and
+	// which busy_timeout does not retry.
 	if _, err := tx.Exec(`
 		INSERT INTO attempts (queue_id, attempt_num, at_time, smtp_code, smtp_response, class, next_attempt_at, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-	`, queueID, attemptNum, at, code, smtpResponse, class, nextStr, at); err != nil {
+		VALUES (?, (SELECT COALESCE(MAX(attempt_num), 0) + 1 FROM attempts WHERE queue_id = ?), ?, ?, ?, ?, ?, ?)
+	`, queueID, queueID, at, code, smtpResponse, class, nextStr, at); err != nil {
 		return fmt.Errorf("store: record attempt: %w", err)
 	}
 
@@ -335,11 +340,7 @@ func (s *Store) claimCleanup(now time.Time) bool {
 // would keep matching the "active"/"queued"/"deferred" filters indefinitely
 // even though it no longer exists in the spool.
 func (s *Store) RecordRemoval(queueID queueid.ID) error {
-	next, err := s.nextAttemptNum(queueID)
-	if err != nil {
-		return fmt.Errorf("store: record removal: %w", err)
-	}
-	return s.RecordAttempt(queueID, next, 0, "", ClassRemoved, nil)
+	return s.RecordAttempt(queueID, 0, "", ClassRemoved, nil)
 }
 
 // RecordRequeue records that an operator requeued a message. Unlike
@@ -353,10 +354,6 @@ func (s *Store) RecordRemoval(queueID queueid.ID) error {
 // absent from the queue view until its next delivery attempt overwrites
 // last_class.
 func (s *Store) RecordRequeue(queueID queueid.ID) error {
-	next, err := s.nextAttemptNum(queueID)
-	if err != nil {
-		return fmt.Errorf("store: record requeue: %w", err)
-	}
 	at := s.now().UTC().Format(time.RFC3339)
 
 	tx, err := s.db.Begin()
@@ -365,10 +362,13 @@ func (s *Store) RecordRequeue(queueID queueid.ID) error {
 	}
 	defer func() { _ = tx.Rollback() }()
 
+	// attempt_num is computed inside this INSERT for the same reason as in
+	// RecordAttempt: the transaction's first statement must be a write, or
+	// two writers for the same queue ID can draw the same number.
 	if _, err := tx.Exec(`
 		INSERT INTO attempts (queue_id, attempt_num, at_time, smtp_code, smtp_response, class, next_attempt_at, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-	`, queueID, next, at, sql.NullInt64{}, "", ClassRequeued, nil, at); err != nil {
+		VALUES (?, (SELECT COALESCE(MAX(attempt_num), 0) + 1 FROM attempts WHERE queue_id = ?), ?, ?, ?, ?, ?, ?)
+	`, queueID, queueID, at, sql.NullInt64{}, "", ClassRequeued, nil, at); err != nil {
 		return fmt.Errorf("store: record requeue: %w", err)
 	}
 	if _, err := tx.Exec(`UPDATE messages SET last_class = ?, last_attempt_at = ? WHERE queue_id = ?`,
@@ -379,18 +379,6 @@ func (s *Store) RecordRequeue(queueID queueid.ID) error {
 		return fmt.Errorf("store: record requeue: %w", err)
 	}
 	return nil
-}
-
-// nextAttemptNum is the attempt_num the next RecordAttempt row for queueID
-// must use, shared by RecordRemoval and RecordRequeue so the two cannot
-// compute it differently.
-func (s *Store) nextAttemptNum(queueID queueid.ID) (int, error) {
-	var next int
-	row := s.db.QueryRow(`SELECT COALESCE(MAX(attempt_num), 0) + 1 FROM attempts WHERE queue_id = ?`, queueID)
-	if err := row.Scan(&next); err != nil {
-		return 0, err
-	}
-	return next, nil
 }
 
 // ReconcileRemoved marks a message removed when its spool copy is already

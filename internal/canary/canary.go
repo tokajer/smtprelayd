@@ -11,10 +11,8 @@ import (
 	"time"
 
 	"github.com/tokajer/smtprelayd/internal/config"
-	"github.com/tokajer/smtprelayd/internal/metrics"
 	"github.com/tokajer/smtprelayd/internal/selfmail"
 	"github.com/tokajer/smtprelayd/internal/spool"
-	"github.com/tokajer/smtprelayd/internal/store"
 )
 
 // Runner enqueues one canary's message on that canary's schedule, which is
@@ -43,13 +41,13 @@ type Runner struct {
 // which are shared across every canary rather than per-entry settings. They
 // are passed as the two values they are: carrying the whole *config.Config
 // for them put every field of the configuration within reach of a probe that
-// needs a name and a duration. reg is nil-safe; see the note on
-// metrics.Registry.
-func New(c config.Canary, hostname string, lifetime time.Duration, sp *spool.Spool, st *store.Store, reg *metrics.Registry, log *slog.Logger) *Runner {
+// needs a name and a duration. mailer is the one selfmail.Mailer the
+// composition root builds.
+func New(c config.Canary, hostname string, lifetime time.Duration, mailer *selfmail.Mailer, log *slog.Logger) *Runner {
 	log = log.With("component", "canary", "name", c.Name)
 	return &Runner{
 		canary: c, hostname: hostname, lifetime: lifetime,
-		mailer: selfmail.New(sp, st, reg, log), log: log,
+		mailer: mailer, log: log,
 	}
 }
 

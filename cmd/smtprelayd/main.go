@@ -45,6 +45,7 @@ import (
 	"github.com/tokajer/smtprelayd/internal/logging"
 	"github.com/tokajer/smtprelayd/internal/metrics"
 	"github.com/tokajer/smtprelayd/internal/ostrust"
+	"github.com/tokajer/smtprelayd/internal/selfmail"
 	"github.com/tokajer/smtprelayd/internal/spool"
 	"github.com/tokajer/smtprelayd/internal/store"
 	"github.com/tokajer/smtprelayd/internal/web"
@@ -178,7 +179,14 @@ func serve(ctx context.Context, configPath string, console bool, ready chan<- er
 		return err
 	}
 
-	log, closer, err := openLog(cfg, console)
+	// Validated by config.Load; parsed once so the log and the dashboard
+	// share one *time.Location.
+	loc, err := config.ParseTimezone(cfg.Service.Timezone)
+	if err != nil {
+		return err
+	}
+
+	log, closer, err := openLog(cfg, loc, console)
 	if err != nil {
 		return err
 	}
@@ -232,7 +240,7 @@ func serve(ctx context.Context, configPath string, console bool, ready chan<- er
 	// and the metrics endpoint read it. It used to be built inside
 	// delivery.New and pulled back out through a getter, which hid the
 	// composition in a worker and left the listener with nothing to count on.
-	reg := metrics.New(deadlines, sp, routeNames(cfg), canaryNames(cfg), nil)
+	reg := metrics.New(deadlines, sp, routeNames(cfg), canaryNames(cfg))
 
 	set, err := listener.New(cfg, sp, st, reg, cert, log)
 	if err != nil {
@@ -256,24 +264,33 @@ func serve(ctx context.Context, configPath string, console bool, ready chan<- er
 		bg.Wait()
 	}()
 
-	notifier := bounce.New(cfg, sp, st, reg, log)
+	// The one selfmail.Mailer this process uses, built here in the
+	// composition root: the bounce notifier and every canary runner send
+	// through it, so the header block and the journal record for a
+	// relay-composed message cannot drift between them.
+	mailer := selfmail.New(sp, st, reg, log.With("component", "selfmail"))
+	notifier := bounce.New(cfg, mailer, st, log)
 	tokens, err := buildTokenSources(cfg, reg)
 	if err != nil {
 		log.Error("delivery: failed to start", "error", err)
 		return err
 	}
-	dm := delivery.New(cfg, sp, st, reg, tokens, notifier, log)
+	dm, err := delivery.New(cfg, sp, st, reg, tokens, notifier, log)
+	if err != nil {
+		log.Error("delivery: failed to start", "error", err)
+		return err
+	}
 	if err := verifyTokens(ctx, dm, log); err != nil {
 		return err
 	}
-	done := startWorkers(ctx, &bg, cfg, sp, st, reg, log, dm, notifier, deadlines)
+	done := startWorkers(ctx, &bg, cfg, sp, st, log, dm, notifier, mailer, deadlines)
 
 	// Both HTTP sockets are bound here, synchronously, for the reason
 	// set.Bind is separate from set.Run: a port already in use used to be a
 	// log line from a goroutine after the service had reported itself
 	// started, and on Windows the SCM then showed a running service with no
 	// dashboard.
-	if err := startHTTP(ctx, &bg, cfg, st, sp, reg, cert, deadlines, log); err != nil {
+	if err := startHTTP(ctx, &bg, cfg, st, sp, reg, cert, deadlines, loc, log); err != nil {
 		return err
 	}
 
@@ -430,17 +447,13 @@ func verifyTokens(ctx context.Context, dm *delivery.Manager, log *slog.Logger) e
 // openLog resolves the logging configuration and builds the process logger.
 // Every value it reads was already validated by config.Load; reaching an
 // error here means the file changed underneath us, which is not a case to
-// paper over.
-func openLog(cfg *config.Config, console bool) (*slog.Logger, io.Closer, error) {
+// paper over. loc is service.timezone, already parsed once by the caller.
+func openLog(cfg *config.Config, loc *time.Location, console bool) (*slog.Logger, io.Closer, error) {
 	level, err := config.ParseLevel(cfg.Service.LogLevel)
 	if err != nil {
 		return nil, nil, err
 	}
 	logFile, err := config.LogPath(cfg.Service.DataDir, cfg.Log.File)
-	if err != nil {
-		return nil, nil, err
-	}
-	loc, err := config.ParseTimezone(cfg.Service.Timezone)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -472,8 +485,8 @@ func openSpool(cfg *config.Config) (*spool.Spool, error) {
 // stopped. The caller waits on it only to take an accurate final queue
 // count; shutdown itself is bg.Wait.
 func startWorkers(ctx context.Context, bg *sync.WaitGroup, cfg *config.Config,
-	sp *spool.Spool, st *store.Store, reg *metrics.Registry, log *slog.Logger,
-	dm *delivery.Manager, notifier *bounce.Notifier, deadlines []expiry.Item) <-chan struct{} {
+	sp *spool.Spool, st *store.Store, log *slog.Logger,
+	dm *delivery.Manager, notifier *bounce.Notifier, mailer *selfmail.Mailer, deadlines []expiry.Item) <-chan struct{} {
 	done := make(chan struct{})
 	bg.Go(func() {
 		dm.Run(ctx)
@@ -485,7 +498,7 @@ func startWorkers(ctx context.Context, bg *sync.WaitGroup, cfg *config.Config,
 	bg.Go(func() { notifier.Run(ctx); <-done; notifier.Flush() })
 	lifetime := time.Duration(cfg.Queue.MaxLifetimeHours) * time.Hour
 	for _, c := range cfg.Canaries {
-		r := canary.New(c, cfg.Service.Hostname, lifetime, sp, st, reg, log)
+		r := canary.New(c, cfg.Service.Hostname, lifetime, mailer, log)
 		bg.Go(func() { r.Run(ctx) })
 	}
 	// Started unconditionally: it reports through the notifier, which
@@ -502,7 +515,7 @@ func startWorkers(ctx context.Context, bg *sync.WaitGroup, cfg *config.Config,
 // after the service has reported itself started.
 func startHTTP(ctx context.Context, bg *sync.WaitGroup, cfg *config.Config,
 	st *store.Store, sp *spool.Spool, reg *metrics.Registry, cert *tls.Certificate,
-	deadlines []expiry.Item, log *slog.Logger) error {
+	deadlines []expiry.Item, loc *time.Location, log *slog.Logger) error {
 	if cfg.Metrics.Enabled {
 		ln, err := metrics.Listen(cfg)
 		if err != nil {
@@ -519,7 +532,7 @@ func startHTTP(ctx context.Context, bg *sync.WaitGroup, cfg *config.Config,
 		return nil
 	}
 
-	ws, err := web.New(cfg, sp, st, reg, deadlines, version, log)
+	ws, err := web.New(cfg, sp, st, reg, deadlines, loc, version, log)
 	if err != nil {
 		log.Error("web: failed to start", "error", err)
 		return err

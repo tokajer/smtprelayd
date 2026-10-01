@@ -103,6 +103,8 @@ func decodeChallenge(b []byte) string {
 	return fmt.Sprintf("status %s, schemes %q, scope %q", e.Status, e.Schemes, e.Scope)
 }
 
+// oneLine has a byte-identical copy in internal/authms365/token.go: the two
+// packages must not import each other, so fix any change here there too.
 func oneLine(s string, max int) string {
 	s = strings.Map(func(r rune) rune {
 		if r == '\r' || r == '\n' || r == '\t' {

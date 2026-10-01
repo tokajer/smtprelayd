@@ -5,13 +5,17 @@ package delivery
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/textproto"
+	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -21,6 +25,7 @@ import (
 	"github.com/tokajer/smtprelayd/internal/expiry"
 	"github.com/tokajer/smtprelayd/internal/metrics"
 	"github.com/tokajer/smtprelayd/internal/queueid"
+	"github.com/tokajer/smtprelayd/internal/selfmail"
 	"github.com/tokajer/smtprelayd/internal/spool"
 	"github.com/tokajer/smtprelayd/internal/store"
 )
@@ -39,7 +44,7 @@ func testRegistry(cfg *config.Config, sp *spool.Spool) *metrics.Registry {
 	for _, c := range cfg.Canaries {
 		canaries = append(canaries, c.Name)
 	}
-	return metrics.New(expiry.Items(cfg, nil), sp, routes, canaries, nil)
+	return metrics.New(expiry.Items(cfg, nil), sp, routes, canaries)
 }
 
 // testManager builds a manager with the collaborators serve() would give
@@ -61,6 +66,7 @@ func testManager(t *testing.T, tokens map[string]smarthost.TokenSource) (*Manage
 		},
 		Routes: []config.Route{{Name: "m365", Auth: "none", MaxConcurrent: 1}},
 	}
+	cfg.Normalize()
 	sp, err := spool.Open(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
@@ -71,8 +77,12 @@ func testManager(t *testing.T, tokens map[string]smarthost.TokenSource) (*Manage
 	}
 	t.Cleanup(func() { _ = st.Close() })
 	reg := testRegistry(cfg, sp)
-	notifier := bounce.New(cfg, sp, st, reg, discardLog())
-	m := New(cfg, sp, st, reg, tokens, notifier, discardLog())
+	mailer := selfmail.New(sp, st, reg, discardLog())
+	notifier := bounce.New(cfg, mailer, st, discardLog())
+	m, err := New(cfg, sp, st, reg, tokens, notifier, discardLog())
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
 	return m, sp, notifier, reg
 }
 
@@ -348,7 +358,7 @@ func TestHoldNeverDefersPastExpiry(t *testing.T) {
 // real SQLite file can be put into on demand.
 type failingJournal struct{}
 
-func (failingJournal) RecordAttempt(queueid.ID, int, int, string, store.Class, *time.Time) error {
+func (failingJournal) RecordAttempt(queueid.ID, int, string, store.Class, *time.Time) error {
 	return errors.New("history store unavailable")
 }
 
@@ -357,12 +367,16 @@ func (failingJournal) RecordAttempt(queueid.ID, int, int, string, store.Class, *
 // with the spool, which nobody reports on its own.
 func TestJournalWriteFailureIsCounted(t *testing.T) {
 	cfg := &config.Config{Routes: []config.Route{{Name: "m365", Auth: "none", MaxConcurrent: 1}}}
+	cfg.Normalize()
 	sp, err := spool.Open(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
 	reg := testRegistry(cfg, sp)
-	m := New(cfg, sp, failingJournal{}, reg, nil, nil, discardLog())
+	m, err := New(cfg, sp, failingJournal{}, reg, nil, nil, discardLog())
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
 
 	id, err := queueid.New()
 	if err != nil {
@@ -385,6 +399,7 @@ func TestExpiredTemporaryFailureIsRecordedAsExpiredNotDeferred(t *testing.T) {
 		Queue:  config.Queue{MaxLifetimeHours: 1, RetryScheduleMin: []int{1}},
 		Routes: []config.Route{{Name: "m365", Auth: "none", MaxConcurrent: 1}},
 	}
+	cfg.Normalize()
 	sp, err := spool.Open(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
@@ -395,7 +410,10 @@ func TestExpiredTemporaryFailureIsRecordedAsExpiredNotDeferred(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = st.Close() })
 	reg := testRegistry(cfg, sp)
-	m := New(cfg, sp, st, reg, nil, nil, discardLog())
+	m, err := New(cfg, sp, st, reg, nil, nil, discardLog())
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
 
 	now := time.Now()
 	env := spool.Envelope{From: "a@example.at", To: []string{"b@example.net"}, Route: "m365",
@@ -443,5 +461,108 @@ func TestExpiredTemporaryFailureIsRecordedAsExpiredNotDeferred(t *testing.T) {
 	}
 	if last := msg.Attempts[len(msg.Attempts)-1]; last.Class != store.ClassExpired {
 		t.Errorf("journalled class = %q, want %q", last.Class, store.ClassExpired)
+	}
+}
+
+// fakeFailRecorder records every RecordFail call, so a test can assert the
+// bounce digest path was reached without going through a real
+// bounce.Notifier.
+type fakeFailRecorder struct {
+	mu  sync.Mutex
+	ids []queueid.ID
+}
+
+func (f *fakeFailRecorder) RecordFail(origin string, id queueid.ID) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.ids = append(f.ids, id)
+}
+
+// RecordFail must run even when Spool.Fail's move to spool/failed fails:
+// the journal write just above it has already recorded the message as
+// permanent, so skipping RecordFail would leave a message the history
+// already calls bounced never reaching the bounce digest. This drives that
+// exact failure by making spool/failed unwritable, so the rename inside
+// Fail fails, and asserts RecordFail is still called and that the move
+// really did fail.
+func TestFailStillReportsAPermanentFailureWhenMovingItAsideFails(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("chmod does not restrict a directory's writability on Windows the way it does on Unix")
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores directory permission bits, so the rename would not fail")
+	}
+
+	dataDir := t.TempDir()
+	sp, err := spool.Open(dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, err := store.Open(filepath.Join(t.TempDir(), "history.db"), discardLog(), 90, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+
+	cfg := &config.Config{Routes: []config.Route{{Name: "m365", Auth: "none", MaxConcurrent: 1}}}
+	cfg.Normalize()
+	reg := testRegistry(cfg, sp)
+	fails := &fakeFailRecorder{}
+	m, err := New(cfg, sp, st, reg, nil, fails, discardLog())
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	// The injectable deliver seam: a permanent failure without a real
+	// smarthost connection.
+	m.deliver = func(ctx context.Context, route config.Route, tlsConf *tls.Config,
+		msg smarthost.Message, timeout time.Duration, tokens smarthost.TokenSource) error {
+		return &smarthost.PermError{Err: errors.New("550 rejected")}
+	}
+
+	now := time.Now()
+	env := spool.Envelope{From: "a@example.at", To: []string{"b@example.net"},
+		Route: "m365", Origin: "printers", Received: now}
+	id, err := sp.Enqueue(env, strings.NewReader("x"), 0, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.RecordMessage(store.MessageRecord{
+		QueueID: id, Origin: "printers", Route: "m365",
+		EnvelopeFrom: "a@example.at", Recipients: []string{"b@example.net"},
+		Listener: "smtp", RemoteAddr: "127.0.0.1", ReceivedAt: now, ExpiresAt: now.Add(time.Hour),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	meta, ok := sp.Claim(time.Now())
+	if !ok {
+		t.Fatal("nothing to claim")
+	}
+
+	// No write permission on spool/failed: Fail's renames of both the body
+	// and the metadata into it fail, which is what this test is about.
+	failedDir := filepath.Join(dataDir, "spool", "failed")
+	if err := os.Chmod(failedDir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(failedDir, 0o700) })
+
+	m.attempt(context.Background(), m.routes["m365"], meta)
+
+	fails.mu.Lock()
+	got := append([]queueid.ID(nil), fails.ids...)
+	fails.mu.Unlock()
+	if len(got) != 1 || got[0] != id {
+		t.Fatalf("FailRecorder.RecordFail calls = %v, want exactly [%s]", got, id)
+	}
+
+	// The move itself must actually have failed, or this test would pass
+	// just as well on code that never hit the broken-rename path at all:
+	// the body must not have reached spool/failed, and must still be in the
+	// queue directory where the next start can re-index it.
+	if _, err := os.Stat(filepath.Join(dataDir, "spool", "failed", id.String()+".eml")); !os.IsNotExist(err) {
+		t.Fatalf("spool/failed/%s.eml exists (stat err: %v), want the move to have failed", id, err)
+	}
+	if _, err := os.Stat(filepath.Join(dataDir, "spool", "queue", id.String()+".eml")); err != nil {
+		t.Fatalf("spool/queue/%s.eml missing: %v, want it still there after a failed move", id, err)
 	}
 }

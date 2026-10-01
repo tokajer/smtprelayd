@@ -31,6 +31,7 @@ import (
 	"time"
 
 	"github.com/tokajer/smtprelayd/internal/config"
+	"github.com/tokajer/smtprelayd/internal/loopback"
 	"github.com/tokajer/smtprelayd/internal/store"
 )
 
@@ -118,7 +119,7 @@ func SourceAddr(r *http.Request) string {
 // is guarding, since that is the only thing the two call sites differ in.
 func RequireLoopbackHost(next http.Handler, log *slog.Logger) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !config.IsLoopbackHostHeader(r.Host) {
+		if !loopback.HostHeader(r.Host) {
 			log.Warn("request with a non-loopback Host header rejected",
 				"host", r.Host, "source", SourceAddr(r), "path", r.URL.Path)
 			http.Error(w, "this endpoint only answers requests addressed to loopback; "+

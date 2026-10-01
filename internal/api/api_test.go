@@ -10,10 +10,12 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -64,7 +66,7 @@ func testServer(t *testing.T) (*Server, *store.Store, *spool.Spool) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	reg := metrics.New(expiry.Items(cfg, nil), sp, []string{"m365", "legacy"}, nil, nil)
+	reg := metrics.New(expiry.Items(cfg, nil), sp, []string{"m365", "legacy"}, nil)
 	return New(cfg, sp, st, reg, "test", discardLog()), st, sp
 }
 
@@ -385,6 +387,76 @@ func TestRemovedStatusIsAccepted(t *testing.T) {
 	rec := doReq(srv.Handler(), http.MethodGet, "/messages?status=removed", readToken)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200 for the documented \"removed\" status", rec.Code)
+	}
+}
+
+// The JSON wire shape is messageView, attemptView and bounceView in
+// internal/api, which nothing checks against the store types at compile
+// time. This pins the key set of one messages response (including a nested
+// attempt row) and one bounces response against a golden list, so a field
+// added to or removed from a view fails a test instead of silently changing
+// docs/guides/API.md's contract.
+func TestMessageAndBounceViewsPinTheWireContract(t *testing.T) {
+	srv, st, sp := testServer(t)
+	id := enqueueTestMessage(t, st, sp, "m365")
+	if err := st.RecordAttempt(queueid.ID(id), 550, "5.1.1 User unknown", "permanent", nil); err != nil {
+		t.Fatal(err)
+	}
+
+	rec := doReq(srv.Handler(), http.MethodGet, "/messages/"+id, readToken)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /messages/{id}: status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var msg map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &msg); err != nil {
+		t.Fatal(err)
+	}
+	assertKeySet(t, "message", msg, []string{
+		"queue_id", "client", "route", "envelope_from", "recipients", "subject",
+		"listener", "remote_addr", "received_at", "expires_at", "tls_used",
+		"created_at", "status", "attempts", "attempt_count", "last_smtp_code", "last_error",
+	})
+
+	attempts, ok := msg["attempts"].([]any)
+	if !ok || len(attempts) != 1 {
+		t.Fatalf("message attempts = %v, want exactly one row", msg["attempts"])
+	}
+	attempt, ok := attempts[0].(map[string]any)
+	if !ok {
+		t.Fatalf("attempt row is not an object: %v", attempts[0])
+	}
+	assertKeySet(t, "attempt", attempt, []string{
+		"attempt_num", "at_time", "smtp_code", "smtp_response", "class",
+	})
+
+	rec = doReq(srv.Handler(), http.MethodGet, "/bounces", readToken)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /bounces: status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var bounces struct {
+		Bounces []map[string]any `json:"bounces"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &bounces); err != nil {
+		t.Fatal(err)
+	}
+	if len(bounces.Bounces) != 1 {
+		t.Fatalf("got %d bounce rows, want 1", len(bounces.Bounces))
+	}
+	assertKeySet(t, "bounce", bounces.Bounces[0], []string{
+		"queue_id", "class", "client", "route", "envelope_from", "recipients", "subject",
+		"attempts", "first_attempt", "last_attempt", "smtp_code", "smtp_response",
+	})
+}
+
+// assertKeySet compares the sorted key set of a decoded JSON object against
+// a golden list, so the failure names exactly which key is missing or
+// unexpected rather than just "objects differ".
+func assertKeySet(t *testing.T, label string, got map[string]any, want []string) {
+	t.Helper()
+	gotKeys := slices.Sorted(maps.Keys(got))
+	wantSorted := slices.Sorted(slices.Values(want))
+	if !slices.Equal(gotKeys, wantSorted) {
+		t.Fatalf("%s keys = %v, want %v", label, gotKeys, wantSorted)
 	}
 }
 

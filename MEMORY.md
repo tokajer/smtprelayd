@@ -58,6 +58,22 @@ libraries that do not exist understated it in the one direction that matters.
 
 ## 3. Component layout
 
+**Amended 2026-09-30, third pass.** A fourth architectural review, acted on
+in full; see `PROGRESS.md` for detail. `internal/loopback` is a new
+stdlib-only leaf holding `Host` and `HostHeader`. `internal/api` owns the
+wire contract itself now (`messageView`, `attemptView`, `bounceView` in
+`internal/api/views.go`) rather than tags on the store types. `delivery`'s
+`routeState` carries each route's compiled TLS configuration, built at
+startup in `delivery.New`, so a bad `min_tls` or `ca_pin` fails startup
+instead of bouncing every message offered to that route. `store` assigns
+`attempt_num` monotonically per message across every row type, including a
+requeue and a removal. `cmd/smtprelayd` builds one `selfmail.Mailer` in the
+composition root, shared by the bounce notifier and every canary runner.
+`queueaction.Actor` counts a failed journal write the way `delivery` and the
+listener already did. The accept loop's global-connection-cap refusal on an
+implicit-TLS listener closes without writing. A permanent failure whose move
+to `spool/failed` itself fails is still reported through the bounce digest.
+
 **Amended 2026-09-30, second pass.** A third architectural review, acted on
 in full. Structure: `internal/queueid` is a new stdlib-only leaf holding the
 queue ID type, so `internal/store`, the consumer-side `Journal` interfaces,
@@ -255,6 +271,8 @@ internal/queueaction  requeue and delete, shared by the dashboard and the API
 internal/httpx        bearer-token matching, source address, loopback Host
                       check, HTTP serve-and-drain -- the primitives more than
                       one of the three HTTP surfaces needs
+internal/loopback     stdlib-only leaf: is a host or an HTTP Host header
+                      loopback, shared by config validation, httpx and metrics
 internal/logging      structured JSON logging, rotation, central redaction
 internal/certgen      self-signed certificate for an internal listener
 internal/selftest     active open-relay check against the running instance
@@ -275,13 +293,37 @@ travels.
 
 File-based, no database in the hot path.
 
-- One message is two files: `<id>.env` (JSON envelope) and `<id>.eml` (raw data).
-- Durability sequence: write to `tmp/`, `fsync` the file, `fsync` the directory,
-  then `rename` into the target state directory. Rename is atomic on both
-  Linux and Windows (NTFS) for same-volume moves.
-- States are directories: `incoming/`, `active/`, `deferred/`, `failed/`.
-  A state transition is a rename, which makes crash recovery trivial: anything
-  found in `active/` at startup is moved back to `incoming/`.
+- One message is two files under `spool/queue/`: `<id>.json` (metadata --
+  envelope, attempt count, next-attempt time, expiry) and `<id>.eml` (the raw
+  body, one per-route copy). `spool/tmp/` is where both are written and
+  `fsync`ed before the atomic `rename` that makes them visible; `spool/failed/`
+  is where a permanently failed or expired message's pair moves to.
+- Durability sequence for a new message: write the body and the metadata to
+  `spool/tmp/`, `fsync` each file, `fsync` the directory, then `rename` into
+  `spool/queue/`. Body before metadata, always: metadata is what makes a
+  message visible, so a crash after the body lands but before the metadata
+  does leaves an orphaned body, never an orphaned metadata file with no body
+  behind it. Rename is atomic on both Linux and Windows (NTFS) for
+  same-volume moves.
+- Queued, leased and deferred are not directories, they are in-memory state:
+  `Spool.index` (keyed by queue ID) plus a process-local lease map. A message
+  is "deferred" purely by its `NextAttempt` timestamp being in the future;
+  becoming due again needs no code to run at all, only time passing.
+  `Spool.ClaimBatch` leases the oldest due messages up to a batch size,
+  skipping routes a dispatch tick has already found saturated.
+- Startup recovery (`Spool.Open` → `recover`) sweeps `spool/tmp/` (everything
+  in it belonged to an interrupted write, so it is simply removed), scans
+  `spool/queue/`, drops a body with no matching metadata and a metadata file
+  with no matching body (neither can be delivered or bounced meaningfully),
+  and re-indexes every complete pair into the in-memory index. Nothing here
+  is a rename between state directories; the only directory a message ever
+  moves between on disk is `spool/queue/` and `spool/failed/`.
+- Per-route isolation comes from `delivery.Manager`'s per-route worker slots
+  (`routeState.slots`, a channel sized `max_concurrent`) with non-blocking
+  acquisition in `dispatchOne`, not from separate queue buckets per route:
+  `ClaimBatch` scans the one live index for every route, and a route found
+  saturated on a tick is skipped for the rest of that tick rather than
+  waited on.
 - `failed/` is bounded, decided 2026-08-12. It counts towards
   `limits.spool_max_gb` — a permanently failed message still occupies the
   filesystem the quota exists to protect — and `queue.failed_retention_hours`
@@ -292,11 +334,18 @@ File-based, no database in the hot path.
   producing only permanent failures filled the disk unseen.
 - Queue ID: time-ordered, sortable, e.g. ULID. It is the correlation key across
   log lines, history rows and the dashboard.
-- Separate queue buckets per route so one stalled smarthost cannot block others.
 
 **Retry schedule**: 1, 5, 15, 30, 60 minutes, then every 2 hours up to a
 configurable maximum lifetime (default 4 days), then a DSN bounce.
 Distinguish 4xx (retry) from 5xx (fail immediately) responses.
+
+**Corrected 2026-09-30.** The bullets above through "per-route isolation"
+described a plan written before phase 1, never how the code was built: there
+were never `incoming/`, `active/` or `deferred/` directories, no per-message
+`.env` file, and no separate queue bucket per route. A fourth architectural
+review read the actual implementation (`internal/spool/spool.go`'s package
+doc, `Open`, `recover`, `ClaimBatch`, `Fail`, and `delivery.Manager`'s
+per-route worker slots) and corrected the description to match the tree.
 
 ## 5. Client model and sender rewriting
 

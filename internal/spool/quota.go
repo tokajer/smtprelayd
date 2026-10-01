@@ -134,6 +134,13 @@ func (s *Spool) liveAndFailedBytes() int64 {
 }
 
 // reserveQuota admits n bytes for a commit in flight.
+//
+// SHORTCUT: liveAndFailedBytes is read before the ledger lock is taken, so a
+// concurrent Commit transferring its own reservation into indexBytes in that
+// gap is counted in neither total, which can admit one message over the
+// configured ceiling. Ceiling: at most one message's size over quota.
+// Revisit if the quota must be exact rather than a ceiling with headroom --
+// the fix is doing that transfer under the ledger lock instead of under s.mu.
 func (s *Spool) reserveQuota(n int64) error {
 	return s.quota.reserve(n, s.liveAndFailedBytes())
 }

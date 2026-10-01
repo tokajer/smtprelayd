@@ -18,6 +18,7 @@ import (
 	"errors"
 	"log/slog"
 
+	"github.com/tokajer/smtprelayd/internal/metrics"
 	"github.com/tokajer/smtprelayd/internal/queueid"
 	"github.com/tokajer/smtprelayd/internal/spool"
 )
@@ -65,10 +66,14 @@ type Actor struct {
 	spool Queue
 	store Journal
 	log   *slog.Logger
+
+	// metrics may be nil; every method on it is nil-safe. See the note on
+	// metrics.Registry.
+	metrics *metrics.Registry
 }
 
-func New(q Queue, j Journal, log *slog.Logger) *Actor {
-	return &Actor{spool: q, store: j, log: log}
+func New(q Queue, j Journal, reg *metrics.Registry, log *slog.Logger) *Actor {
+	return &Actor{spool: q, store: j, metrics: reg, log: log}
 }
 
 // Requeue moves one message back into the live queue for immediate retry.
@@ -86,6 +91,7 @@ func (a *Actor) Requeue(id queueid.ID, by, source, details string) Outcome {
 	switch err := a.spool.Requeue(id, func() {
 		if rerr := a.store.RecordRequeue(id); rerr != nil {
 			a.log.Warn("requeue record write failed", "queue_id", id.String(), "error", rerr)
+			a.metrics.JournalWriteFailure()
 		}
 	}); {
 	case err == nil:
@@ -123,6 +129,7 @@ func (a *Actor) Delete(id queueid.ID, by, source, details string) Outcome {
 	case err == nil:
 		if rerr := a.store.RecordRemoval(id); rerr != nil {
 			a.log.Warn("removal record write failed", "queue_id", id.String(), "error", rerr)
+			a.metrics.JournalWriteFailure()
 		}
 		a.audit(by, source, "delete", id, details)
 		return Done
@@ -154,6 +161,7 @@ func (a *Actor) Delete(id queueid.ID, by, source, details string) Outcome {
 func (a *Actor) audit(by, source, action string, id queueid.ID, details string) {
 	if err := a.store.RecordAudit(by, source, action, id, details); err != nil {
 		a.log.Warn("audit log write failed", "action", action, "queue_id", id.String(), "error", err)
+		a.metrics.JournalWriteFailure()
 	}
 }
 

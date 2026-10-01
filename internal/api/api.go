@@ -15,16 +15,27 @@ import (
 	"github.com/tokajer/smtprelayd/internal/httpx"
 	"github.com/tokajer/smtprelayd/internal/metrics"
 	"github.com/tokajer/smtprelayd/internal/queueaction"
-	"github.com/tokajer/smtprelayd/internal/spool"
+	"github.com/tokajer/smtprelayd/internal/queueid"
 	"github.com/tokajer/smtprelayd/internal/store"
 )
+
+// Store is what the API needs from the history store: the write methods
+// queueaction.Journal already declares, plus the three reads this package's
+// own handlers issue. Declared on the consumer side, like queueaction.Queue
+// and queueaction.Journal, so a fake can stand in for *store.Store in a test.
+type Store interface {
+	queueaction.Journal
+	FindBounceSummaries(filter store.BounceFilter) ([]store.BounceSummary, bool, error)
+	FindMessages(filter store.MessageFilter) ([]*store.Message, bool, error)
+	FindMessageByID(queueID queueid.ID) (*store.Message, error)
+}
 
 // Server serves the bearer-token-authenticated JSON API described in
 // docs/guides/API.md. It shares the dashboard's listener and its store, spool and
 // metrics registry; nothing here owns them.
 type Server struct {
 	cfg     *config.Config
-	store   *store.Store
+	store   Store
 	metrics *metrics.Registry
 	version string
 	log     *slog.Logger
@@ -38,11 +49,11 @@ type Server struct {
 
 // New builds an API server. reg is nil-safe; see the note on
 // metrics.Registry.
-func New(cfg *config.Config, sp *spool.Spool, st *store.Store, reg *metrics.Registry, version string, log *slog.Logger) *Server {
+func New(cfg *config.Config, q queueaction.Queue, st Store, reg *metrics.Registry, version string, log *slog.Logger) *Server {
 	return &Server{
 		cfg: cfg, store: st, metrics: reg, version: version,
 		log: log.With("component", "api"), fails: newFailLimiter(),
-		actions: queueaction.New(sp, st, log.With("component", "api")),
+		actions: queueaction.New(q, st, reg, log.With("component", "api")),
 	}
 }
 

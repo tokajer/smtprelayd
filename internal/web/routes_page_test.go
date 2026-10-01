@@ -33,11 +33,11 @@ func TestRoutesPageShowsEveryRouteCounter(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	reg := metrics.New(expiry.Items(cfg, nil), sp, []string{"m365"}, nil, nil)
+	reg := metrics.New(expiry.Items(cfg, nil), sp, []string{"m365"}, nil)
 	reg.Delivered("m365")
 	reg.RecipientsRefused("m365", 7)
 
-	srv, err := New(cfg, sp, st, reg, nil, "test", discardLog())
+	srv, err := New(cfg, sp, st, reg, nil, nil, "test", discardLog())
 	if err != nil {
 		t.Fatal(err)
 	}

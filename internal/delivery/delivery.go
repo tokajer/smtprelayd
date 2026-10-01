@@ -6,6 +6,7 @@ package delivery
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -41,7 +42,7 @@ const wakeDebounce = 100 * time.Millisecond
 // fake that returns an error, which a real *store.Store backed by SQLite is
 // not a state a test can put on demand.
 type Journal interface {
-	RecordAttempt(queueID queueid.ID, attemptNum int, smtpCode int, smtpResponse string, class store.Class, nextAttemptAt *time.Time) error
+	RecordAttempt(queueID queueid.ID, smtpCode int, smtpResponse string, class store.Class, nextAttemptAt *time.Time) error
 }
 
 // FailRecorder is told about every message that failed permanently or
@@ -54,6 +55,18 @@ type FailRecorder interface {
 	RecordFail(origin string, id queueid.ID)
 }
 
+// routeState is everything dispatch needs about one configured route,
+// resolved once at startup rather than on every attempt: its own copy of
+// the config, its compiled TLS configuration (nil for tls = "none"), its
+// concurrency budget, and its OAuth2 token source (nil unless auth is
+// xoauth2).
+type routeState struct {
+	cfg    config.Route
+	tls    *tls.Config
+	slots  chan struct{}
+	tokens smarthost.TokenSource
+}
+
 // Manager drains the spool into the configured routes.
 type Manager struct {
 	cfg     *config.Config
@@ -63,17 +76,14 @@ type Manager struct {
 	metrics *metrics.Registry
 	fails   FailRecorder
 
-	// routes holds the per-route concurrency budget, limits the per-route
-	// messages per minute, tokens the OAuth2 source for xoauth2 routes.
+	// routes holds each configured route's resolved state; see routeState.
 	//
 	// rate paces what one smarthost is handed: Microsoft 365 answers a burst
 	// with 4.7.500 rather than queueing it, and a rejected attempt costs a
 	// full connection and an authentication round trip, so pacing here is
 	// cheaper than retrying there. It is internal/ratelimit, the same bucket
 	// the listener caps a client with.
-	routes map[string]chan struct{}
-	limits map[string]int
-	tokens map[string]smarthost.TokenSource
+	routes map[string]*routeState
 	rate   *ratelimit.Limiter
 	wg     sync.WaitGroup
 
@@ -83,10 +93,18 @@ type Manager struct {
 	// which is what lets a temporary failure past a message's expiry be
 	// driven deterministically instead of by a real clock.
 	now func() time.Time
+
+	// deliver is smarthost.Deliver, indirected as a test seam the way now
+	// is: only a test assigns something else, which is what lets a delivery
+	// outcome be driven deterministically instead of by a real connection to
+	// a smarthost.
+	deliver func(ctx context.Context, route config.Route, tlsConf *tls.Config, msg smarthost.Message, timeout time.Duration, tokens smarthost.TokenSource) error
 }
 
 // New builds the delivery manager. Each route gets its own concurrency budget
-// so that one slow smarthost cannot starve the others.
+// so that one slow smarthost cannot starve the others, and its TLS
+// configuration is compiled once here: a bad min_tls or ca_pin fails
+// startup instead of bouncing every message offered to that route.
 //
 // reg, tokens and fails are injected rather than built here: the registry is
 // shared with the listener, the dashboard and the metrics endpoint, the
@@ -95,21 +113,28 @@ type Manager struct {
 // runs on its own goroutine that the caller owns -- so none of the three is
 // this package's to construct. fails may be nil, in which case permanent
 // failures are moved aside without anyone being told.
-func New(cfg *config.Config, sp *spool.Spool, j Journal, reg *metrics.Registry, tokens map[string]smarthost.TokenSource, fails FailRecorder, log *slog.Logger) *Manager {
+func New(cfg *config.Config, sp *spool.Spool, j Journal, reg *metrics.Registry, tokens map[string]smarthost.TokenSource, fails FailRecorder, log *slog.Logger) (*Manager, error) {
 	m := &Manager{
 		cfg: cfg, spool: sp, history: j, log: log.With("component", "delivery"),
 		metrics: reg, fails: fails,
-		routes: map[string]chan struct{}{},
-		limits: map[string]int{},
-		tokens: tokens,
-		rate:   ratelimit.New(),
-		now:    time.Now,
+		routes:  map[string]*routeState{},
+		rate:    ratelimit.New(),
+		now:     time.Now,
+		deliver: smarthost.Deliver,
 	}
 	for _, r := range cfg.Routes {
-		m.routes[r.Name] = make(chan struct{}, r.MaxConcurrent)
-		m.limits[r.Name] = r.RateLimitPerMin
+		tlsConf, err := smarthost.TLSConfig(r)
+		if err != nil {
+			return nil, fmt.Errorf("route %s: %w", r.Name, err)
+		}
+		m.routes[r.Name] = &routeState{
+			cfg:    r,
+			tls:    tlsConf,
+			slots:  make(chan struct{}, r.MaxConcurrent),
+			tokens: tokens[r.Name],
+		}
 	}
-	return m
+	return m, nil
 }
 
 // VerifyTokens eagerly acquires a token for every xoauth2 route. Without this,
@@ -130,11 +155,11 @@ func New(cfg *config.Config, sp *spool.Spool, j Journal, reg *metrics.Registry, 
 // credential.
 func (m *Manager) VerifyTokens(ctx context.Context) error {
 	for _, r := range m.cfg.Routes {
-		ts, ok := m.tokens[r.Name]
-		if !ok {
+		rs := m.routes[r.Name]
+		if rs.tokens == nil {
 			continue
 		}
-		if _, err := ts.Token(ctx); err != nil {
+		if _, err := rs.tokens.Token(ctx); err != nil {
 			return fmt.Errorf("route %s: %w", r.Name, err)
 		}
 	}
@@ -240,7 +265,7 @@ func (m *Manager) dispatchOne(ctx context.Context, meta *spool.Meta, saturated m
 		return false
 	}
 	route := meta.Envelope.Route
-	budget, ok := m.routes[route]
+	rs, ok := m.routes[route]
 	if !ok {
 		log := m.log.With("queue_id", meta.ID.String(), "route", route)
 		log.Error("queued message references unknown route")
@@ -250,7 +275,7 @@ func (m *Manager) dispatchOne(ctx context.Context, meta *spool.Meta, saturated m
 	// Slot first, rate limit second; see the note at the Allow call below for
 	// why the order matters.
 	select {
-	case budget <- struct{}{}:
+	case rs.slots <- struct{}{}:
 	case <-ctx.Done():
 		return false
 	default:
@@ -274,8 +299,8 @@ func (m *Manager) dispatchOne(ctx context.Context, meta *spool.Meta, saturated m
 	// saturated route, and the limiter has no way to refund it, so a token
 	// spent before the slot check was won would be one send permanently
 	// lost from the budget every time no slot was free.
-	if wait, ok := m.rate.Allow(route, m.limits[route], m.now()); !ok {
-		<-budget
+	if wait, ok := m.rate.Allow(route, rs.cfg.RateLimitPerMin, m.now()); !ok {
+		<-rs.slots
 		saturated[route] = true
 		m.hold(meta, wait)
 		return true
@@ -283,10 +308,10 @@ func (m *Manager) dispatchOne(ctx context.Context, meta *spool.Meta, saturated m
 	m.wg.Add(1)
 	go func() {
 		defer func() {
-			<-budget
+			<-rs.slots
 			m.wg.Done()
 		}()
-		m.attempt(ctx, meta)
+		m.attempt(ctx, rs, meta)
 	}()
 	return true
 }
@@ -295,15 +320,10 @@ func (m *Manager) dispatchOne(ctx context.Context, meta *spool.Meta, saturated m
 // halves are apart deliberately: send decides what happened on the wire,
 // record decides what that means for the message, the counters and the
 // journal, and neither needs to be read to follow the other.
-func (m *Manager) attempt(ctx context.Context, meta *spool.Meta) {
+func (m *Manager) attempt(ctx context.Context, rs *routeState, meta *spool.Meta) {
 	log := m.log.With("queue_id", meta.ID.String(), "route", meta.Envelope.Route)
 
-	route, ok := m.cfg.Route(meta.Envelope.Route)
-	if !ok {
-		m.failUnsendable(log, meta, "route no longer configured")
-		return
-	}
-	res, ok := m.send(ctx, log, route, meta)
+	res, ok := m.send(ctx, log, rs, meta)
 	if !ok {
 		return
 	}
@@ -337,7 +357,7 @@ type attemptResult struct {
 // mean "delivered, do not retry" into a nil error. It reports false when the
 // message could not be offered at all, in which case it has already been
 // failed and there is nothing for the caller to record.
-func (m *Manager) send(ctx context.Context, log *slog.Logger, route config.Route, meta *spool.Meta) (attemptResult, bool) {
+func (m *Manager) send(ctx context.Context, log *slog.Logger, rs *routeState, meta *spool.Meta) (attemptResult, bool) {
 	f, err := m.spool.OpenBody(meta.ID)
 	if err != nil {
 		log.Error("cannot open queued message", "error", err)
@@ -361,12 +381,12 @@ func (m *Manager) send(ctx context.Context, log *slog.Logger, route config.Route
 	defer closeBody()
 
 	start := time.Now()
-	err = smarthost.Deliver(ctx, route, smarthost.Message{
+	err = m.deliver(ctx, rs.cfg, rs.tls, smarthost.Message{
 		From: meta.Envelope.From,
 		To:   meta.Envelope.To,
 		Data: f,
 		Helo: m.cfg.Service.Hostname,
-	}, time.Duration(m.cfg.Limits.DeliveryTimeoutSec)*time.Second, m.tokens[route.Name])
+	}, time.Duration(m.cfg.Limits.DeliveryTimeoutSec)*time.Second, rs.tokens)
 	res := attemptResult{err: err, elapsed: time.Since(start)}
 	closeBody()
 
@@ -507,7 +527,7 @@ func (m *Manager) recordOutcome(meta *spool.Meta, o outcome, err error) {
 // stopped accepting writes otherwise shows up only as a dashboard that slowly
 // empties, which nobody reports.
 func (m *Manager) journal(log *slog.Logger, meta *spool.Meta, code int, resp string, class store.Class, next *time.Time) {
-	if err := m.history.RecordAttempt(meta.ID, meta.Attempts, code, resp, class, next); err != nil {
+	if err := m.history.RecordAttempt(meta.ID, code, resp, class, next); err != nil {
 		log.Warn("history journal write failed", "class", class, "error", err)
 		m.metrics.JournalWriteFailure()
 	}
@@ -563,9 +583,17 @@ func (m *Manager) fail(log *slog.Logger, meta *spool.Meta, class store.Class, co
 	// The message is moved aside into spool/failed rather than deleted, so
 	// that nothing is lost without a trace, and reported through the bounce
 	// digest via FailRecorder below.
+	//
+	// A failure here does not skip the report below: the journal write above
+	// already calls this message permanent, and the bounce digest reads that
+	// store, not the spool, so an operator still has to be told about it even
+	// when the move aside itself failed. The error is logged, not swallowed,
+	// which is all this path can still do about it. If the move failed, the
+	// pair can stay in the queue directory and be re-indexed at the next
+	// start, so a later permanent failure can report the message twice in
+	// the digest -- a duplicate rather than a loss.
 	if err := m.spool.Fail(meta, reason); err != nil {
 		log.Error("cannot move failed message aside", "error", err)
-		return
 	}
 	// A notification message failing is never recorded as a bounce to
 	// notify about: that is exactly how a notification loop would start. A

@@ -60,7 +60,7 @@ func TestLoadRecordThroughput(t *testing.T) {
 		}); err != nil {
 			t.Fatal(err)
 		}
-		if err := s.RecordAttempt(queueid.ID(id), 1, 250, "2.0.0 OK", "delivered", nil); err != nil {
+		if err := s.RecordAttempt(queueid.ID(id), 250, "2.0.0 OK", "delivered", nil); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -142,7 +142,7 @@ func TestLoadQueriesAtOneMillion(t *testing.T) {
 		}); err != nil {
 			t.Fatal(err)
 		}
-		if err := s.RecordAttempt(queueid.ID(id), 1, 250, "2.0.0 OK", "delivered", nil); err != nil {
+		if err := s.RecordAttempt(queueid.ID(id), 250, "2.0.0 OK", "delivered", nil); err != nil {
 			t.Fatal(err)
 		}
 	}

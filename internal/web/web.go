@@ -10,6 +10,7 @@ import (
 	"html/template"
 	"log/slog"
 	"net/http"
+	"time"
 
 	"github.com/tokajer/smtprelayd/internal/config"
 	"github.com/tokajer/smtprelayd/internal/expiry"
@@ -81,14 +82,12 @@ type Server struct {
 // New parses the embedded templates and builds a dashboard server. cfg, sp,
 // st and reg must outlive the server; nothing here mutates them. reg is
 // nil-safe; see the note on metrics.Registry. deadlines is computed once in
-// cmd/smtprelayd.
+// cmd/smtprelayd. loc is service.timezone, already parsed once by the
+// caller; nil renders every timestamp in whatever zone it already carries
+// (UTC, since that is what the store persists).
 func New(cfg *config.Config, sp *spool.Spool, st *store.Store, reg *metrics.Registry,
-	deadlines []expiry.Item, version string, log *slog.Logger) (*Server, error) {
+	deadlines []expiry.Item, loc *time.Location, version string, log *slog.Logger) (*Server, error) {
 	tmpl := make(map[string]*template.Template, len(dashboardPages))
-	// Load already validated service.timezone; a nil Location here just
-	// means every timestamp keeps rendering in whatever zone it already
-	// carries (UTC, since that is what the store persists).
-	loc, _ := config.ParseTimezone(cfg.Service.Timezone)
 	funcs := template.FuncMap{"bytes": formatBytes, "localtime": localtimeFunc(loc)}
 	for _, p := range dashboardPages {
 		t, err := template.New(p.name).Funcs(funcs).ParseFS(templateFS,
@@ -111,7 +110,7 @@ func New(cfg *config.Config, sp *spool.Spool, st *store.Store, reg *metrics.Regi
 		cfg: cfg, store: st, spool: sp, metrics: reg, deadlines: deadlines, version: version,
 		log: log.With("component", "web"), tmpl: tmpl, csrf: csrf,
 		css: css, theme: themeMode(cfg.Web.Theme),
-		actions: queueaction.New(sp, st, log.With("component", "web")),
+		actions: queueaction.New(sp, st, reg, log.With("component", "web")),
 	}, nil
 }
 

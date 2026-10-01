@@ -18,6 +18,7 @@ import (
 	"github.com/tokajer/smtprelayd/internal/config"
 	"github.com/tokajer/smtprelayd/internal/metrics"
 	"github.com/tokajer/smtprelayd/internal/queueid"
+	"github.com/tokajer/smtprelayd/internal/selfmail"
 	"github.com/tokajer/smtprelayd/internal/spool"
 	"github.com/tokajer/smtprelayd/internal/store"
 )
@@ -179,8 +180,12 @@ func managerAgainst(t *testing.T, f *fakeSmarthost) (*Manager, *spool.Spool, *st
 	}
 	t.Cleanup(func() { _ = st.Close() })
 	reg := testRegistry(cfg, sp)
-	notifier := bounce.New(cfg, sp, st, reg, discardLog())
-	m := New(cfg, sp, st, reg, nil, notifier, discardLog())
+	mailer := selfmail.New(sp, st, reg, discardLog())
+	notifier := bounce.New(cfg, mailer, st, discardLog())
+	m, err := New(cfg, sp, st, reg, nil, notifier, discardLog())
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
 	return m, sp, st, notifier, reg
 }
 
@@ -228,7 +233,7 @@ func TestAttemptDeliveredRemovesTheMessage(t *testing.T) {
 	m, sp, st, _, _ := managerAgainst(t, f)
 	id, meta := queueOne(t, sp, st, time.Hour)
 
-	m.attempt(context.Background(), meta)
+	m.attempt(context.Background(), m.routes["smarthost"], meta)
 
 	if sp.Has(id) {
 		t.Error("a delivered message is still in the spool")
@@ -245,7 +250,7 @@ func TestAttemptPermanentFailureMovesTheMessageAside(t *testing.T) {
 	m, sp, st, notifier, _ := managerAgainst(t, f)
 	id, meta := queueOne(t, sp, st, time.Hour)
 
-	m.attempt(context.Background(), meta)
+	m.attempt(context.Background(), m.routes["smarthost"], meta)
 
 	// Has stays true on purpose -- it reports "the spool still holds files
 	// for this", and a failed message keeps them under spool/failed so the
@@ -274,7 +279,7 @@ func TestAttemptTemporaryFailureDefersWithBackoff(t *testing.T) {
 	m, sp, st, _, _ := managerAgainst(t, f)
 	id, meta := queueOne(t, sp, st, time.Hour)
 
-	m.attempt(context.Background(), meta)
+	m.attempt(context.Background(), m.routes["smarthost"], meta)
 
 	if !sp.Has(id) {
 		t.Fatal("a temporarily failed message was dropped from the queue")
@@ -298,13 +303,19 @@ func TestAttemptTemporaryFailureDefersWithBackoff(t *testing.T) {
 // being queued and being attempted must still get a journal row -- the two
 // paths that fail before ever reaching the smarthost used to leave none,
 // which made the dashboard show nothing for a message that provably existed.
+//
+// dispatchOne is the only place that looks a route up and decides it does
+// not exist; attempt itself never resolves a route name. This goes through
+// dispatchOne rather than calling attempt directly.
 func TestAttemptUnknownRouteRecordsAPermanentJournalRow(t *testing.T) {
 	f := startFakeSmarthost(t, "250 2.0.0 accepted")
 	m, sp, st, _, _ := managerAgainst(t, f)
 	id, meta := queueOne(t, sp, st, time.Hour)
 	meta.Envelope.Route = "no-such-route"
 
-	m.attempt(context.Background(), meta)
+	if ok := m.dispatchOne(context.Background(), meta, map[string]bool{}); !ok {
+		t.Fatal("dispatchOne reported cancellation on a live context")
+	}
 
 	msg, err := st.FindMessageByID(id)
 	if err != nil {
@@ -331,7 +342,7 @@ func TestAttemptCancelledContextLeavesNoAttemptOrJournalRow(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	m.attempt(ctx, meta)
+	m.attempt(ctx, m.routes["smarthost"], meta)
 
 	if meta.Attempts != 0 {
 		t.Errorf("attempts = %d after a cancelled attempt, want 0", meta.Attempts)
@@ -369,7 +380,7 @@ func TestAttemptPastExpiryIsGivenUpOn(t *testing.T) {
 	id, meta := queueOne(t, sp, st, time.Hour)
 	meta.Expires = time.Now().Add(-time.Minute)
 
-	m.attempt(context.Background(), meta)
+	m.attempt(context.Background(), m.routes["smarthost"], meta)
 
 	if sp.Len() != 0 {
 		t.Errorf("the live queue still holds %d message(s) after expiry", sp.Len())
@@ -410,11 +421,11 @@ func TestUnsendablePathsRecordAPermanentJournalRow(t *testing.T) {
 				if err := sp.Remove(meta.ID); err != nil {
 					t.Fatal(err)
 				}
-				route, ok := m.cfg.Route(meta.Envelope.Route)
+				rs, ok := m.routes[meta.Envelope.Route]
 				if !ok {
 					t.Fatal("route not found")
 				}
-				if _, ok := m.send(context.Background(), discardLog(), route, meta); ok {
+				if _, ok := m.send(context.Background(), discardLog(), rs, meta); ok {
 					t.Fatal("send reported success for an unreadable body")
 				}
 			},

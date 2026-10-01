@@ -538,7 +538,7 @@ func (f fakeJournal) RecordRemoval(queueid.ID) error          { return f.err }
 // metrics registry back to read the counters the journal path feeds.
 func serveQueuedWithJournal(t *testing.T, cfg *config.Config, j Journal) (*smtpConn, *metrics.Registry) {
 	t.Helper()
-	reg := metrics.New(nil, nil, nil, nil, nil)
+	reg := metrics.New(nil, nil, nil, nil)
 	return serveQueuedCore(t, cfg, j, reg), reg
 }
 
@@ -703,6 +703,83 @@ func TestImplicitTLSAdmissionCapHoldsDuringAStalledHandshake(t *testing.T) {
 	if want := 8 * time.Second; elapsed > want {
 		t.Fatalf("over-cap connection closed after %v, want within %v (cap + refusalTimeout)", elapsed, want)
 	}
+}
+
+// accept's global-cap refusal on an implicit-TLS listener must close the
+// over-cap connection without writing: a plaintext 421 would run the TLS
+// server handshake first, which blocks reading a ClientHello, and with no
+// deadline on that write a silent peer at the cap would hold it -- and the
+// whole accept loop behind it -- indefinitely.
+func TestImplicitTLSGlobalCapRefusalDoesNotHangTheAcceptLoop(t *testing.T) {
+	const readTimeoutSec = 30
+	cfg := implicitTLSConfig(t, readTimeoutSec)
+	cfg.Limits.MaxConnections = 1
+	set := serveImplicitTLS(t, cfg)
+	addr := set.servers[0].ln.Addr().String()
+
+	// Occupy the one global slot with a connection that never sends a
+	// ClientHello. The session's own handshake deadline (read_timeout_sec,
+	// 30s here) keeps it open for the rest of this test, so the second dial
+	// below is the one that has to hit the global cap, not a slot freed by
+	// this one timing out.
+	holder, err := net.DialTimeout("tcp", addr, 2*time.Second)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	// The holder's connection must have claimed the global slot before the
+	// second connection is dialled, or the second one could land in the
+	// free slot instead of hitting the cap this test is about. sem is a
+	// buffered channel sized to Limits.MaxConnections (1 here); accept
+	// fills it synchronously, right after Accept returns and before it
+	// spawns the session's goroutine, so polling its length is sufficient.
+	srv := set.servers[0]
+	deadline := time.Now().Add(2 * time.Second)
+	for len(srv.sem) == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("timed out waiting for the holder connection to claim the global slot")
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	over, err := net.DialTimeout("tcp", addr, 2*time.Second)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer over.Close()
+
+	// A client-side deadline much longer than what is under test (a prompt
+	// close): if the accept loop is stuck in a handshake write, this fires
+	// first, and the timeout check below reports that as a failure instead of
+	// a false pass.
+	_ = over.SetReadDeadline(time.Now().Add(5 * time.Second))
+	start := time.Now()
+	_, readErr := over.Read(make([]byte, 1))
+	elapsed := time.Since(start)
+
+	if readErr == nil {
+		t.Fatal("the over-cap connection is still open; the global cap refusal did not close it")
+	}
+	var netErr net.Error
+	if errors.Is(readErr, os.ErrDeadlineExceeded) || (errors.As(readErr, &netErr) && netErr.Timeout()) {
+		t.Fatalf("read timed out after %v; the global-cap refusal hung the accept loop instead of closing promptly: %v", elapsed, readErr)
+	}
+	if elapsed > 3*time.Second {
+		t.Fatalf("over-cap connection closed after %v, want promptly", elapsed)
+	}
+
+	// Free the held slot and confirm the accept loop is still servicing new
+	// connections, not stuck from the refusal above.
+	_ = holder.Close()
+
+	client, err := tls.DialWithDialer(&net.Dialer{Timeout: 2 * time.Second}, "tcp", addr,
+		&tls.Config{InsecureSkipVerify: true, ServerName: "127.0.0.1", MinVersion: tls.VersionTLS12}) //#nosec G402 -- dialing this test's own listener
+	if err != nil {
+		t.Fatalf("the accept loop did not accept a new connection after the refusal: %v", err)
+	}
+	defer client.Close()
+	_ = client.SetDeadline(time.Now().Add(5 * time.Second))
+	s := &smtpConn{t: t, c: client, br: bufio.NewReader(client)}
+	s.expect("banner after the accept loop recovered", "220")
 }
 
 // failingQueue wraps a real *spool.Spool and forces the nth Commit call to

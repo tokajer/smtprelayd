@@ -138,7 +138,7 @@ func TestDeliverAbortsInFlightOnContextCancel(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() {
-		done <- Deliver(ctx, route, Message{
+		done <- Deliver(ctx, route, nil, Message{
 			From: "a@example.at", To: []string{"b@example.at"},
 			Data: strings.NewReader("Subject: t\r\n\r\nbody\r\n"), Helo: "test",
 		}, time.Hour, nil) // an hour, so only cancellation can end this
@@ -184,6 +184,23 @@ func TestLoginRefusesCleartextAndWrongHost(t *testing.T) {
 	}
 	if proto != "LOGIN" || len(resp) != 0 {
 		t.Fatalf("Start returned %q with a %d byte initial response, want LOGIN and none", proto, len(resp))
+	}
+}
+
+// Deliver trusts tlsConf rather than rebuilding it, so a route configured
+// for TLS must not be handed a nil one -- that would silently dial in the
+// clear instead of failing loudly on whatever left TLSConfig uncalled or
+// its error unchecked.
+func TestDeliverRefusesANilTLSConfigOnATLSRoute(t *testing.T) {
+	route := config.Route{Name: "m365", Host: "smtp.example", Port: 587, TLS: config.TLSStartTLS, Auth: "none"}
+
+	err := Deliver(context.Background(), route, nil, Message{}, time.Second, nil)
+	if err == nil {
+		t.Fatal("Deliver succeeded with no TLS configuration on a TLS route")
+	}
+	var pe *PermError
+	if !errors.As(err, &pe) {
+		t.Fatalf("Deliver error = %v (%T), want *PermError", err, err)
 	}
 }
 

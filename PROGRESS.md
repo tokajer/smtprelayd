@@ -12,27 +12,54 @@ live deployment: the Microsoft 365 route delivers with both `file:` and
 the Burn `setup.exe`, `.rpm` and `.deb` (install, upgrade in every
 combination, uninstall with and without purging the data directory).
 
-**Last session**: 2026-09-30 — Third architectural review, every finding
-acted on (branch `new-features`, not yet committed). Structure, the
-`requeued` journal class decision and the observable changes are in the
-`MEMORY.md` §3 "second pass" amendment of the same date. In short:
+**Last session**: 2026-09-30 — Fourth architectural review, every finding
+acted on (branch `new-features`, not yet committed). Structure and the
+observable changes are in the `MEMORY.md` §3 "third pass" amendment and the
+§4 "Corrected 2026-09-30" note of the same date. In short:
 
-- `internal/queueid` leaf; the store and every journal interface take
-  `queueid.ID`.
-- Implicit-TLS handshake deadline, admission before the handshake, 5 s bound
-  on pre-handshake refusals (security fix).
-- `delivery.Manager.fail` owns the journal row; shutdown is not an attempt;
-  `Spool.Commit` wakes the dispatcher (debounced); a short batch ends a pass.
-- `listener.Queue` interface; `withdraw` uses `Discard` and is tested end to
-  end, closing the item left open in the previous session.
-- `requeued` class, written under the spool lease.
-- `store.CommonFilter` + `httpx.ParseCommonFilter`; `store.ValidStatus`.
-- `internal/housekeeping` and `expiry.Watcher` moved out of `delivery` and
-  `bounce`; configuration page rendered by reflection.
+- **Security fix**: the accept loop's global-cap refusal on an implicit-TLS
+  listener closes without writing instead of running the TLS handshake on an
+  unbounded plaintext write — a silent peer at the cap could stall the whole
+  accept loop indefinitely. `session.refuse` gives every pre-session 421 the
+  same `refusalTimeout`-bounded write in both directions.
+- `internal/loopback` leaf holding `Host`/`HostHeader`, out of
+  `internal/config`; `httpx` and `internal/metrics` call it instead.
+- `internal/api/views.go`: `messageView`/`attemptView`/`bounceView` now own
+  the JSON wire contract; `store.Message`, `store.Attempt` and
+  `store.BounceSummary` carry no JSON tags any more.
+- `delivery.Manager` replaced three parallel per-route maps with
+  `map[string]*routeState` (config, compiled TLS, slots, tokens);
+  `delivery.New` compiles every route's TLS config up front and now returns
+  an error; `smarthost.Deliver` takes a pre-built `*tls.Config` instead of
+  building its own (`smarthost.TLSConfig`, exported).
+- One `selfmail.Mailer` built in `cmd/smtprelayd`'s composition root, handed
+  to the bounce notifier and every canary runner; neither builds its own any
+  more.
+- `attempt_num` is assigned by the store, in the `INSERT` itself, for every
+  row type (attempt, removal, requeue): one monotonic sequence per message,
+  so numbering continues after a requeue instead of restarting at 1.
+  Computing it in the `INSERT` keeps the transaction's first statement a
+  write; a `SELECT` first got `SQLITE_BUSY` under concurrent writers.
+- `smarthost.Deliver` refuses a TLS route handed a nil `*tls.Config`
+  rather than dialling with defaults that would drop `ca_pin` and `min_tls`.
+- `queueaction.Actor` counts a failed journal write into
+  `metrics.Registry.JournalWriteFailure`, the way delivery and the listener
+  already did.
+- `delivery.Manager.fail` still reports a permanent failure through the
+  bounce digest even when the move to `spool/failed` itself fails — the
+  journal write already calls it permanent.
+- `internal/spool`: path building, fsync-and-close and shared lease/read
+  helpers were consolidated to remove duplication between `Fail`/`Discard`
+  and between `Requeue`/`Discard`.
+- `internal/api` and `internal/bounce` took consumer-side interfaces
+  (`api.Store`, `bounce.MessageLookup`); `cmd/smtprelayd/main.go` parses
+  `service.timezone` once and hands the `*time.Location` to `openLog` and
+  `web.New`.
 
-Verified: gofmt, `go vet` and `go build` clean on linux and windows,
-`go test -race ./...` green, banned imports clean. `govulncheck` and `gosec`
-were not run in this session (neither is installed on the machine used).
+Verified 2026-10-01: gofmt, `go vet` and `go build` clean on linux and
+windows, `go test -race ./...` green (uncached), banned imports clean,
+gosec v2.28.0 `-severity=medium` 0 issues, govulncheck no vulnerabilities.
+The implicit-TLS regression test fails against the previous `accept`.
 
 Considered and left alone, with the reason:
 
@@ -54,6 +81,11 @@ Considered and left alone, with the reason:
   them; a tree-wide sweep into `docs/dev/HISTORY.md` was not done.
 - The status sort in `store/query.go` still spells class names in its `CASE`
   literal; binding them would mean a second argument list for `ORDER BY`.
+- Comment volume (51 history-narrating comments) — still deferred to a
+  tree-wide sweep.
+- The journal-failure rule is still counted at each call site (delivery,
+  listener, selfmail, queueaction) rather than by a wrapper; the fake-journal
+  tests assert the count at the caller.
 
 **Nothing else is open.** Every remaining item is a deferred feature the operator
 chose not to pursue yet, each of which would be its own phase. The scoping

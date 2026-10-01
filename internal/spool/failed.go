@@ -242,17 +242,22 @@ func (s *Spool) Fail(m *Meta, reason string) error {
 	// loses the race against a scanner's handle leaves the pair sitting in
 	// the queue directory, where the next start re-indexes it and a message
 	// that failed permanently is attempted all over again.
-	for _, ext := range []string{".json", ".eml"} {
-		src := filepath.Join(s.queue, m.ID.String()+ext)
-		dst := s.failed.path(m.ID, ext)
+	for _, pair := range []struct {
+		src string
+		ext string
+	}{
+		{s.metaPath(m.ID), ".json"},
+		{s.dataPath(m.ID), ".eml"},
+	} {
+		dst := s.failed.path(m.ID, pair.ext)
 		// The body only, matching both the live index and reindex; see
 		// the note there on why the metadata file is left out of all three.
-		if ext == ".eml" {
-			if fi, err := os.Stat(src); err == nil {
+		if pair.ext == ".eml" {
+			if fi, err := os.Stat(pair.src); err == nil {
 				onDisk = fi.Size()
 			}
 		}
-		if err := renameRetry(src, dst); err != nil && !os.IsNotExist(err) {
+		if err := renameRetry(pair.src, dst); err != nil && !os.IsNotExist(err) {
 			// Recorded, not returned: the message has already left the live
 			// index, so returning here would leave whichever half did move
 			// sitting in spool/failed charged to nobody -- the quota would
@@ -272,7 +277,7 @@ func (s *Spool) Fail(m *Meta, reason string) error {
 	if moveErr != nil {
 		return moveErr
 	}
-	return syncDir(s.failed.dir)
+	return s.syncDir(s.failed.dir)
 }
 
 // SweepFailed deletes messages whose retention has run out; see

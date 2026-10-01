@@ -31,10 +31,10 @@ func TestAttemptSummaryReflectsTheLatestAttemptWithinOneSecond(t *testing.T) {
 
 	// Both inside the same second, so nothing but the insertion order
 	// distinguishes them.
-	if err := s.RecordAttempt("CLOCKORDERAAAAAA", 1, 451, "try later", "temporary", nil); err != nil {
+	if err := s.RecordAttempt("CLOCKORDERAAAAAA", 451, "try later", "temporary", nil); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.RecordAttempt("CLOCKORDERAAAAAA", 2, 250, "accepted", "delivered", nil); err != nil {
+	if err := s.RecordAttempt("CLOCKORDERAAAAAA", 250, "accepted", "delivered", nil); err != nil {
 		t.Fatal(err)
 	}
 

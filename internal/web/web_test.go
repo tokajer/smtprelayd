@@ -81,7 +81,7 @@ func testServer(t *testing.T, cfg *config.Config, deadlines []expiry.Item) (*Ser
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv, err := New(cfg, sp, st, nil, deadlines, "test", discardLog())
+	srv, err := New(cfg, sp, st, nil, deadlines, nil, "test", discardLog())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -231,7 +231,7 @@ func TestQueueStatusFilterOnlyShowsActiveMessages(t *testing.T) {
 	now := time.Now()
 	_ = st.RecordMessage(store.MessageRecord{QueueID: "QUEUEDAAAAAAAAAA", Origin: "printers", Route: "m365", EnvelopeFrom: "relay@example.com", OriginalFrom: "", Recipients: []string{"user@example.com"}, Subject: "still queued", Listener: "smtp", RemoteAddr: "10.10.5.5", ReceivedAt: now, ExpiresAt: now.Add(time.Hour), TLSUsed: false})
 	_ = st.RecordMessage(store.MessageRecord{QueueID: "DELIVEREDAAAAAAA", Origin: "printers", Route: "m365", EnvelopeFrom: "relay@example.com", OriginalFrom: "", Recipients: []string{"user@example.com"}, Subject: "already gone", Listener: "smtp", RemoteAddr: "10.10.5.5", ReceivedAt: now, ExpiresAt: now.Add(time.Hour), TLSUsed: false})
-	_ = st.RecordAttempt("DELIVEREDAAAAAAA", 1, 250, "ok", "delivered", nil)
+	_ = st.RecordAttempt("DELIVEREDAAAAAAA", 250, "ok", "delivered", nil)
 
 	rec := get(t, srv.Handler(), "/queue")
 	body := rec.Body.String()
@@ -346,7 +346,7 @@ func TestMessagePageHidesActionsForTerminalStatus(t *testing.T) {
 		if err := st.RecordMessage(store.MessageRecord{QueueID: queueid.ID(tc.id), Origin: "printers", Route: "m365", EnvelopeFrom: "relay@example.com", Recipients: []string{"user@example.com"}, Subject: "s", Listener: "smtp", RemoteAddr: "10.10.5.5", ReceivedAt: now, ExpiresAt: now.Add(time.Hour)}); err != nil {
 			t.Fatal(err)
 		}
-		if err := st.RecordAttempt(queueid.ID(tc.id), 1, 0, "", tc.class, nil); err != nil {
+		if err := st.RecordAttempt(queueid.ID(tc.id), 0, "", tc.class, nil); err != nil {
 			t.Fatal(err)
 		}
 
@@ -1000,8 +1000,8 @@ func TestJournalFailuresAreStatedOnThePage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	reg := metrics.New(expiry.Items(cfg, nil), sp, []string{"m365"}, nil, nil)
-	srv, err := New(cfg, sp, st, reg, nil, "test", discardLog())
+	reg := metrics.New(expiry.Items(cfg, nil), sp, []string{"m365"}, nil)
+	srv, err := New(cfg, sp, st, reg, nil, nil, "test", discardLog())
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -86,7 +86,7 @@ func TestRecordMessageAndAttempt(t *testing.T) {
 	}
 
 	// Record an attempt.
-	err = s.RecordAttempt("TESTQUEUEID1", 1, 550, "5.1.1 User unknown", "permanent", nil)
+	err = s.RecordAttempt("TESTQUEUEID1", 550, "5.1.1 User unknown", "permanent", nil)
 	if err != nil {
 		t.Fatalf("RecordAttempt failed: %v", err)
 	}
@@ -222,7 +222,7 @@ func TestFindBounces(t *testing.T) {
 	for i, tc := range testCases {
 		expires := now.Add(96 * time.Hour)
 		_ = s.RecordMessage(testRecord(tc.id, now.Add(-time.Duration(i)*time.Hour), expires))
-		_ = s.RecordAttempt(queueid.ID(tc.id), 1, 550, "Error", tc.class, nil)
+		_ = s.RecordAttempt(queueid.ID(tc.id), 550, "Error", tc.class, nil)
 	}
 
 	bounces, _, err := s.FindBounces(BounceFilter{Limit: 100})
@@ -248,7 +248,7 @@ func TestRetentionCleanupCascadesAttempts(t *testing.T) {
 
 	now := time.Now()
 	_ = s.RecordMessage(testRecord("CASCADE-TEST", now, now.Add(96*time.Hour)))
-	if err := s.RecordAttempt("CASCADE-TEST", 1, 421, "temporary failure", "temporary", nil); err != nil {
+	if err := s.RecordAttempt("CASCADE-TEST", 421, "temporary failure", "temporary", nil); err != nil {
 		t.Fatalf("RecordAttempt failed: %v", err)
 	}
 
@@ -278,7 +278,7 @@ func TestRetentionCleanupCascadesAttempts(t *testing.T) {
 func TestRecordAttemptRejectsUnknownQueueID(t *testing.T) {
 	s := testStore(t)
 
-	if err := s.RecordAttempt("NO-SUCH-QUEUE-ID", 1, 250, "ok", "delivered", nil); err == nil {
+	if err := s.RecordAttempt("NO-SUCH-QUEUE-ID", 250, "ok", "delivered", nil); err == nil {
 		t.Fatal("expected an error recording an attempt for a nonexistent queue ID, got nil")
 	}
 }
@@ -290,7 +290,7 @@ func TestRecordRemovalAppendsAfterExistingAttempts(t *testing.T) {
 	s := testStore(t)
 	now := time.Now()
 	_ = s.RecordMessage(testRecord("REMOVE-AFTER-RETRY", now, now.Add(96*time.Hour)))
-	_ = s.RecordAttempt("REMOVE-AFTER-RETRY", 1, 421, "try later", "temporary", nil)
+	_ = s.RecordAttempt("REMOVE-AFTER-RETRY", 421, "try later", "temporary", nil)
 
 	if err := s.RecordRemoval("REMOVE-AFTER-RETRY"); err != nil {
 		t.Fatal(err)
@@ -327,7 +327,7 @@ func TestReconcileRemovedClearsAnActiveRow(t *testing.T) {
 	} {
 		_ = s.RecordMessage(testRecord(tc.id, now, now.Add(96*time.Hour)))
 		if tc.class != "" {
-			_ = s.RecordAttempt(queueid.ID(tc.id), 1, 421, "try later", tc.class, nil)
+			_ = s.RecordAttempt(queueid.ID(tc.id), 421, "try later", tc.class, nil)
 		}
 
 		cleared, err := s.ReconcileRemoved(queueid.ID(tc.id))
@@ -364,7 +364,7 @@ func TestReconcileRemovedLeavesFinishedRowsAlone(t *testing.T) {
 		{"DONE-REMOVED", "removed", "removed"},
 	} {
 		_ = s.RecordMessage(testRecord(tc.id, now, now.Add(96*time.Hour)))
-		_ = s.RecordAttempt(queueid.ID(tc.id), 1, 250, "response", tc.class, nil)
+		_ = s.RecordAttempt(queueid.ID(tc.id), 250, "response", tc.class, nil)
 
 		cleared, err := s.ReconcileRemoved(queueid.ID(tc.id))
 		if err != nil {
@@ -401,11 +401,11 @@ func TestFindMessagesFiltersByDerivedStatus(t *testing.T) {
 
 	_ = s.RecordMessage(testRecord("Q-QUEUED", now, expires))
 	_ = s.RecordMessage(testRecord("Q-DEFERRED", now, expires))
-	_ = s.RecordAttempt("Q-DEFERRED", 1, 421, "try later", "temporary", nil)
+	_ = s.RecordAttempt("Q-DEFERRED", 421, "try later", "temporary", nil)
 	_ = s.RecordMessage(testRecord("Q-DELIVERED", now, expires))
-	_ = s.RecordAttempt("Q-DELIVERED", 1, 250, "ok", "delivered", nil)
+	_ = s.RecordAttempt("Q-DELIVERED", 250, "ok", "delivered", nil)
 	_ = s.RecordMessage(testRecord("Q-BOUNCED", now, expires))
-	_ = s.RecordAttempt("Q-BOUNCED", 1, 550, "no such user", "permanent", nil)
+	_ = s.RecordAttempt("Q-BOUNCED", 550, "no such user", "permanent", nil)
 
 	_ = s.RecordMessage(testRecord("Q-REMOVED", now, expires))
 	_ = s.RecordRemoval("Q-REMOVED")
@@ -470,9 +470,9 @@ func TestFindMessagesActiveStatusIsQueuedOrDeferred(t *testing.T) {
 
 	_ = s.RecordMessage(testRecord("ACTIVE-QUEUED", now, expires))
 	_ = s.RecordMessage(testRecord("ACTIVE-DEFERRED", now, expires))
-	_ = s.RecordAttempt("ACTIVE-DEFERRED", 1, 421, "try later", "temporary", nil)
+	_ = s.RecordAttempt("ACTIVE-DEFERRED", 421, "try later", "temporary", nil)
 	_ = s.RecordMessage(testRecord("ACTIVE-DELIVERED", now, expires))
-	_ = s.RecordAttempt("ACTIVE-DELIVERED", 1, 250, "ok", "delivered", nil)
+	_ = s.RecordAttempt("ACTIVE-DELIVERED", 250, "ok", "delivered", nil)
 	_ = s.RecordMessage(testRecord("ACTIVE-REMOVED", now, expires))
 	_ = s.RecordRemoval("ACTIVE-REMOVED")
 
@@ -498,8 +498,8 @@ func TestFindMessagesStatusStableAcrossRapidAttempts(t *testing.T) {
 	s := testStore(t)
 	now := time.Now()
 	_ = s.RecordMessage(testRecord("RAPID-ATTEMPTS", now, now.Add(96*time.Hour)))
-	_ = s.RecordAttempt("RAPID-ATTEMPTS", 1, 421, "try later", "temporary", nil)
-	_ = s.RecordAttempt("RAPID-ATTEMPTS", 2, 250, "ok", "delivered", nil)
+	_ = s.RecordAttempt("RAPID-ATTEMPTS", 421, "try later", "temporary", nil)
+	_ = s.RecordAttempt("RAPID-ATTEMPTS", 250, "ok", "delivered", nil)
 
 	got, _, err := s.FindMessages(MessageFilter{Limit: 100})
 	if err != nil {
@@ -550,10 +550,10 @@ func TestFindMessagesSortByStatus(t *testing.T) {
 	expires := now.Add(96 * time.Hour)
 
 	_ = s.RecordMessage(testRecord("SORT-BOUNCED", now, expires))
-	_ = s.RecordAttempt("SORT-BOUNCED", 1, 550, "no", "permanent", nil)
+	_ = s.RecordAttempt("SORT-BOUNCED", 550, "no", "permanent", nil)
 	_ = s.RecordMessage(testRecord("SORT-QUEUED", now, expires))
 	_ = s.RecordMessage(testRecord("SORT-DEFERRED", now, expires))
-	_ = s.RecordAttempt("SORT-DEFERRED", 1, 421, "later", "temporary", nil)
+	_ = s.RecordAttempt("SORT-DEFERRED", 421, "later", "temporary", nil)
 
 	got, _, err := s.FindMessages(MessageFilter{Sort: "status", Order: "asc", Limit: 100})
 	if err != nil {
@@ -586,10 +586,10 @@ func TestFindBounceSummariesMatchesAPIShape(t *testing.T) {
 	if err := s.RecordMessage(rec); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.RecordAttempt("BOUNCE-SUMMARY-1", 1, 421, "try later", "temporary", nil); err != nil {
+	if err := s.RecordAttempt("BOUNCE-SUMMARY-1", 421, "try later", "temporary", nil); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.RecordAttempt("BOUNCE-SUMMARY-1", 2, 550, "5.1.1 User unknown", "permanent", nil); err != nil {
+	if err := s.RecordAttempt("BOUNCE-SUMMARY-1", 550, "5.1.1 User unknown", "permanent", nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -622,7 +622,7 @@ func TestFindBounceSummariesPagination(t *testing.T) {
 	for i := 0; i < 3; i++ {
 		id := fmt.Sprintf("PAGE-BOUNCE-%d", i)
 		_ = s.RecordMessage(testRecord(id, now.Add(time.Duration(i)*time.Second), now.Add(96*time.Hour)))
-		_ = s.RecordAttempt(queueid.ID(id), 1, 550, "no such user", "permanent", nil)
+		_ = s.RecordAttempt(queueid.ID(id), 550, "no such user", "permanent", nil)
 	}
 
 	rows, hasMore, err := s.FindBounceSummaries(BounceFilter{Limit: 2})
@@ -778,7 +778,7 @@ func TestFindBouncesFiltersByClass(t *testing.T) {
 		{"DELIVERED-1", "delivered"},
 	} {
 		_ = s.RecordMessage(testRecord(tc.id, now.Add(-time.Duration(i)*time.Hour), expires))
-		_ = s.RecordAttempt(queueid.ID(tc.id), 1, 550, "Error", tc.class, nil)
+		_ = s.RecordAttempt(queueid.ID(tc.id), 550, "Error", tc.class, nil)
 	}
 
 	for class, want := range map[string]int{
@@ -812,8 +812,8 @@ func TestFindBouncesClassIsTheFinalAttempt(t *testing.T) {
 	s := testStore(t)
 	now := time.Now()
 	_ = s.RecordMessage(testRecord("RETRIED", now, now.Add(96*time.Hour)))
-	_ = s.RecordAttempt("RETRIED", 1, 451, "try later", "temporary", nil)
-	_ = s.RecordAttempt("RETRIED", 2, 550, "no such user", "permanent", nil)
+	_ = s.RecordAttempt("RETRIED", 451, "try later", "temporary", nil)
+	_ = s.RecordAttempt("RETRIED", 550, "no such user", "permanent", nil)
 
 	got, _, err := s.FindBounces(BounceFilter{Class: "permanent", Limit: 100})
 	if err != nil {
@@ -888,7 +888,7 @@ func TestEveryFilterFieldBinds(t *testing.T) {
 			t.Fatal(err)
 		}
 		// Permanent, so the same rows are visible to the bounce builders.
-		if err := s.RecordAttempt(queueid.ID(d.id), 1, 550, "rejected", "permanent", nil); err != nil {
+		if err := s.RecordAttempt(queueid.ID(d.id), 550, "rejected", "permanent", nil); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -993,7 +993,7 @@ func TestConcurrentWritersNeverSeeBusy(t *testing.T) {
 					errs <- err
 					continue
 				}
-				if err := s.RecordAttempt(queueid.ID(id), 1, 250, "ok", "delivered", nil); err != nil {
+				if err := s.RecordAttempt(queueid.ID(id), 250, "ok", "delivered", nil); err != nil {
 					errs <- err
 				}
 			}
@@ -1074,7 +1074,7 @@ func TestRecordAttemptDoesNotSweep(t *testing.T) {
 	s.lastCleanup = old
 	s.mu.Unlock()
 
-	if err := s.RecordAttempt("QSWEEPAAAAAAAAAA", 1, 550, "no", "permanent", nil); err != nil {
+	if err := s.RecordAttempt("QSWEEPAAAAAAAAAA", 550, "no", "permanent", nil); err != nil {
 		t.Fatal(err)
 	}
 	var n int
@@ -1164,7 +1164,7 @@ func TestAttemptSummaryMatchesTheAttemptsTable(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	for i, a := range []struct {
+	for _, a := range []struct {
 		code  int
 		resp  string
 		class Class
@@ -1173,7 +1173,7 @@ func TestAttemptSummaryMatchesTheAttemptsTable(t *testing.T) {
 		{451, "4.3.0 try later", "temporary"},
 		{250, "2.0.0 OK", "delivered"},
 	} {
-		if err := s.RecordAttempt(id, i+1, a.code, a.resp, a.class, nil); err != nil {
+		if err := s.RecordAttempt(id, a.code, a.resp, a.class, nil); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -1227,7 +1227,7 @@ func TestABounceStaysABounceAfterARequeueAndDelivery(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.RecordAttempt(id, 1, 550, "5.1.1 unknown", "permanent", nil); err != nil {
+	if err := s.RecordAttempt(id, 550, "5.1.1 unknown", "permanent", nil); err != nil {
 		t.Fatal(err)
 	}
 	if got, _, err := s.FindBounces(BounceFilter{Limit: 10}); err != nil || len(got) != 1 {
@@ -1235,7 +1235,7 @@ func TestABounceStaysABounceAfterARequeueAndDelivery(t *testing.T) {
 	}
 
 	// Requeued by an operator, and this time it goes out.
-	if err := s.RecordAttempt(id, 2, 250, "2.0.0 OK", "delivered", nil); err != nil {
+	if err := s.RecordAttempt(id, 250, "2.0.0 OK", "delivered", nil); err != nil {
 		t.Fatal(err)
 	}
 	got, _, err := s.FindBounces(BounceFilter{Limit: 10})
@@ -1262,7 +1262,7 @@ func TestRecordRequeueMakesABouncedMessageQueuedAgain(t *testing.T) {
 	now := time.Now()
 	const id = "QREQUEUEAAAAAAAA"
 	_ = s.RecordMessage(testRecord(id, now, now.Add(96*time.Hour)))
-	if err := s.RecordAttempt(id, 1, 550, "no such user", "permanent", nil); err != nil {
+	if err := s.RecordAttempt(id, 550, "no such user", "permanent", nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1310,6 +1310,43 @@ func TestRecordRequeueMakesABouncedMessageQueuedAgain(t *testing.T) {
 	}
 	if bounces[0].LastErr != "no such user" {
 		t.Errorf("last_smtp_response after requeue = %q, want the last real attempt's response, unchanged", bounces[0].LastErr)
+	}
+}
+
+// attempt_num is one monotonic sequence per message across every row type:
+// a delivery attempt, an operator removal and an operator requeue all draw
+// from it, so numbering continues after a requeue rather than restarting at
+// 1.
+func TestAttemptNumIsMonotonicAcrossARequeue(t *testing.T) {
+	s := testStore(t)
+	now := time.Now()
+	const id = "QMONOTONICAAAAAA"
+	_ = s.RecordMessage(testRecord(id, now, now.Add(96*time.Hour)))
+
+	if err := s.RecordAttempt(id, 451, "try later", "temporary", nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.RecordAttempt(id, 550, "no such user", "permanent", nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.RecordRequeue(id); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.RecordAttempt(id, 250, "2.0.0 OK", "delivered", nil); err != nil {
+		t.Fatal(err)
+	}
+
+	msg, err := s.FindMessageByID(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(msg.Attempts) != 4 {
+		t.Fatalf("got %d attempt rows, want 4", len(msg.Attempts))
+	}
+	for i, want := range []int{1, 2, 3, 4} {
+		if got := msg.Attempts[i].AttemptNum; got != want {
+			t.Errorf("row %d: attempt_num = %d, want %d", i, got, want)
+		}
 	}
 }
 

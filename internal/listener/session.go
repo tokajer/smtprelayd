@@ -39,11 +39,11 @@ const (
 	unmatchedMaxSession = 30 * time.Second
 
 	// refusalTimeout bounds a write that refuses a connection outright: the
-	// per-source and per-client 421s below, and accept's global-cap 421 in
-	// listener.go. On an implicit-TLS listener such a write also runs the
-	// handshake, so without this bound a peer that never sends a ClientHello
-	// could hold the reply -- and the connection slot behind it -- open for
-	// the full read_timeout_sec instead of five seconds.
+	// per-source and per-client 421s below. On an implicit-TLS listener such a
+	// write also runs the handshake, so without this bound a peer that never
+	// sends a ClientHello could hold the reply -- and the connection slot
+	// behind it -- open for the full read_timeout_sec instead of five
+	// seconds.
 	refusalTimeout = 5 * time.Second
 )
 
@@ -141,11 +141,7 @@ func (s *Server) handle(ctx context.Context, conn net.Conn) {
 	if matched {
 		key := connKeyClient(client.Name)
 		if !s.conns.acquire(key, client.MaxConnections) {
-			// On an implicit-TLS listener this reply runs the handshake on its
-			// own write; bound that by refusalTimeout, not read_timeout_sec, so
-			// a peer withholding its ClientHello cannot sit on this slot.
-			_ = conn.SetDeadline(time.Now().Add(refusalTimeout))
-			ss.reply(421, "4.7.0 too many connections for this client")
+			ss.refuse(421, "4.7.0 too many connections for this client")
 			return
 		}
 		defer s.conns.release(key, client.MaxConnections)
@@ -158,8 +154,7 @@ func (s *Server) handle(ctx context.Context, conn net.Conn) {
 		// server an unauthorised source may occupy while getting there.
 		key := connKeyUnmatched(ss.remote.String())
 		if !s.conns.acquire(key, unmatchedMaxConns) {
-			_ = conn.SetDeadline(time.Now().Add(refusalTimeout))
-			ss.reply(421, "4.7.0 too many connections")
+			ss.refuse(421, "4.7.0 too many connections")
 			return
 		}
 		defer s.conns.release(key, unmatchedMaxConns)
@@ -289,12 +284,7 @@ func (s *session) doStartTLS() bool {
 	s.reply(220, "2.0.0 ready to start TLS")
 
 	tc := tls.Server(s.conn, s.srv.tlsConf)
-	_ = tc.SetDeadline(s.readDeadline(s.srv.cfg.Limits.ReadTimeoutSec))
-	if s.ctx.Err() != nil {
-		// Same race armRead closes: the deadline just set may have
-		// overwritten the expired one the shutdown hook installed.
-		_ = tc.SetDeadline(time.Now())
-	}
+	armConn(s.ctx, tc, s.readDeadline(s.srv.cfg.Limits.ReadTimeoutSec))
 	if err := tc.HandshakeContext(s.ctx); err != nil {
 		s.log.Debug("starttls handshake failed", "error", err)
 		return false
@@ -675,6 +665,15 @@ func (s *session) resetTransaction() {
 // the whole read_timeout_sec, holding a connection slot the whole time.
 func (s *session) reply(code int, msg string) {
 	_ = s.conn.SetWriteDeadline(time.Now().Add(time.Duration(s.srv.cfg.Limits.WriteTimeoutSec) * time.Second))
+	fmt.Fprintf(s.bw, "%d %s\r\n", code, msg)
+	s.flush()
+}
+
+// refuse writes a reply that ends the connection before the session starts,
+// bounded by refusalTimeout in both directions: on an implicit-TLS listener
+// the write also runs the handshake.
+func (s *session) refuse(code int, msg string) {
+	_ = s.conn.SetDeadline(time.Now().Add(refusalTimeout))
 	fmt.Fprintf(s.bw, "%d %s\r\n", code, msg)
 	s.flush()
 }

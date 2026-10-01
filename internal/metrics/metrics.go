@@ -86,12 +86,12 @@ func (r *Registry) route(name string) *routeCounters {
 // New builds a registry seeded with zero counters for every configured
 // route and every configured canary, so one that has never delivered still
 // reports 0 instead of being absent from the exposition until its first
-// event. tokens may be nil; cmd/smtprelayd's buildTokenSources registers its
-// token sources through RegisterTokenAger once it has built them, which is
-// what lets the registry exist before the delivery manager and be handed to
-// the listener. deadlines may be nil too, in which case the expiry gauge is
-// still exposed, with no samples.
-func New(deadlines []expiry.Item, sp *spool.Spool, routes, canaryNames []string, tokens map[string]TokenAger) *Registry {
+// event. cmd/smtprelayd's buildTokenSources registers its token sources
+// through RegisterTokenAger once it has built them, which is what lets the
+// registry exist before the delivery manager and be handed to the listener.
+// deadlines may be nil too, in which case the expiry gauge is still exposed,
+// with no samples.
+func New(deadlines []expiry.Item, sp *spool.Spool, routes, canaryNames []string) *Registry {
 	sorted := append([]string(nil), routes...)
 	sort.Strings(sorted)
 	sortedCanaries := append([]string(nil), canaryNames...)
@@ -113,9 +113,6 @@ func New(deadlines []expiry.Item, sp *spool.Spool, routes, canaryNames []string,
 	}
 	for _, name := range sortedCanaries {
 		r.canaryFailure[name] = 0
-	}
-	for route, t := range tokens {
-		r.tokens[route] = t
 	}
 	return r
 }
@@ -148,11 +145,12 @@ func (r *Registry) SessionPanic() {
 }
 
 // JournalWriteFailure records a history-store write the listener, the
-// delivery manager, or a relay-composed message (a bounce digest, an expiry
-// warning, a canary probe) could not complete. Those writes are best-effort
-// by design -- the message is queued or delivered regardless -- which is
-// precisely why a broken database has to be visible somewhere other than an
-// empty dashboard.
+// delivery manager, a relay-composed message (a bounce digest, an expiry
+// warning, a canary probe), or an operator action carried out through
+// internal/queueaction (requeue, delete, the audit row) could not complete.
+// Those writes are best-effort by design -- the message is queued, delivered
+// or acted on regardless -- which is precisely why a broken database has to
+// be visible somewhere other than an empty dashboard.
 func (r *Registry) JournalWriteFailure() {
 	r.locked(func() { r.journalWriteFails++ })
 }

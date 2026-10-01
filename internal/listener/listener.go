@@ -238,8 +238,17 @@ func (s *Server) accept(ctx context.Context) {
 		case s.sem <- struct{}{}:
 		default:
 			// Global connection cap reached. Answering 421 rather than
-			// dropping the socket keeps well-behaved clients retrying.
-			_ = conn.SetWriteDeadline(time.Now().Add(refusalTimeout))
+			// dropping the socket keeps well-behaved clients retrying -- but
+			// on an implicit-TLS listener conn is a *tls.Conn (from
+			// tls.NewListener), so Write here would run the server handshake,
+			// which blocks reading a ClientHello with no read deadline. A
+			// plaintext 421 cannot be sent before that handshake anyway, so
+			// such a connection is closed without writing instead.
+			if s.lc.TLS == config.TLSImplicit {
+				_ = conn.Close()
+				continue
+			}
+			_ = conn.SetDeadline(time.Now().Add(refusalTimeout))
 			_, _ = conn.Write([]byte("421 4.3.2 too many connections\r\n"))
 			_ = conn.Close()
 			continue

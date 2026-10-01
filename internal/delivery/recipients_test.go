@@ -58,7 +58,7 @@ func TestOneDeadRecipientDoesNotStopTheOthers(t *testing.T) {
 	id, meta := queueList(t, sp, st,
 		"alice@example.net", "gone@example.net", "bob@example.net")
 
-	m.attempt(context.Background(), meta)
+	m.attempt(context.Background(), m.routes["smarthost"], meta)
 
 	if sp.Has(id) {
 		t.Error("the message is still queued although the smarthost accepted it for two of three recipients")
@@ -94,7 +94,7 @@ func TestEveryRecipientRefusedIsStillAPermanentFailure(t *testing.T) {
 	m, sp, st, _, _ := managerAgainst(t, f)
 	id, meta := queueList(t, sp, st, "gone@example.net", "also-gone@example.net")
 
-	m.attempt(context.Background(), meta)
+	m.attempt(context.Background(), m.routes["smarthost"], meta)
 
 	if got := statusOf(t, st, id); got != "bounced" {
 		t.Errorf("journal status %q, want bounced", got)
@@ -116,7 +116,7 @@ func TestATemporarilyRefusedRecipientDefersTheWholeMessage(t *testing.T) {
 	m, sp, st, _, _ := managerAgainst(t, f)
 	id, meta := queueList(t, sp, st, "alice@example.net", "busy@example.net")
 
-	m.attempt(context.Background(), meta)
+	m.attempt(context.Background(), m.routes["smarthost"], meta)
 
 	if !sp.Has(id) {
 		t.Fatal("a temporarily refused recipient must leave the message queued for a retry")
@@ -133,7 +133,7 @@ func TestAFullDeliveryRecordsNoRefusal(t *testing.T) {
 	m, sp, st, _, _ := managerAgainst(t, f)
 	id, meta := queueList(t, sp, st, "alice@example.net", "bob@example.net")
 
-	m.attempt(context.Background(), meta)
+	m.attempt(context.Background(), m.routes["smarthost"], meta)
 
 	msg, err := st.FindMessageByID(id)
 	if err != nil {
@@ -161,7 +161,7 @@ func TestARefusedRecipientReachesTheMetrics(t *testing.T) {
 	m, sp, st, _, reg := managerAgainst(t, f)
 	_, meta := queueList(t, sp, st, "alice@example.net", "gone@example.net")
 
-	m.attempt(context.Background(), meta)
+	m.attempt(context.Background(), m.routes["smarthost"], meta)
 
 	var found bool
 	for _, s := range reg.Status() {
@@ -192,7 +192,7 @@ func TestACleanDeliveryRefusesNobody(t *testing.T) {
 	m, sp, st, _, reg := managerAgainst(t, f)
 	_, meta := queueList(t, sp, st, "alice@example.net", "bob@example.net")
 
-	m.attempt(context.Background(), meta)
+	m.attempt(context.Background(), m.routes["smarthost"], meta)
 
 	for _, s := range reg.Status() {
 		if s.Route == "smarthost" && s.RecipientsRefused != 0 {
@@ -216,7 +216,7 @@ func TestEveryRefusedRecipientIsRecorded(t *testing.T) {
 	id, meta := queueList(t, sp, st,
 		"alice@example.net", "gone1@example.net", "gone2@example.net", "gone3@example.net")
 
-	m.attempt(context.Background(), meta)
+	m.attempt(context.Background(), m.routes["smarthost"], meta)
 
 	msg, err := st.FindMessageByID(id)
 	if err != nil {

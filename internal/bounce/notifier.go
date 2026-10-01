@@ -12,12 +12,19 @@ import (
 	"time"
 
 	"github.com/tokajer/smtprelayd/internal/config"
-	"github.com/tokajer/smtprelayd/internal/metrics"
 	"github.com/tokajer/smtprelayd/internal/queueid"
 	"github.com/tokajer/smtprelayd/internal/selfmail"
 	"github.com/tokajer/smtprelayd/internal/spool"
 	"github.com/tokajer/smtprelayd/internal/store"
 )
+
+// MessageLookup is what this package needs from the history store to render
+// one digest entry from a queue ID. Declared on the consumer side, like
+// every other interface in this tree, so a fake can drive send without a
+// real database.
+type MessageLookup interface {
+	FindMessageByID(queueID queueid.ID) (*store.Message, error)
+}
 
 // Notifier batches permanently failed or expired messages into periodic
 // digest notification mail. It is deliberately decoupled from the delivery
@@ -27,7 +34,7 @@ import (
 // through the failure callback itself.
 type Notifier struct {
 	cfg    *config.Config
-	store  *store.Store
+	msgs   MessageLookup
 	mailer *selfmail.Mailer
 	log    *slog.Logger
 
@@ -43,10 +50,10 @@ type Notifier struct {
 
 // New builds a notifier. It does nothing until Run is started; RecordFail
 // may be called beforehand; it will only queue events, never send anything.
-// reg is nil-safe; see the note on metrics.Registry.
-func New(cfg *config.Config, sp *spool.Spool, st *store.Store, reg *metrics.Registry, log *slog.Logger) *Notifier {
+// mailer is the one selfmail.Mailer the composition root builds.
+func New(cfg *config.Config, mailer *selfmail.Mailer, msgs MessageLookup, log *slog.Logger) *Notifier {
 	return &Notifier{
-		cfg: cfg, store: st, mailer: selfmail.New(sp, st, reg, log.With("component", "bounce")),
+		cfg: cfg, mailer: mailer, msgs: msgs,
 		log:     log.With("component", "bounce"),
 		pending: map[string][]queueid.ID{}, overflow: map[string]int{}, hourStart: time.Now(),
 	}
@@ -247,7 +254,7 @@ func (n *Notifier) send(origin string, recipients []string, ids []queueid.ID, ov
 	}
 
 	for _, id := range listed {
-		msg, err := n.store.FindMessageByID(id)
+		msg, err := n.msgs.FindMessageByID(id)
 		if err != nil || msg == nil {
 			fmt.Fprintf(&body, "\r\nQueue ID:   %s\r\n(history record unavailable)\r\n", id)
 			continue

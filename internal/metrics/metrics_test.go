@@ -25,7 +25,7 @@ import (
 )
 
 func TestNewSeedsZeroCountersForConfiguredRoutes(t *testing.T) {
-	r := New(nil, nil, []string{"m365", "legacy"}, nil, nil)
+	r := New(nil, nil, []string{"m365", "legacy"}, nil)
 	text := r.text()
 	for _, want := range []string{
 		`smtprelayd_delivered_total{route="legacy"} 0`,
@@ -41,7 +41,7 @@ func TestNewSeedsZeroCountersForConfiguredRoutes(t *testing.T) {
 }
 
 func TestCountersIncrementPerRoute(t *testing.T) {
-	r := New(nil, nil, []string{"m365"}, nil, nil)
+	r := New(nil, nil, []string{"m365"}, nil)
 	r.Delivered("m365")
 	r.Delivered("m365")
 	r.Bounced("m365")
@@ -65,7 +65,7 @@ func TestCountersIncrementPerRoute(t *testing.T) {
 }
 
 func TestLastDeliveryTimeAbsentBeforeFirstDelivery(t *testing.T) {
-	r := New(nil, nil, []string{"m365"}, nil, nil)
+	r := New(nil, nil, []string{"m365"}, nil)
 	text := r.text()
 	if strings.Contains(text, `smtprelayd_last_delivery_time{route="m365"}`) {
 		t.Error("last_delivery_time present before any delivery")
@@ -83,7 +83,7 @@ func TestQueueSizeReflectsSpool(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	r := New(nil, sp, []string{"m365"}, nil, nil)
+	r := New(nil, sp, []string{"m365"}, nil)
 	text := r.text()
 	if !strings.Contains(text, `smtprelayd_queue_size{route="m365",state="queued"} 1`) {
 		t.Errorf("queue size not reflected:\n%s", text)
@@ -91,7 +91,7 @@ func TestQueueSizeReflectsSpool(t *testing.T) {
 }
 
 func TestStatusSnapshotMatchesCounters(t *testing.T) {
-	r := New(nil, nil, []string{"m365", "legacy"}, nil, nil)
+	r := New(nil, nil, []string{"m365", "legacy"}, nil)
 	r.Delivered("m365")
 	r.Bounced("m365")
 	r.Deferred("legacy")
@@ -113,7 +113,7 @@ func TestStatusSnapshotMatchesCounters(t *testing.T) {
 }
 
 func TestRouteLabelIsEscaped(t *testing.T) {
-	r := New(nil, nil, []string{`evil"route`}, nil, nil)
+	r := New(nil, nil, []string{`evil"route`}, nil)
 	text := r.text()
 	if !strings.Contains(text, `smtprelayd_delivered_total{route="evil\"route"} 0`) {
 		t.Errorf("route label not escaped:\n%s", text)
@@ -121,7 +121,7 @@ func TestRouteLabelIsEscaped(t *testing.T) {
 }
 
 func TestServeHTTPRejectsNonGet(t *testing.T) {
-	r := New(nil, nil, nil, nil, nil)
+	r := New(nil, nil, nil, nil)
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/metrics", nil)
 	r.ServeHTTP(rec, req)
@@ -131,7 +131,7 @@ func TestServeHTTPRejectsNonGet(t *testing.T) {
 }
 
 func TestCanaryFailureIsLabeledByNameAndDoesNotTouchRouteMetrics(t *testing.T) {
-	r := New(nil, nil, []string{"m365"}, []string{"m365-daily"}, nil)
+	r := New(nil, nil, []string{"m365"}, []string{"m365-daily"})
 	r.CanaryFailure("m365-daily")
 	r.CanaryFailure("m365-daily")
 
@@ -145,7 +145,7 @@ func TestCanaryFailureIsLabeledByNameAndDoesNotTouchRouteMetrics(t *testing.T) {
 }
 
 func TestCanaryFailureCountsAreIndependentPerName(t *testing.T) {
-	r := New(nil, nil, nil, []string{"a", "b"}, nil)
+	r := New(nil, nil, nil, []string{"a", "b"})
 	r.CanaryFailure("a")
 	r.CanaryFailure("a")
 	r.CanaryFailure("b")
@@ -160,7 +160,7 @@ func TestCanaryFailureCountsAreIndependentPerName(t *testing.T) {
 }
 
 func TestCanaryDeliveredSetsLastDeliveryTimeNotRouteDelivered(t *testing.T) {
-	r := New(nil, nil, []string{"m365"}, []string{"m365-daily"}, nil)
+	r := New(nil, nil, []string{"m365"}, []string{"m365-daily"})
 	text := r.text()
 	if strings.Contains(text, `smtprelayd_canary_last_delivery_time{name="m365-daily"}`) {
 		t.Error("canary_last_delivery_time present before any canary delivery")
@@ -177,7 +177,7 @@ func TestCanaryDeliveredSetsLastDeliveryTimeNotRouteDelivered(t *testing.T) {
 }
 
 func TestAPIAuthFailureIsUnlabeled(t *testing.T) {
-	r := New(nil, nil, []string{"m365"}, nil, nil)
+	r := New(nil, nil, []string{"m365"}, nil)
 	r.APIAuthFailure()
 	r.APIAuthFailure()
 	text := r.text()
@@ -187,7 +187,7 @@ func TestAPIAuthFailureIsUnlabeled(t *testing.T) {
 }
 
 func TestUptimeAdvances(t *testing.T) {
-	r := New(nil, nil, nil, nil, nil)
+	r := New(nil, nil, nil, nil)
 	if r.Uptime() < 0 {
 		t.Fatalf("Uptime is negative: %v", r.Uptime())
 	}
@@ -205,7 +205,7 @@ func TestStatusIncludesOldestQueued(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	r := New(nil, sp, []string{"m365"}, nil, nil)
+	r := New(nil, sp, []string{"m365"}, nil)
 	status := r.Status()
 	if len(status) != 1 || !status[0].OldestQueued.Equal(old) {
 		t.Fatalf("got %+v, want OldestQueued %v", status, old)
@@ -213,7 +213,7 @@ func TestStatusIncludesOldestQueued(t *testing.T) {
 }
 
 func TestServeHTTPServesText(t *testing.T) {
-	r := New(nil, nil, []string{"m365"}, nil, nil)
+	r := New(nil, nil, []string{"m365"}, nil)
 	r.Delivered("m365")
 
 	rec := httptest.NewRecorder()
@@ -302,7 +302,7 @@ func TestLoopbackServeGuardsTheExpositionWithTheHostHeader(t *testing.T) {
 	defer cancel()
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	done := make(chan error, 1)
-	go func() { done <- Serve(ctx, cfg, ln, New(nil, nil, []string{"m365"}, nil, nil), nil, log) }()
+	go func() { done <- Serve(ctx, cfg, ln, New(nil, nil, []string{"m365"}, nil), nil, log) }()
 
 	url := "http://" + ln.Addr().String() + "/metrics"
 	for host, want := range map[string]int{
@@ -343,7 +343,7 @@ func TestExpiryGaugeIsExposed(t *testing.T) {
 			TenantID: "t", SecretExpires: now.Add(10 * 24 * time.Hour).Format("2006-01-02"),
 		}},
 	}}
-	body := New(expiry.Items(cfg, nil), nil, []string{"m365"}, nil, nil).text()
+	body := New(expiry.Items(cfg, nil), nil, []string{"m365"}, nil).text()
 
 	if !strings.Contains(body, "# TYPE smtprelayd_expiry_seconds gauge") {
 		t.Fatalf("exposition is missing the gauge declaration:\n%s", body)
@@ -378,7 +378,7 @@ func TestExpiryGaugeGoesNegativeAfterTheDate(t *testing.T) {
 			TenantID: "t", SecretExpires: time.Now().Add(-5 * 24 * time.Hour).Format("2006-01-02"),
 		}},
 	}}
-	body := New(expiry.Items(cfg, nil), nil, []string{"m365"}, nil, nil).text()
+	body := New(expiry.Items(cfg, nil), nil, []string{"m365"}, nil).text()
 	for _, l := range strings.Split(body, "\n") {
 		if strings.HasPrefix(l, "smtprelayd_expiry_seconds{") {
 			if !strings.Contains(l, " -") {
@@ -395,7 +395,7 @@ func TestExpiryGaugeGoesNegativeAfterTheDate(t *testing.T) {
 // delivered_total, so an operator watching /metrics saw an unbroken success
 // rate while addresses were being refused permanently.
 func TestRecipientsRefusedIsCountedPerRoute(t *testing.T) {
-	r := New(nil, nil, []string{"m365", "legacy"}, nil, nil)
+	r := New(nil, nil, []string{"m365", "legacy"}, nil)
 
 	// Seeded at zero like every other route counter, so a route that has
 	// never hit one is present in the exposition rather than absent.
@@ -423,7 +423,7 @@ func TestRecipientsRefusedIsCountedPerRoute(t *testing.T) {
 // Status backs the dashboard's route page, so it has to carry the same
 // number the exposition does or the two disagree about a route's state.
 func TestStatusCarriesRecipientsRefused(t *testing.T) {
-	r := New(nil, nil, []string{"m365"}, nil, nil)
+	r := New(nil, nil, []string{"m365"}, nil)
 	r.RecipientsRefused("m365", 4)
 	st := r.Status()
 	if len(st) != 1 {
@@ -437,7 +437,7 @@ func TestStatusCarriesRecipientsRefused(t *testing.T) {
 // The two counters added 2026-09-18 for what used to be invisible: a
 // recovered session panic, and a history-store write that failed.
 func TestSessionPanicAndJournalFailureCounters(t *testing.T) {
-	r := New(nil, nil, nil, nil, nil)
+	r := New(nil, nil, nil, nil)
 	text := r.text()
 	for _, want := range []string{
 		"smtprelayd_session_panics_total 0",
@@ -469,7 +469,7 @@ func (a fixedAge) TokenAge() (time.Duration, bool) { return time.Duration(a), tr
 // to a registry that was built before it existed; the gauge must appear
 // once it has.
 func TestRegisterTokenAgerFeedsTheGauge(t *testing.T) {
-	r := New(nil, nil, []string{"m365"}, nil, nil)
+	r := New(nil, nil, []string{"m365"}, nil)
 	if strings.Contains(r.text(), `smtprelayd_oauth_token_age_seconds{route="m365"}`) {
 		t.Fatal("token age present before any source was registered")
 	}
@@ -484,7 +484,7 @@ func TestRegisterTokenAgerFeedsTheGauge(t *testing.T) {
 // HELP and TYPE, and a family that lost one of them would be a silent
 // misread rather than a failure.
 func TestEveryFamilyDeclaresItself(t *testing.T) {
-	r := New(nil, nil, []string{"m365"}, []string{"daily"}, nil)
+	r := New(nil, nil, []string{"m365"}, []string{"daily"})
 	text := r.text()
 	for _, se := range expositionSeries {
 		if !strings.Contains(text, "# HELP "+se.name+" ") {

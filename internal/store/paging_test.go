@@ -66,7 +66,7 @@ func TestListQueriesClampAHugeOffset(t *testing.T) {
 		}); err != nil {
 			t.Fatal(err)
 		}
-		if err := s.RecordAttempt(queueid.ID(id), 1, 550, "rejected", "permanent", nil); err != nil {
+		if err := s.RecordAttempt(queueid.ID(id), 550, "rejected", "permanent", nil); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -121,7 +121,7 @@ func TestPagedQueriesReturnTheLimitAndReportMore(t *testing.T) {
 		}); err != nil {
 			t.Fatal(err)
 		}
-		if err := s.RecordAttempt(queueid.ID(id), 1, 550, "rejected", "permanent", nil); err != nil {
+		if err := s.RecordAttempt(queueid.ID(id), 550, "rejected", "permanent", nil); err != nil {
 			t.Fatal(err)
 		}
 	}

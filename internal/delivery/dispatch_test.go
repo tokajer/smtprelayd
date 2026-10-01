@@ -17,6 +17,7 @@ import (
 	"github.com/tokajer/smtprelayd/internal/bounce"
 	"github.com/tokajer/smtprelayd/internal/config"
 	"github.com/tokajer/smtprelayd/internal/queueid"
+	"github.com/tokajer/smtprelayd/internal/selfmail"
 	"github.com/tokajer/smtprelayd/internal/spool"
 	"github.com/tokajer/smtprelayd/internal/store"
 )
@@ -30,7 +31,7 @@ func TestAttemptTreatsAnUncleanCloseAfterAcceptanceAsDelivered(t *testing.T) {
 	m, sp, st, _, _ := managerAgainst(t, f)
 	id, meta := queueOne(t, sp, st, time.Hour)
 
-	m.attempt(context.Background(), meta)
+	m.attempt(context.Background(), m.routes["smarthost"], meta)
 
 	if sp.Has(id) {
 		t.Error("the message is still queued although the smarthost accepted it; it would be delivered twice")
@@ -133,7 +134,11 @@ func TestASaturatedRouteDoesNotStallTheOtherRoutes(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = st.Close() })
 	reg := testRegistry(cfg, sp)
-	m := New(cfg, sp, st, reg, nil, bounce.New(cfg, sp, st, reg, discardLog()), discardLog())
+	mailer := selfmail.New(sp, st, reg, discardLog())
+	m, err := New(cfg, sp, st, reg, nil, bounce.New(cfg, mailer, st, discardLog()), discardLog())
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
 
 	// Both messages for the stuck route are older, so Claim offers them
 	// first and the healthy route's message sits behind them.
@@ -191,10 +196,13 @@ func TestDispatchHoldsASaturatedRouteAndMovesOn(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = st.Close() })
-	m := New(cfg, sp, st, testRegistry(cfg, sp), nil, nil, discardLog())
+	m, err := New(cfg, sp, st, testRegistry(cfg, sp), nil, nil, discardLog())
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
 	// MaxConcurrent 0 would be normalised to a default by config.Validate;
 	// this config never goes through it, so the budget is genuinely empty.
-	m.routes["full"] = make(chan struct{})
+	m.routes["full"].slots = make(chan struct{})
 
 	base := time.Now().UTC().Add(-time.Hour)
 	for i := 0; i < 20; i++ {
@@ -255,7 +263,11 @@ func TestDispatchOneReturnsTheSlotWhenTheRateLimiterRefuses(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = st.Close() })
 	reg := testRegistry(cfg, sp)
-	m := New(cfg, sp, st, reg, nil, bounce.New(cfg, sp, st, reg, discardLog()), discardLog())
+	mailer := selfmail.New(sp, st, reg, discardLog())
+	m, err := New(cfg, sp, st, reg, nil, bounce.New(cfg, mailer, st, discardLog()), discardLog())
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
 
 	claimOne := func() *spool.Meta {
 		t.Helper()
@@ -285,7 +297,7 @@ func TestDispatchOneReturnsTheSlotWhenTheRateLimiterRefuses(t *testing.T) {
 		t.Fatal("dispatchOne reported cancellation on a live context")
 	}
 
-	if n := len(m.routes["smarthost"]); n != 0 {
+	if n := len(m.routes["smarthost"].slots); n != 0 {
 		t.Errorf("route budget holds %d slot(s) after a rate-limit refusal, want 0", n)
 	}
 	if !saturated["smarthost"] {

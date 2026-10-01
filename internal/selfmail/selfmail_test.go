@@ -200,7 +200,7 @@ func TestJournalWriteFailureIsCounted(t *testing.T) {
 	if err := st.Close(); err != nil {
 		t.Fatal(err)
 	}
-	reg := metrics.New(nil, nil, nil, nil, nil)
+	reg := metrics.New(nil, nil, nil, nil)
 
 	id, err := New(sp, st, reg, log).Send(Message{
 		HeaderFrom: "a@example.at", EnvelopeFrom: "a@example.at",

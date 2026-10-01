@@ -79,11 +79,15 @@ func (s *Server) handleBounces(w http.ResponseWriter, r *http.Request) {
 		s.serverError(w, "bounces", err)
 		return
 	}
+	views := make([]bounceView, len(rows))
+	for i, b := range rows {
+		views[i] = newBounceView(b)
+	}
 
 	writeJSON(w, http.StatusOK, struct {
-		Bounces    []store.BounceSummary `json:"bounces"`
-		NextCursor *string               `json:"next_cursor"`
-	}{Bounces: rows, NextCursor: nextCursor(c, hasMore)})
+		Bounces    []bounceView `json:"bounces"`
+		NextCursor *string      `json:"next_cursor"`
+	}{Bounces: views, NextCursor: nextCursor(c, hasMore)})
 }
 
 // validMessageStatus allowlists the status values docs/guides/API.md documents for
@@ -120,11 +124,15 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 		s.serverError(w, "messages", err)
 		return
 	}
+	views := make([]messageView, len(rows))
+	for i, m := range rows {
+		views[i] = newMessageView(m)
+	}
 
 	writeJSON(w, http.StatusOK, struct {
-		Messages   []*store.Message `json:"messages"`
-		NextCursor *string          `json:"next_cursor"`
-	}{Messages: rows, NextCursor: nextCursor(c, hasMore)})
+		Messages   []messageView `json:"messages"`
+		NextCursor *string       `json:"next_cursor"`
+	}{Messages: views, NextCursor: nextCursor(c, hasMore)})
 }
 
 func (s *Server) handleMessage(w http.ResponseWriter, r *http.Request) {
@@ -142,7 +150,7 @@ func (s *Server) handleMessage(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusNotFound, "message not found")
 		return
 	}
-	writeJSON(w, http.StatusOK, msg)
+	writeJSON(w, http.StatusOK, newMessageView(msg))
 }
 
 func (s *Server) handleQueue(w http.ResponseWriter, r *http.Request) {

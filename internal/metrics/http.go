@@ -15,6 +15,7 @@ import (
 
 	"github.com/tokajer/smtprelayd/internal/config"
 	"github.com/tokajer/smtprelayd/internal/httpx"
+	"github.com/tokajer/smtprelayd/internal/loopback"
 )
 
 // ServeHTTP renders the current metrics in Prometheus text exposition
@@ -75,7 +76,7 @@ func Listen(cfg *config.Config) (net.Listener, error) {
 // open loopback one.
 func isPublic(cfg *config.Config) bool {
 	if host, _, err := net.SplitHostPort(cfg.Metrics.Address); err == nil {
-		return !config.IsLoopbackHost(host)
+		return !loopback.Host(host)
 	}
 	return true
 }

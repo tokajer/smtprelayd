@@ -104,7 +104,11 @@ func (s *scriptedServer) handle(conn net.Conn) {
 
 func deliverTo(t *testing.T, route config.Route, tokens TokenSource) error {
 	t.Helper()
-	return Deliver(context.Background(), route, Message{
+	tlsConf, err := TLSConfig(route)
+	if err != nil {
+		t.Fatalf("TLSConfig: %v", err)
+	}
+	return Deliver(context.Background(), route, tlsConf, Message{
 		From: "device@example.at", To: []string{"ops@example.net"},
 		Data: strings.NewReader("Subject: t\r\n\r\nbody\r\n"), Helo: "relay.test",
 	}, 10*time.Second, tokens)
