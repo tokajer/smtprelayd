@@ -12,8 +12,31 @@ live deployment: the Microsoft 365 route delivers with both `file:` and
 the Burn `setup.exe`, `.rpm` and `.deb` (install, upgrade in every
 combination, uninstall with and without purging the data directory).
 
-**Last session**: 2026-09-30 — Fourth architectural review, every finding
-acted on (branch `new-features`, not yet committed). Structure and the
+**Last session**: 2026-10-08 — Fifth architectural review, top five acted
+on (branch `new-features`, not yet committed):
+
+- `store.FindMessageByID` reads status, `attempt_count` and `last_smtp_*`
+  from the summary columns like the list queries (shared `summaryScan`), so
+  detail and list agree after a requeue; `deriveStatus` is gone. API.md
+  states that a requeue is not counted in `attempt_count`.
+- One `insertAttemptSQL` constant for `RecordAttempt` and `RecordRequeue`.
+- `web.New` takes consumer-side `web.Store`/`web.Queue` interfaces.
+- New tests: smarthost AUTH over implicit TLS (535 stays `AuthError`,
+  XOAUTH2 challenge decoded), `housekeeping.pass` end to end.
+- Bounce digest crash durability: accepted, recorded in `MEMORY.md` §8.
+
+Verified: gofmt, `go vet` and build on linux and windows, `go test -race
+./...`, banned imports. gosec and govulncheck were not installed locally —
+run them before merging. Deferred: `store.migrate` backfills summaries only
+when a column was missing, so a migration interrupted after its ALTERs
+leaves `last_class` NULL for messages with attempts (they read `queued` in
+both views); a startup repair `WHERE last_class IS NULL AND EXISTS
+(attempts)` would close it. Other review findings (metrics as a leaf
+package, comment sweep, failed-sweep ignoring leases) are in the same
+"left alone" spirit as below.
+
+**Previous session**: 2026-09-30 — Fourth architectural review, every finding
+acted on (since committed). Structure and the
 observable changes are in the `MEMORY.md` §3 "third pass" amendment and the
 §4 "Corrected 2026-09-30" note of the same date. In short:
 

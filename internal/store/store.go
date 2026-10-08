@@ -237,6 +237,16 @@ func (s *Store) RecordMessage(rec MessageRecord) error {
 	return nil
 }
 
+// insertAttemptSQL is shared by RecordAttempt and RecordRequeue. attempt_num
+// is computed inside the INSERT, not read by a SELECT before it, so the
+// transaction's first statement is a write: it takes SQLite's write lock
+// immediately instead of a read lock that a second writer's own transaction
+// cannot then upgrade without SQLITE_BUSY, which busy_timeout does not retry.
+const insertAttemptSQL = `
+	INSERT INTO attempts (queue_id, attempt_num, at_time, smtp_code, smtp_response, class, next_attempt_at, created_at)
+	VALUES (?, (SELECT COALESCE(MAX(attempt_num), 0) + 1 FROM attempts WHERE queue_id = ?), ?, ?, ?, ?, ?, ?)
+`
+
 // RecordAttempt inserts a delivery attempt record. class is ClassRemoved only
 // when written by RecordRemoval, never by the delivery worker.
 func (s *Store) RecordAttempt(queueID queueid.ID, smtpCode int, smtpResponse string, class Class, nextAttemptAt *time.Time) error {
@@ -261,15 +271,7 @@ func (s *Store) RecordAttempt(queueID queueid.ID, smtpCode int, smtpResponse str
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	// attempt_num is computed inside this INSERT, not read by a SELECT
-	// before it, so the transaction's first statement is a write: it takes
-	// SQLite's write lock immediately instead of a read lock that a second
-	// writer's own transaction cannot then upgrade without SQLITE_BUSY, and
-	// which busy_timeout does not retry.
-	if _, err := tx.Exec(`
-		INSERT INTO attempts (queue_id, attempt_num, at_time, smtp_code, smtp_response, class, next_attempt_at, created_at)
-		VALUES (?, (SELECT COALESCE(MAX(attempt_num), 0) + 1 FROM attempts WHERE queue_id = ?), ?, ?, ?, ?, ?, ?)
-	`, queueID, queueID, at, code, smtpResponse, class, nextStr, at); err != nil {
+	if _, err := tx.Exec(insertAttemptSQL, queueID, queueID, at, code, smtpResponse, class, nextStr, at); err != nil {
 		return fmt.Errorf("store: record attempt: %w", err)
 	}
 
@@ -362,13 +364,7 @@ func (s *Store) RecordRequeue(queueID queueid.ID) error {
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	// attempt_num is computed inside this INSERT for the same reason as in
-	// RecordAttempt: the transaction's first statement must be a write, or
-	// two writers for the same queue ID can draw the same number.
-	if _, err := tx.Exec(`
-		INSERT INTO attempts (queue_id, attempt_num, at_time, smtp_code, smtp_response, class, next_attempt_at, created_at)
-		VALUES (?, (SELECT COALESCE(MAX(attempt_num), 0) + 1 FROM attempts WHERE queue_id = ?), ?, ?, ?, ?, ?, ?)
-	`, queueID, queueID, at, sql.NullInt64{}, "", ClassRequeued, nil, at); err != nil {
+	if _, err := tx.Exec(insertAttemptSQL, queueID, queueID, at, sql.NullInt64{}, "", ClassRequeued, nil, at); err != nil {
 		return fmt.Errorf("store: record requeue: %w", err)
 	}
 	if _, err := tx.Exec(`UPDATE messages SET last_class = ?, last_attempt_at = ? WHERE queue_id = ?`,

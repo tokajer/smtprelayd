@@ -6,6 +6,9 @@ package smarthost
 import (
 	"bufio"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
+	"encoding/base64"
 	"errors"
 	"io"
 	"net"
@@ -14,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/tokajer/smtprelayd/internal/certgen"
 	"github.com/tokajer/smtprelayd/internal/config"
 )
 
@@ -23,6 +27,12 @@ import (
 type scriptedServer struct {
 	dropAfterData bool
 	sawAuth       chan string
+	tlsConf       *tls.Config
+
+	// xoauth2Challenge, when set, makes an AUTH XOAUTH2 command get a 334
+	// continuation carrying it, base64-encoded, before the final 535 -- what
+	// Microsoft 365 does on a rejected token.
+	xoauth2Challenge string
 }
 
 func startScripted(t *testing.T, s *scriptedServer) (host string, port int) {
@@ -30,6 +40,9 @@ func startScripted(t *testing.T, s *scriptedServer) (host string, port int) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
+	}
+	if s.tlsConf != nil {
+		ln = tls.NewListener(ln, s.tlsConf)
 	}
 	t.Cleanup(func() { _ = ln.Close() })
 	go func() {
@@ -75,6 +88,12 @@ func (s *scriptedServer) handle(conn net.Conn) {
 				default:
 				}
 			}
+			if s.xoauth2Challenge != "" && strings.HasPrefix(cmd, "AUTH XOAUTH2") {
+				say("334 " + base64.StdEncoding.EncodeToString([]byte(s.xoauth2Challenge)))
+				if _, err := br.ReadString('\n'); err != nil {
+					return
+				}
+			}
 			say("535 5.7.8 authentication failed")
 		case strings.HasPrefix(cmd, "MAIL"), strings.HasPrefix(cmd, "RCPT"):
 			say("250 2.1.0 ok")
@@ -102,16 +121,95 @@ func (s *scriptedServer) handle(conn net.Conn) {
 	}
 }
 
-func deliverTo(t *testing.T, route config.Route, tokens TokenSource) error {
+func deliverTo(t *testing.T, route config.Route, roots *x509.CertPool, tokens TokenSource) error {
 	t.Helper()
 	tlsConf, err := TLSConfig(route)
 	if err != nil {
 		t.Fatalf("TLSConfig: %v", err)
 	}
+	if roots != nil {
+		tlsConf.RootCAs = roots
+	}
 	return Deliver(context.Background(), route, tlsConf, Message{
 		From: "device@example.at", To: []string{"ops@example.net"},
 		Data: strings.NewReader("Subject: t\r\n\r\nbody\r\n"), Helo: "relay.test",
 	}, 10*time.Second, tokens)
+}
+
+// tlsTestMaterial lets AUTH run over verified TLS, past the cleartext guard.
+func tlsTestMaterial(t *testing.T) (serverConf *tls.Config, clientRoots *x509.CertPool) {
+	t.Helper()
+	certPEM, keyPEM, err := certgen.Generate(certgen.Options{Hosts: []string{"127.0.0.1"}})
+	if err != nil {
+		t.Fatalf("certgen.Generate: %v", err)
+	}
+	cert, err := tls.X509KeyPair(certPEM, keyPEM)
+	if err != nil {
+		t.Fatalf("X509KeyPair: %v", err)
+	}
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(certPEM) {
+		t.Fatal("AppendCertsFromPEM: no certificate added")
+	}
+	return &tls.Config{Certificates: []tls.Certificate{cert}}, pool
+}
+
+// A rejected credential must stay retryable: classifying a 535 as permanent
+// would move the whole queue to spool/failed the moment a secret is rotated.
+func TestAuthenticateRejectionOverImplicitTLSStaysRetryable(t *testing.T) {
+	serverConf, clientRoots := tlsTestMaterial(t)
+	saw := make(chan string, 1)
+	host, port := startScripted(t, &scriptedServer{tlsConf: serverConf, sawAuth: saw})
+	route := config.Route{
+		Name: "tls-plain", Host: host, Port: port, TLS: config.TLSImplicit, MinTLS: "1.2",
+		Auth: config.AuthPlain, Credentials: config.Credentials{Username: "u"},
+	}
+
+	err := deliverTo(t, route, clientRoots, nil)
+
+	var ae *AuthError
+	if !errors.As(err, &ae) {
+		t.Fatalf("Deliver returned %T (%v), want an *AuthError", err, err)
+	}
+	var pe *PermError
+	if errors.As(err, &pe) {
+		t.Error("a rejected credential must not also classify as permanent; it would stop being retried")
+	}
+
+	// The server sends to sawAuth before replying 535, so by the time Deliver
+	// returns the value is already in the buffered channel.
+	select {
+	case cmd := <-saw:
+		if !strings.HasPrefix(cmd, "AUTH PLAIN") {
+			t.Errorf("AUTH command = %q, want AUTH PLAIN", cmd)
+		}
+	default:
+		t.Error("AUTH never reached the wire")
+	}
+}
+
+// Microsoft 365 answers a rejected XOAUTH2 token with a 334 continuation
+// carrying a base64 JSON error before the final 535. The rejection must still
+// surface as an *AuthError, and its message must carry the decoded reason so
+// an operator reading the log sees why, not just "535".
+func TestAuthenticateXOAUTH2ChallengeOverImplicitTLS(t *testing.T) {
+	serverConf, clientRoots := tlsTestMaterial(t)
+	const challenge = `{"status":"401","schemes":"bearer","scope":"https://outlook.office.com/.default"}`
+	host, port := startScripted(t, &scriptedServer{tlsConf: serverConf, xoauth2Challenge: challenge})
+	route := config.Route{
+		Name: "tls-xoauth2", Host: host, Port: port, TLS: config.TLSImplicit, MinTLS: "1.2",
+		Auth: config.AuthXOAUTH2, OAuth2: config.OAuth2{Mailbox: "relay@example.at"},
+	}
+
+	err := deliverTo(t, route, clientRoots, staticToken("tok"))
+
+	var ae *AuthError
+	if !errors.As(err, &ae) {
+		t.Fatalf("Deliver returned %T (%v), want an *AuthError", err, err)
+	}
+	if !strings.Contains(err.Error(), "401") {
+		t.Errorf("error %q does not carry the decoded challenge's status", err.Error())
+	}
 }
 
 // A smarthost that answers the body with 250 owns the message from that
@@ -123,7 +221,7 @@ func TestDeliverTreatsAQuitFailureAfterAcceptanceAsDelivered(t *testing.T) {
 	host, port := startScripted(t, &scriptedServer{dropAfterData: true})
 	route := config.Route{Name: "drop", Host: host, Port: port, TLS: "none", Auth: "none"}
 
-	err := deliverTo(t, route, nil)
+	err := deliverTo(t, route, nil, nil)
 
 	var qe *QuitError
 	if !errors.As(err, &qe) {
@@ -143,7 +241,7 @@ func TestDeliverReturnsNilWhenTheSessionClosesCleanly(t *testing.T) {
 	host, port := startScripted(t, &scriptedServer{})
 	route := config.Route{Name: "clean", Host: host, Port: port, TLS: "none", Auth: "none"}
 
-	if err := deliverTo(t, route, nil); err != nil {
+	if err := deliverTo(t, route, nil, nil); err != nil {
 		t.Fatalf("Deliver returned %v against a server that answered every command", err)
 	}
 }
@@ -160,7 +258,7 @@ func TestDeliverRefusesToAuthenticateOverCleartext(t *testing.T) {
 		Credentials: config.Credentials{Username: "u"},
 	}
 
-	err := deliverTo(t, route, nil)
+	err := deliverTo(t, route, nil, nil)
 
 	var pe *PermError
 	if !errors.As(err, &pe) {

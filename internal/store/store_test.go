@@ -1294,6 +1294,15 @@ func TestRecordRequeueMakesABouncedMessageQueuedAgain(t *testing.T) {
 		t.Fatalf("derived status = %q, want %q", msg.Status, StatusQueued)
 	}
 
+	// The detail view must report the same summary as the list view.
+	if msg.Status != queued[0].Status || msg.AttemptCount != queued[0].AttemptCount ||
+		msg.LastCode != queued[0].LastCode || msg.LastErr != queued[0].LastErr {
+		t.Errorf("FindMessageByID disagrees with FindMessages: detail=%+v, list=%+v", msg, queued[0])
+	}
+	if msg.LastCode != 550 || msg.LastErr != "no such user" {
+		t.Errorf("FindMessageByID = code %d, err %q, want the last real attempt's response, unchanged by the requeue", msg.LastCode, msg.LastErr)
+	}
+
 	// A requeue is not a delivery attempt: unlike RecordAttempt, it must not
 	// touch attempt_count or overwrite the last real attempt's SMTP response.
 	// FindBounces still lists the row (has_bounced only ever goes up) and is

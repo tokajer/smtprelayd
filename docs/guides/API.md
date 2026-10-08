@@ -122,7 +122,10 @@ them, and `subject` stays redacted when `retain_subjects` is off.
 `attempt_count`, `last_smtp_code` and `last_error` summarise the most recent
 delivery attempt so that a list response needs no per-message follow-up
 request; the full per-attempt history stays on
-`GET /api/v1/messages/{queue_id}`.
+`GET /api/v1/messages/{queue_id}`. A requeue is not a delivery attempt, so it
+is not counted in `attempt_count` and leaves `last_smtp_code`/`last_error`
+unchanged, although it does appear in `attempts` as a row of class
+`requeued`.
 
 ### `GET /api/v1/queue`
 

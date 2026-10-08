@@ -16,9 +16,29 @@ import (
 	"github.com/tokajer/smtprelayd/internal/expiry"
 	"github.com/tokajer/smtprelayd/internal/metrics"
 	"github.com/tokajer/smtprelayd/internal/queueaction"
-	"github.com/tokajer/smtprelayd/internal/spool"
+	"github.com/tokajer/smtprelayd/internal/queueid"
 	"github.com/tokajer/smtprelayd/internal/store"
 )
+
+// Store is what the dashboard needs from the history store: the write
+// methods queueaction.Journal already declares, plus the three reads the
+// pages and the sidebar issue. Declared on the consumer side, like
+// internal/api's Store, so a fake can stand in for *store.Store in a test.
+type Store interface {
+	queueaction.Journal
+	FindMessages(filter store.MessageFilter) ([]*store.Message, bool, error)
+	FindBounces(filter store.BounceFilter) ([]*store.Message, bool, error)
+	FindMessageByID(queueID queueid.ID) (*store.Message, error)
+}
+
+// Queue is what the dashboard needs from the spool: the actions
+// queueaction.Queue already declares, plus Has, which the queue page uses to
+// mark a row stale when the history store lists a message the spool no
+// longer holds.
+type Queue interface {
+	queueaction.Queue
+	Has(id queueid.ID) bool
+}
 
 //go:embed static/style.css
 var styleCSS []byte
@@ -63,8 +83,8 @@ const pageSize = 50
 // config field is asked for.
 type Server struct {
 	cfg       *config.Config
-	store     *store.Store
-	spool     *spool.Spool
+	store     Store
+	spool     Queue
 	metrics   *metrics.Registry
 	deadlines []expiry.Item
 	version   string
@@ -85,7 +105,7 @@ type Server struct {
 // cmd/smtprelayd. loc is service.timezone, already parsed once by the
 // caller; nil renders every timestamp in whatever zone it already carries
 // (UTC, since that is what the store persists).
-func New(cfg *config.Config, sp *spool.Spool, st *store.Store, reg *metrics.Registry,
+func New(cfg *config.Config, sp Queue, st Store, reg *metrics.Registry,
 	deadlines []expiry.Item, loc *time.Location, version string, log *slog.Logger) (*Server, error) {
 	tmpl := make(map[string]*template.Template, len(dashboardPages))
 	funcs := template.FuncMap{"bytes": formatBytes, "localtime": localtimeFunc(loc)}

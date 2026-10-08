@@ -548,6 +548,22 @@ Three rules that must not be skipped:
 - **Volume cap.** A maximum number of notification messages per hour, after
   which further failures are recorded and counted but not mailed.
 
+**Decided 2026-10-08, crash durability of the digest.** `bounce.Notifier`
+keeps pending digest entries only in memory (`pending map[string][]queueid.ID`,
+`internal/bounce/notifier.go`), draining them on its `bounce.digest_minutes`
+ticker in `Run` and once more via `Flush()` on clean shutdown
+(`cmd/smtprelayd`'s `startWorkers`); nothing is persisted. A crash — `kill -9`,
+OOM, power loss — loses whatever is pending: at least the current window,
+longer if the hourly `max_per_hour` cap or a failed send put a digest back,
+including the in-memory overflow counts. Pending entries cover permanent and
+expired failures. The failure itself is not lost: it stays in the history
+store (`has_bounced`, the attempt row) and the dashboard's bounce view,
+barring a failed journal write, which is logged and counted. Accepted rather
+than fixed: durability would need a persisted last-digest timestamp (schema
+change) and replay at startup, which is not worth it at this relay's load
+profile with the bounce view as the authoritative record. Revisit if an
+operator comes to rely on the digest mail as their only alerting channel.
+
 ### HTTP API
 
 Read access to bounces, messages and queue state over JSON, authenticated with

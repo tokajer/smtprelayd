@@ -42,9 +42,10 @@ type Message struct {
 	Status   string    // queued, deferred, delivered, bounced
 	Attempts []Attempt // per-message details query
 
-	// Outcome of the most recent attempt, carried on the message itself so
-	// that a list view can show why something is deferred or bounced
-	// without a per-row query for its attempt history.
+	// Outcome of the most recent delivery attempt or removal, carried on the
+	// message itself so that a list view can show why something is deferred
+	// or bounced without a per-row query for its attempt history. A requeue
+	// is excluded: it leaves these fields alone.
 	AttemptCount int
 	LastCode     int
 	LastErr      string
@@ -162,6 +163,33 @@ func (j *journalScan) apply(m *Message) {
 	m.SizeBytes = j.sizeBytes.Int64
 	m.HeaderCount = int(j.headerCount.Int64)
 	m.Helo = j.helo.String
+}
+
+// summarySelect is the SELECT list every message query appends after
+// messageColumns: the latest attempt's class and SMTP reply plus the total
+// attempt count, kept on the messages row so a list view needs no per-row
+// follow-up query. prefix is the table alias including its dot, or "".
+func summarySelect(prefix string) string {
+	return prefix + "last_class, " + prefix + "last_smtp_code, " + prefix + "last_smtp_response, " + prefix + "attempt_count"
+}
+
+// summaryScan receives one row of summarySelect, in the order dest expects
+// it.
+type summaryScan struct {
+	class, resp sql.NullString
+	code, count sql.NullInt64
+}
+
+func (sc *summaryScan) dest() []any {
+	return []any{&sc.class, &sc.code, &sc.resp, &sc.count}
+}
+
+// apply sets a Message's summary fields from a scanned row.
+func (sc *summaryScan) apply(m *Message) {
+	m.LastCode = int(sc.code.Int64)
+	m.LastErr = sc.resp.String
+	m.AttemptCount = int(sc.count.Int64)
+	m.Status = classToStatus(Class(sc.class.String), sc.class.Valid)
 }
 
 // Attempt represents a single delivery attempt. Its JSON wire shape is
@@ -308,18 +336,22 @@ func (f CommonFilter) apply(b *builder, col timeColumn) {
 	}
 }
 
-// FindMessageByID retrieves a single message with all its attempts.
+// FindMessageByID retrieves a single message with all its attempts. Its
+// summary fields come from the messages row, as in FindMessages, not from
+// the attempt list: a requeue appears in Attempts but leaves AttemptCount and
+// the last SMTP reply alone.
 func (s *Store) FindMessageByID(queueID queueid.ID) (*Message, error) {
 	var sc messageScan
+	var sum summaryScan
 
 	//#nosec G202 -- messageColumns is a package constant column list, not input; the only bound value is queueID
 	row := s.db.QueryRow(`
-		SELECT `+messageColumns("")+`
+		SELECT `+messageColumns("")+", "+summarySelect("")+`
 		FROM messages
 		WHERE queue_id = ?
 	`, queueID)
 
-	err := row.Scan(sc.dest()...)
+	err := row.Scan(sc.dest(sum.dest()...)...)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -327,6 +359,7 @@ func (s *Store) FindMessageByID(queueID queueid.ID) (*Message, error) {
 		return nil, fmt.Errorf("store: find message: %w", err)
 	}
 	m := sc.message(s)
+	sum.apply(m)
 
 	// Fetch all attempts for this message.
 	// at_time has only one-second resolution, so two attempts in the same
@@ -370,14 +403,6 @@ func (s *Store) FindMessageByID(queueID queueid.ID) (*Message, error) {
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("store: attempts query error: %w", err)
-	}
-
-	// Derive status from attempts.
-	m.Status = deriveStatus(m.Attempts)
-	m.AttemptCount = len(m.Attempts)
-	if len(m.Attempts) > 0 {
-		last := m.Attempts[len(m.Attempts)-1]
-		m.LastCode, m.LastErr = last.SMTPCode, last.SMTPResp
 	}
 
 	return m, nil
@@ -440,14 +465,13 @@ func splitPage[T any](rows []T, limit int) ([]T, bool) {
 // FindMessages queries messages with filtering, sorting and pagination.
 // Status comes from last_class, which RecordAttempt maintains on the message
 // row: no attempt yet is "queued", the latest attempt's class otherwise --
-// the same definition deriveStatus applies when it is given the full attempt
-// history instead.
+// the same columns FindMessageByID reads for a single message.
 func (s *Store) FindMessages(filter MessageFilter) ([]*Message, bool, error) {
 	filter.Limit, filter.Offset = clampPaging(filter.Limit, filter.Offset)
 
 	//#nosec G202 -- every fragment appended below is a string literal and every value is bound; messageColumns and messageSortColumns are fixed, code-side lists
 	b := newBuilder(`
-		SELECT ` + messageColumns("m.") + `, m.last_class, m.last_smtp_code, m.last_smtp_response, m.attempt_count
+		SELECT ` + messageColumns("m.") + ", " + summarySelect("m.") + `
 		FROM messages m
 		WHERE 1=1
 	`)
@@ -497,18 +521,14 @@ func (s *Store) FindMessages(filter MessageFilter) ([]*Message, bool, error) {
 	var messages []*Message
 	for rows.Next() {
 		var sc messageScan
-		var latestClass, latestResp sql.NullString
-		var latestCode, attemptCount sql.NullInt64
+		var sum summaryScan
 
-		if err := rows.Scan(sc.dest(&latestClass, &latestCode, &latestResp, &attemptCount)...); err != nil {
+		if err := rows.Scan(sc.dest(sum.dest()...)...); err != nil {
 			return nil, false, fmt.Errorf("store: scan message: %w", err)
 		}
 
 		m := sc.message(s)
-		m.LastCode = int(latestCode.Int64)
-		m.LastErr = latestResp.String
-		m.AttemptCount = int(attemptCount.Int64)
-		m.Status = classToStatus(Class(latestClass.String), latestClass.Valid)
+		sum.apply(m)
 
 		messages = append(messages, m)
 	}
@@ -527,7 +547,7 @@ func (s *Store) FindBounces(filter BounceFilter) ([]*Message, bool, error) {
 	// Find queue IDs that have a final attempt with class='permanent' or 'expired'.
 	//#nosec G202 -- as in FindMessages: literal fragments, bound values, code-side column list
 	b := newBuilder(`
-		SELECT ` + messageColumns("m.") + `, m.last_class, m.last_smtp_code, m.last_smtp_response, m.attempt_count
+		SELECT ` + messageColumns("m.") + ", " + summarySelect("m.") + `
 		FROM messages m
 		WHERE m.has_bounced = 1
 	`)
@@ -553,21 +573,15 @@ func (s *Store) FindBounces(filter BounceFilter) ([]*Message, bool, error) {
 	var messages []*Message
 	for rows.Next() {
 		var sc messageScan
-		var lastClass, lastResp sql.NullString
-		var lastCode, attemptCount sql.NullInt64
+		var sum summaryScan
 
-		if err := rows.Scan(sc.dest(&lastClass, &lastCode, &lastResp, &attemptCount)...); err != nil {
+		if err := rows.Scan(sc.dest(sum.dest()...)...); err != nil {
 			return nil, false, fmt.Errorf("store: scan bounce: %w", err)
 		}
 
 		m := sc.message(s)
-		m.LastCode = int(lastCode.Int64)
-		m.LastErr = lastResp.String
-		m.AttemptCount = int(attemptCount.Int64)
-		// Not the constant StatusBounced: a message that failed permanently
-		// and was then requeued and delivered is in this list too, and must
-		// read the status its latest attempt actually left it in.
-		m.Status = classToStatus(Class(lastClass.String), lastClass.Valid)
+		// Not StatusBounced: a requeued-and-delivered row must read that outcome.
+		sum.apply(m)
 
 		messages = append(messages, m)
 	}
@@ -652,16 +666,4 @@ func (s *Store) FindBounceSummaries(filter BounceFilter) ([]BounceSummary, bool,
 
 	out, hasMore := splitPage(out, filter.Limit)
 	return out, hasMore, nil
-}
-
-// deriveStatus infers the message status from its attempts.
-// If no attempts: queued.
-// If last attempt is "delivered": delivered.
-// If last attempt is "permanent" or "expired": bounced.
-// Otherwise (temporary): deferred.
-func deriveStatus(attempts []Attempt) string {
-	if len(attempts) == 0 {
-		return classToStatus("", false)
-	}
-	return classToStatus(attempts[len(attempts)-1].Class, true)
 }
