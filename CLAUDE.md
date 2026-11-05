@@ -70,4 +70,8 @@ string. Queue IDs are a validated named type, never a raw string.
   input, expired or wrong-scope token).
 - `govulncheck` and `gosec` clean.
 - `PROGRESS.md` updated, `docs/` updated if behaviour changed.
+- `README.md` "Components" tables updated whenever `go.mod`, the Go
+  toolchain, a vendored asset (htmx) or a pinned tool or action version
+  changes. They exist for CVE tracking; take the shipped list from
+  `go version -m` on the linux and windows builds, not from `go.mod`.
 - A Conventional Commit message is supplied with the change.

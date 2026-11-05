@@ -181,6 +181,48 @@ sha256sum -c SHA256SUMS
 gh attestation verify smtprelayd-linux-amd64-v1.0.0.tar.gz --repo <owner>/smtprelayd
 ```
 
+## Components
+
+For CVE tracking. Updated with every change to `go.mod`, a vendored asset or
+a pinned tool version. The release SBOM is the machine-readable form of the
+first table; `go version -m <binary>` prints the same list for any build.
+
+**Shipped in the binary** (as of 2026-11-05, `v0.7.5`)
+
+| Component | Version | Platform | Purpose |
+|---|---|---|---|
+| Go toolchain and standard library | 1.27.3 | all | runtime, TLS, SMTP, HTTP |
+| `github.com/BurntSushi/toml` | v1.4.0 | all | configuration parser |
+| `github.com/dustin/go-humanize` | v1.0.1 | all | via modernc.org/sqlite |
+| `github.com/google/uuid` | v1.6.0 | linux | via modernc.org/sqlite |
+| `github.com/kardianos/service` | v1.3.0 | windows | Windows service wrapper |
+| `github.com/mattn/go-isatty` | v0.0.20 | windows | via modernc.org/libc |
+| `github.com/ncruces/go-strftime` | v0.1.9 | windows | via modernc.org/libc |
+| `github.com/remyoudompheng/bigfft` | v0.0.0-20230129092748-24d4a6f8daec | all | via modernc.org/mathutil |
+| `golang.org/x/sys` | v0.47.0 | all | OS calls, DPAPI, ACLs |
+| `gopkg.in/natefinch/lumberjack.v2` | v2.2.1 | all | log rotation |
+| `modernc.org/sqlite` | v1.31.1 | all | history store (pure Go SQLite) |
+| `modernc.org/libc` | v1.55.3 | all | via modernc.org/sqlite |
+| `modernc.org/mathutil` | v1.6.0 | all | via modernc.org/sqlite |
+| `modernc.org/memory` | v1.8.0 | all | via modernc.org/sqlite |
+| htmx (vendored, `internal/web/static/htmx.min.js`) | 2.0.4 | all | dashboard refresh |
+
+**Build, CI and packaging** (not shipped; pinned in `.github/workflows/`)
+
+| Tool | Version | Used in |
+|---|---|---|
+| govulncheck | v1.6.0 | ci, release |
+| gosec | v2.30.0 | ci |
+| staticcheck | 2026.2.2 | ci |
+| cyclonedx-gomod | v1.10.0 | release (SBOM) |
+| nfpm | v2.47.0 | release (`.deb`, `.rpm`) |
+| WiX Toolset | 3.x from the `windows-latest` runner image, not pinned | release (`.msi`, `setup.exe`) |
+| `actions/checkout` | v4 @ `11d5960` | ci, release |
+| `actions/setup-go` | v5 @ `40f1582` | ci, release |
+| `actions/upload-artifact` | v4 @ `ea165f8` | release |
+| `actions/download-artifact` | v4 @ `d3f86a1` | release |
+| `actions/attest-build-provenance` | v2 @ `e8998f9` | release |
+
 ## Configuration
 
 Copy `configs/smtprelayd.example.toml` and adapt it. A secret field never
