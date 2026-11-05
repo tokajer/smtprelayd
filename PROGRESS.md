@@ -29,7 +29,11 @@ combination, uninstall with and without purging the data directory).
   v2.29.0 cannot read go1.27 export data ("export data version 5 is
   greater than maximum supported version 4") and exit 1 with 0 issues
   reported, which first surfaced in CI; `GOSEC_VERSION` is now v2.30.0
-  (x/tools v0.52.0), which exits 0 with 0 issues.
+  (x/tools v0.52.0), which exits 0 with 0 issues. staticcheck 2025.1.1
+  and 2026.2.1 fail the same way; `STATICCHECK_VERSION` is now 2026.2.2
+  (x/tools v0.51.0), clean. Every CI step was then rerun locally on
+  go1.27.3 by exit code (windows vet, selftest, build-all included);
+  cyclonedx-gomod v1.10.0 and nfpm v2.47.0 also run.
 
 **Previous session**: 2026-10-08 — Fifth architectural review, top five
 acted on (since committed):
