@@ -25,7 +25,11 @@ combination, uninstall with and without purging the data directory).
   fixed only in 1.26.9+. `go mod tidy` changed nothing else.
 - Verified on go1.27.3 (`~/sdk/go1.27.3`, `GOTOOLCHAIN=local`): gofmt,
   `go vet`, linux and windows build, `go test -race ./...`, banned
-  imports, govulncheck v1.6.0 no vulnerabilities, gosec v2.28.0 0 issues.
+  imports, govulncheck v1.6.0 no vulnerabilities. gosec v2.28.0 and
+  v2.29.0 cannot read go1.27 export data ("export data version 5 is
+  greater than maximum supported version 4") and exit 1 with 0 issues
+  reported, which first surfaced in CI; `GOSEC_VERSION` is now v2.30.0
+  (x/tools v0.52.0), which exits 0 with 0 issues.
 
 **Previous session**: 2026-10-08 — Fifth architectural review, top five
 acted on (since committed):

@@ -20,7 +20,7 @@ env:
   # never ran and the binaries were produced by an unpinned one.
   GO_VERSION: "1.27.3"
   GOVULNCHECK_VERSION: "v1.6.0"
-  GOSEC_VERSION: "v2.28.0"
+  GOSEC_VERSION: "v2.30.0"
   STATICCHECK_VERSION: "2025.1.1"
 
 jobs:
