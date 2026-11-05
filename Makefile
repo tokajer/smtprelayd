@@ -5,7 +5,7 @@ LDFLAGS := -s -w -X main.version=$(VERSION)
 GOFLAGS := -trimpath
 export CGO_ENABLED = 0
 
-.PHONY: build build-all test lint check selftest selftest-ci sbom dist dist-dir clean license
+.PHONY: build build-all test lint ci check selftest selftest-ci sbom dist dist-dir clean license
 
 build:
 	go build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o bin/$(BINARY) $(PKG)
@@ -34,6 +34,11 @@ lint:
 	gofmt -l .
 	go vet ./...
 	./scripts/check-banned-imports.sh
+
+# Every step of the Linux CI jobs, with the tool versions pinned in ci.yml.
+# Run this before pushing anything that touches go.mod or the workflows.
+ci:
+	./scripts/ci-local.sh
 
 # Validate a configuration without starting anything. CONFIG=<path> to override.
 CONFIG ?= configs/smtprelayd.example.toml

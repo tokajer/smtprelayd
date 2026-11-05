@@ -42,6 +42,7 @@ go mod tidy         # once, to write go.sum
 make build          # host platform
 make build-all      # linux/amd64, linux/arm64, windows/amd64
 make test lint
+make ci             # every Linux CI step, tool versions pinned in ci.yml
 ```
 
 No cgo, no Node.js. `GOOS=windows go build ./cmd/smtprelayd` is all a Windows

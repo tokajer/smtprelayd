@@ -34,6 +34,11 @@ combination, uninstall with and without purging the data directory).
   (x/tools v0.51.0), clean. Every CI step was then rerun locally on
   go1.27.3 by exit code (windows vet, selftest, build-all included);
   cyclonedx-gomod v1.10.0 and nfpm v2.47.0 also run.
+- `make ci` (`scripts/ci-local.sh`) runs every step of the Linux CI jobs
+  with the versions read from `ci.yml`, refuses a local toolchain other
+  than `GO_VERSION`, and exits non-zero if any step failed. Run it before
+  pushing a toolchain or workflow change; the Windows test job is still
+  CI-only.
 
 **Previous session**: 2026-10-08 — Fifth architectural review, top five
 acted on (since committed):
