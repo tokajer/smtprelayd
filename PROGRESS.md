@@ -12,8 +12,23 @@ live deployment: the Microsoft 365 route delivers with both `file:` and
 the Burn `setup.exe`, `.rpm` and `.deb` (install, upgrade in every
 combination, uninstall with and without purging the data directory).
 
-**Last session**: 2026-10-08 — Fifth architectural review, top five acted
-on (branch `new-features`, not yet committed):
+**Last session**: 2026-11-05 — Small items from the fifth review:
+
+- `store.backfillSummaries` runs on every Open as a repair for rows with
+  attempts but no `last_class` (an interrupted migration), behind a
+  read-only `EXISTS` check, in one transaction with `last_class` written
+  last. Its values now mirror `RecordRequeue`: requeue rows are not counted
+  in `attempt_count` and do not feed `first_attempt_at` or `last_smtp_*`.
+  Databases already backfilled by an earlier release are not recounted.
+- Verified: gofmt, `go vet`, linux and windows build, `go test -race
+  ./...`, banned imports, gosec 0 issues. **govulncheck reports 12
+  standard-library vulnerabilities in go1.25.13** (crypto/x509,
+  crypto/tls, net/http, net/textproto, html/template), fixed only in
+  go1.26.9/1.26.10. Toolchain bump (`go.mod`, `ci.yml`, `release.yml`)
+  pending operator decision — do not release before it.
+
+**Previous session**: 2026-10-08 — Fifth architectural review, top five
+acted on (since committed):
 
 - `store.FindMessageByID` reads status, `attempt_count` and `last_smtp_*`
   from the summary columns like the list queries (shared `summaryScan`), so
@@ -25,13 +40,7 @@ on (branch `new-features`, not yet committed):
   XOAUTH2 challenge decoded), `housekeeping.pass` end to end.
 - Bounce digest crash durability: accepted, recorded in `MEMORY.md` §8.
 
-Verified: gofmt, `go vet` and build on linux and windows, `go test -race
-./...`, banned imports. gosec and govulncheck were not installed locally —
-run them before merging. Deferred: `store.migrate` backfills summaries only
-when a column was missing, so a migration interrupted after its ALTERs
-leaves `last_class` NULL for messages with attempts (they read `queued` in
-both views); a startup repair `WHERE last_class IS NULL AND EXISTS
-(attempts)` would close it. Other review findings (metrics as a leaf
+Other review findings (metrics as a leaf
 package, comment sweep, failed-sweep ignoring leases) are in the same
 "left alone" spirit as below.
 

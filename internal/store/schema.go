@@ -163,7 +163,6 @@ func (s *Store) migrate() error {
 		s.log.Info("store: schema migrated", "added_column", c.name)
 	}
 
-	backfill := false
 	for _, c := range summaryColumns {
 		if present[c.name] {
 			continue
@@ -172,51 +171,89 @@ func (s *Store) migrate() error {
 			return fmt.Errorf("store: add column %s: %w", c.name, err)
 		}
 		s.log.Info("store: schema migrated", "added_column", c.name)
-		backfill = true
-	}
-	if backfill {
-		if err := s.backfillSummaries(); err != nil {
-			return err
-		}
 	}
 
-	return nil
+	// Runs on every Open, not only after an ALTER: a migration interrupted
+	// between its ALTERs and the backfill left the columns present and the
+	// rows unfilled, and keying on "a column was missing" never came back
+	// for them. It touches only rows that need it, so on a healthy database
+	// it is one index probe on last_class.
+	return s.backfillSummaries()
 }
 
 // backfillSummaries fills the summary columns for rows written before they
-// existed. It runs once, immediately after the columns are added, because a
-// row left at the DEFAULT would read as "never attempted" -- which for an
-// old bounce is not merely stale but wrong.
+// existed: a row left at the DEFAULT would read as "never attempted", which
+// for an old bounce is not merely stale but wrong. A row needs it when it has
+// attempts but no last_class, which no write path leaves behind; every other
+// row is left alone, so the statements are safe to run on each Open.
+//
+// The values mirror the write path: a requeue row sets last_class and
+// last_attempt_at but is not counted in attempt_count, does not start
+// first_attempt_at and does not overwrite last_smtp_*, exactly as
+// RecordRequeue does.
 //
 // One statement per column rather than one correlated pass: SQLite has no
 // UPDATE ... FROM in every build this driver may be compiled from, and each
-// of these is a single scan against idx_attempts_queue_time.
+// of these is a single scan against idx_attempts_queue_time. They share one
+// transaction because last_class is the marker: committing it before the
+// columns after it would hide a half-filled row from the next repair.
 func (s *Store) backfillSummaries() error {
-	start := time.Now()
+	const pending = ` WHERE last_class IS NULL AND EXISTS
+			(SELECT 1 FROM attempts a WHERE a.queue_id = messages.queue_id)`
+	// Latest by id, not by at_time: at_time has second precision, so two
+	// attempts in the same second would otherwise be indistinguishable.
+	// last_class is written last, since it is what pending tests.
 	stmts := []string{
 		`UPDATE messages SET attempt_count =
-			(SELECT COUNT(*) FROM attempts a WHERE a.queue_id = messages.queue_id)`,
+			(SELECT COUNT(*) FROM attempts a WHERE a.queue_id = messages.queue_id AND a.class != 'requeued')` + pending,
 		`UPDATE messages SET first_attempt_at =
-			(SELECT MIN(a.at_time) FROM attempts a WHERE a.queue_id = messages.queue_id)`,
+			(SELECT MIN(a.at_time) FROM attempts a WHERE a.queue_id = messages.queue_id AND a.class != 'requeued')` + pending,
 		`UPDATE messages SET last_attempt_at =
-			(SELECT MAX(a.at_time) FROM attempts a WHERE a.queue_id = messages.queue_id)`,
-		// Latest by id, not by at_time: at_time has second precision, so two
-		// attempts in the same second would otherwise be indistinguishable.
-		`UPDATE messages SET last_class =
-			(SELECT a.class FROM attempts a WHERE a.queue_id = messages.queue_id ORDER BY a.id DESC LIMIT 1)`,
+			(SELECT MAX(a.at_time) FROM attempts a WHERE a.queue_id = messages.queue_id)` + pending,
 		`UPDATE messages SET last_smtp_code =
-			(SELECT a.smtp_code FROM attempts a WHERE a.queue_id = messages.queue_id ORDER BY a.id DESC LIMIT 1)`,
+			(SELECT a.smtp_code FROM attempts a WHERE a.queue_id = messages.queue_id AND a.class != 'requeued' ORDER BY a.id DESC LIMIT 1)` + pending,
 		`UPDATE messages SET last_smtp_response =
-			(SELECT a.smtp_response FROM attempts a WHERE a.queue_id = messages.queue_id ORDER BY a.id DESC LIMIT 1)`,
-		`UPDATE messages SET has_bounced = 1 WHERE EXISTS
+			(SELECT a.smtp_response FROM attempts a WHERE a.queue_id = messages.queue_id AND a.class != 'requeued' ORDER BY a.id DESC LIMIT 1)` + pending,
+		`UPDATE messages SET has_bounced = 1` + pending + ` AND EXISTS
 			(SELECT 1 FROM attempts a WHERE a.queue_id = messages.queue_id AND a.class IN ('permanent', 'expired'))`,
+		`UPDATE messages SET last_class =
+			(SELECT a.class FROM attempts a WHERE a.queue_id = messages.queue_id ORDER BY a.id DESC LIMIT 1)` + pending,
 	}
+
+	// Checked read-only first so a healthy Open neither takes the write lock
+	// nor makes seven passes over the never-attempted rows.
+	var needed bool
+	if err := s.db.QueryRow(`SELECT EXISTS (SELECT 1 FROM messages` + pending + `)`).Scan(&needed); err != nil {
+		return fmt.Errorf("store: check attempt summaries: %w", err)
+	}
+	if !needed {
+		return nil
+	}
+
+	start := time.Now()
+	tx, err := s.db.Begin()
+	if err != nil {
+		return fmt.Errorf("store: backfill attempt summaries: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	var filled int64
 	for _, q := range stmts {
-		if _, err := s.db.Exec(q); err != nil {
+		res, err := tx.Exec(q)
+		if err != nil {
+			return fmt.Errorf("store: backfill attempt summaries: %w", err)
+		}
+		// The last statement, last_class, matches every pending row, so its
+		// count is the number of messages filled.
+		if filled, err = res.RowsAffected(); err != nil {
 			return fmt.Errorf("store: backfill attempt summaries: %w", err)
 		}
 	}
-	s.log.Info("store: attempt summaries backfilled", "took", time.Since(start).String())
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("store: backfill attempt summaries: %w", err)
+	}
+	if filled > 0 {
+		s.log.Info("store: attempt summaries backfilled", "messages", filled, "took", time.Since(start).String())
+	}
 	return nil
 }
 

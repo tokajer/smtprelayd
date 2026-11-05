@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"sync"
@@ -1464,6 +1465,87 @@ func TestMigrationBackfillsAttemptSummaries(t *testing.T) {
 				t.Errorf("its backfilled attempt count is %d, want 1", m.AttemptCount)
 			}
 		}
+	}
+}
+
+// A migration interrupted after its ALTERs leaves the summary columns present
+// and the rows unfilled. The next Open must still fill them, and fill them as
+// the write path would have, requeue included, or the message reads as
+// "queued, never attempted" in every view.
+func TestOpenRepairsSummariesLeftUnfilledByAnInterruptedMigration(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "history.db")
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	s, err := Open(dbPath, log, 90, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	now := time.Now()
+	const requeued, delivered, fresh = "QREPAIRREQUEUEAA", "QREPAIRDELIVERED", "QREPAIRNEVERSENT"
+	for _, id := range []string{requeued, delivered, fresh} {
+		if err := s.RecordMessage(testRecord(id, now, now.Add(96*time.Hour))); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.RecordAttempt(requeued, 451, "try later", ClassTemporary, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.RecordAttempt(requeued, 550, "no such user", ClassPermanent, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.RecordRequeue(requeued); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.RecordAttempt(delivered, 250, "ok", ClassDelivered, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	want := map[queueid.ID]*Message{}
+	for _, id := range []queueid.ID{requeued, delivered, fresh} {
+		m, err := s.FindMessageByID(id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want[id] = m
+	}
+
+	// What the ALTERs leave behind: columns at their DEFAULT. The delivered
+	// message keeps its summary, standing for a row the repair must not
+	// rewrite.
+	if _, err := s.db.Exec(`UPDATE messages SET attempt_count = 0, first_attempt_at = NULL,
+		last_attempt_at = NULL, last_class = NULL, last_smtp_code = NULL,
+		last_smtp_response = NULL, has_bounced = 0 WHERE queue_id IN (?, ?)`, requeued, fresh); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec(`UPDATE messages SET last_smtp_response = 'kept' WHERE queue_id = ?`, delivered); err != nil {
+		t.Fatal(err)
+	}
+	want[delivered].LastErr = "kept"
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	s, err = Open(dbPath, log, 90, true)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer s.Close()
+
+	for id, w := range want {
+		got, err := s.FindMessageByID(id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(got, w) {
+			t.Errorf("%s after repair:\n got %+v\nwant %+v", id, got, w)
+		}
+	}
+	bounces, _, err := s.FindBounces(BounceFilter{Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bounces) != 1 || bounces[0].QueueID != requeued || bounces[0].AttemptCount != 2 {
+		t.Errorf("bounce view after repair = %+v, want the requeued message with 2 attempts", bounces)
 	}
 }
 
