@@ -20,12 +20,12 @@ combination, uninstall with and without purging the data directory).
   last. Its values now mirror `RecordRequeue`: requeue rows are not counted
   in `attempt_count` and do not feed `first_attempt_at` or `last_smtp_*`.
   Databases already backfilled by an earlier release are not recounted.
-- Verified: gofmt, `go vet`, linux and windows build, `go test -race
-  ./...`, banned imports, gosec 0 issues. **govulncheck reports 12
-  standard-library vulnerabilities in go1.25.13** (crypto/x509,
-  crypto/tls, net/http, net/textproto, html/template), fixed only in
-  go1.26.9/1.26.10. Toolchain bump (`go.mod`, `ci.yml`, `release.yml`)
-  pending operator decision — do not release before it.
+- Toolchain raised to **go1.27.3** (`go.mod`, `ci.yml`, `release.yml`):
+  govulncheck on go1.25.13 reported 12 standard-library vulnerabilities
+  fixed only in 1.26.9+. `go mod tidy` changed nothing else.
+- Verified on go1.27.3 (`~/sdk/go1.27.3`, `GOTOOLCHAIN=local`): gofmt,
+  `go vet`, linux and windows build, `go test -race ./...`, banned
+  imports, govulncheck v1.6.0 no vulnerabilities, gosec v2.28.0 0 issues.
 
 **Previous session**: 2026-10-08 — Fifth architectural review, top five
 acted on (since committed):
