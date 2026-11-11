@@ -187,11 +187,11 @@ For CVE tracking. Updated with every change to `go.mod`, a vendored asset or
 a pinned tool version. The release SBOM is the machine-readable form of the
 first table; `go version -m <binary>` prints the same list for any build.
 
-**Shipped in the binary** (as of 2026-11-05, `v0.7.5`)
+**Shipped in the binary** (as of 2026-11-11, unreleased after `v0.7.5`)
 
 | Component | Version | Platform | Purpose |
 |---|---|---|---|
-| Go toolchain and standard library | 1.27.3 | all | runtime, TLS, SMTP, HTTP |
+| Go toolchain and standard library | 1.27.4 | all | runtime, TLS, SMTP, HTTP |
 | `github.com/BurntSushi/toml` | v1.4.0 | all | configuration parser |
 | `github.com/dustin/go-humanize` | v1.0.1 | all | via modernc.org/sqlite |
 | `github.com/google/uuid` | v1.6.0 | linux | via modernc.org/sqlite |

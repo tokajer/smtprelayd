@@ -23,9 +23,12 @@ HIGH/MEDIUM finding at confidence 8+). Two rewrite gaps fixed:
   the display-name position, trailing text, stray backslashes and
   unterminated quotes. Reviewed twice (Sonnet, then Fable 5.1); each review
   found one further bypass, both fixed and pinned by tests.
-- `make ci` fails only on govulncheck: GO-2026-6859 (`net/http`
-  MaxBytesReader header race) in go1.27.3, fixed in go1.27.4. Not caused by
-  this change; the toolchain raise is the next item.
+- Toolchain raised to **go1.27.4** (`go.mod`, `ci.yml`, `release.yml`,
+  README components): govulncheck reported GO-2026-6859 (`net/http`
+  MaxBytesReader header race) in go1.27.3. `go mod tidy` changed nothing,
+  and `go version -m` lists the same modules on linux and windows. `make ci`
+  is green on go1.27.4 with gosec v2.30.0 and staticcheck 2026.2.2
+  unchanged; the Windows test job is still CI-only.
 - Nine places where `SECURITY.md` / `EXPLOIT-SURFACE.md` promise more than
   the code does are listed under "Open defects"; each needs a decision.
 
