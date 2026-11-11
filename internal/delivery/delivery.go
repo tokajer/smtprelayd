@@ -365,9 +365,14 @@ func (m *Manager) send(ctx context.Context, log *slog.Logger, rs *routeState, me
 		return attemptResult{}, false
 	}
 	// The handle is closed explicitly once the body has been sent, before
-	// Remove() unlinks it: Windows refuses to delete a file the process
-	// itself still holds open, which left delivered bodies behind. The defer
-	// only covers the paths that return before that point.
+	// Remove() unlinks it. That used to be required: Windows refused to
+	// delete a file the process itself still held open, which left
+	// delivered bodies behind. Spool files are now opened through os.Root,
+	// with FILE_SHARE_DELETE, and unlinked with POSIX semantics, so the
+	// unlink succeeds either way -- but a file system without POSIX delete
+	// semantics only marks the file delete-pending until the last handle
+	// closes, and the name stays taken until then. The defer only covers the
+	// paths that return before that point.
 	closed := false
 	closeBody := func() {
 		if closed {

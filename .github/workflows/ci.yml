@@ -52,6 +52,13 @@ jobs:
       - name: Test
         run: go test -race ./...
 
+      # The unit tests check the inputs someone thought of; these run the
+      # parsers that take client or on-disk input against generated ones for
+      # a few seconds each. Long enough to catch a regression on a seed's
+      # neighbourhood, not a substitute for a longer local run.
+      - name: Fuzz
+        run: ./scripts/fuzz.sh
+
       - name: Banned imports across the full dependency graph
         run: ./scripts/check-banned-imports.sh
 

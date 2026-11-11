@@ -66,6 +66,7 @@ func testServer(t *testing.T) (*Server, *store.Store, *spool.Spool) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = sp.Close() })
 	reg := metrics.New(expiry.Items(cfg, nil), sp, []string{"m365", "legacy"}, nil)
 	return New(cfg, sp, st, reg, "test", discardLog()), st, sp
 }

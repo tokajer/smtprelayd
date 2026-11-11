@@ -24,6 +24,7 @@ func TestEnqueueClaimRemove(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = s.Close() })
 	env := Envelope{From: "a@example.at", To: []string{"b@example.net"}, Origin: "c", Route: "r",
 		Received: time.Now().UTC()}
 	id, err := s.Enqueue(env, strings.NewReader("Subject: x\r\n\r\nbody\r\n"), 0, time.Hour)
@@ -67,7 +68,8 @@ func TestEnqueueEnforcesSizeLimit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = s.Enqueue(Envelope{}, strings.NewReader(strings.Repeat("x", 2048)), 1024, time.Hour)
+	t.Cleanup(func() { _ = s.Close() })
+	_, err = s.Enqueue(Envelope{To: []string{"b@example.net"}, Route: "r"}, strings.NewReader(strings.Repeat("x", 2048)), 1024, time.Hour)
 	if err != ErrTooLarge {
 		t.Fatalf("got %v, want ErrTooLarge", err)
 	}
@@ -87,7 +89,8 @@ func TestRecoveryDropsOrphanedBody(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	id, err := s.Enqueue(Envelope{From: "a@example.at"}, strings.NewReader("x"), 0, time.Hour)
+	t.Cleanup(func() { _ = s.Close() })
+	id, err := s.Enqueue(Envelope{From: "a@example.at", To: []string{"b@example.net"}, Route: "r"}, strings.NewReader("x"), 0, time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -95,10 +98,12 @@ func TestRecoveryDropsOrphanedBody(t *testing.T) {
 	if err := os.Remove(filepath.Join(dir, "spool", "queue", id.String()+".json")); err != nil {
 		t.Fatal(err)
 	}
+	_ = s.Close()
 	s2, err := Open(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = s2.Close() })
 	if s2.Len() != 0 {
 		t.Fatalf("orphaned body was recovered as a message")
 	}
@@ -113,6 +118,7 @@ func TestQueueDepthSplitsQueuedAndDeferred(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = s.Close() })
 	env1 := Envelope{From: "a@example.at", To: []string{"b@example.net"}, Route: "r1", Received: time.Now().UTC()}
 	env2 := Envelope{From: "a@example.at", To: []string{"b@example.net"}, Route: "r1", Received: time.Now().UTC().Add(time.Second)}
 	if _, err := s.Enqueue(env1, strings.NewReader("x"), 0, time.Hour); err != nil {
@@ -146,6 +152,7 @@ func TestQueueDepthCountsLeasedMessageAsQueued(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = s.Close() })
 	env := Envelope{From: "a@example.at", To: []string{"b@example.net"}, Route: "r1", Received: time.Now().UTC()}
 	if _, err := s.Enqueue(env, strings.NewReader("x"), 0, time.Hour); err != nil {
 		t.Fatal(err)
@@ -164,7 +171,8 @@ func TestQueueDepthCountsLeasedMessageAsQueued(t *testing.T) {
 func TestFailMovesAside(t *testing.T) {
 	dir := t.TempDir()
 	s, _ := Open(dir)
-	id, err := s.Enqueue(Envelope{From: "a@example.at"}, strings.NewReader("x"), 0, time.Hour)
+	t.Cleanup(func() { _ = s.Close() })
+	id, err := s.Enqueue(Envelope{From: "a@example.at", To: []string{"b@example.net"}, Route: "r"}, strings.NewReader("x"), 0, time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -180,7 +188,8 @@ func TestFailMovesAside(t *testing.T) {
 func TestRequeueFromFailedResetsAttemptsAndMovesFiles(t *testing.T) {
 	dir := t.TempDir()
 	s, _ := Open(dir)
-	id, err := s.Enqueue(Envelope{From: "a@example.at", Route: "r1"}, strings.NewReader("body"), 0, time.Hour)
+	t.Cleanup(func() { _ = s.Close() })
+	id, err := s.Enqueue(Envelope{From: "a@example.at", To: []string{"b@example.net"}, Route: "r1"}, strings.NewReader("body"), 0, time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -222,7 +231,8 @@ func TestRequeueFromFailedResetsAttemptsAndMovesFiles(t *testing.T) {
 func TestRequeueActiveMessageResetsAttempts(t *testing.T) {
 	dir := t.TempDir()
 	s, _ := Open(dir)
-	id, err := s.Enqueue(Envelope{From: "a@example.at", Route: "r1"}, strings.NewReader("x"), 0, time.Hour)
+	t.Cleanup(func() { _ = s.Close() })
+	id, err := s.Enqueue(Envelope{From: "a@example.at", To: []string{"b@example.net"}, Route: "r1"}, strings.NewReader("x"), 0, time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -245,6 +255,7 @@ func TestRequeueActiveMessageResetsAttempts(t *testing.T) {
 func TestRequeueUnknownIDReturnsNotFound(t *testing.T) {
 	dir := t.TempDir()
 	s, _ := Open(dir)
+	t.Cleanup(func() { _ = s.Close() })
 	id, err := queueid.New()
 	if err != nil {
 		t.Fatal(err)
@@ -257,7 +268,8 @@ func TestRequeueUnknownIDReturnsNotFound(t *testing.T) {
 func TestRequeueAndDiscardRefuseALeasedMessage(t *testing.T) {
 	dir := t.TempDir()
 	s, _ := Open(dir)
-	id, err := s.Enqueue(Envelope{From: "a@example.at"}, strings.NewReader("x"), 0, time.Hour)
+	t.Cleanup(func() { _ = s.Close() })
+	id, err := s.Enqueue(Envelope{From: "a@example.at", To: []string{"b@example.net"}, Route: "r"}, strings.NewReader("x"), 0, time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -275,7 +287,8 @@ func TestRequeueAndDiscardRefuseALeasedMessage(t *testing.T) {
 func TestDiscardRemovesActiveMessage(t *testing.T) {
 	dir := t.TempDir()
 	s, _ := Open(dir)
-	id, err := s.Enqueue(Envelope{From: "a@example.at"}, strings.NewReader("x"), 0, time.Hour)
+	t.Cleanup(func() { _ = s.Close() })
+	id, err := s.Enqueue(Envelope{From: "a@example.at", To: []string{"b@example.net"}, Route: "r"}, strings.NewReader("x"), 0, time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -295,7 +308,8 @@ func TestDiscardRemovesActiveMessage(t *testing.T) {
 func TestDiscardRemovesFailedMessage(t *testing.T) {
 	dir := t.TempDir()
 	s, _ := Open(dir)
-	id, err := s.Enqueue(Envelope{From: "a@example.at"}, strings.NewReader("x"), 0, time.Hour)
+	t.Cleanup(func() { _ = s.Close() })
+	id, err := s.Enqueue(Envelope{From: "a@example.at", To: []string{"b@example.net"}, Route: "r"}, strings.NewReader("x"), 0, time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -318,7 +332,8 @@ func TestDiscardRemovesFailedMessage(t *testing.T) {
 // copy is already gone.
 func TestHasCoversQueuedFailedAndDiscarded(t *testing.T) {
 	s, _ := Open(t.TempDir())
-	id, err := s.Enqueue(Envelope{From: "a@example.at"}, strings.NewReader("x"), 0, time.Hour)
+	t.Cleanup(func() { _ = s.Close() })
+	id, err := s.Enqueue(Envelope{From: "a@example.at", To: []string{"b@example.net"}, Route: "r"}, strings.NewReader("x"), 0, time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -345,6 +360,7 @@ func TestHasCoversQueuedFailedAndDiscarded(t *testing.T) {
 func TestDiscardUnknownIDReturnsNotFound(t *testing.T) {
 	dir := t.TempDir()
 	s, _ := Open(dir)
+	t.Cleanup(func() { _ = s.Close() })
 	id, err := queueid.New()
 	if err != nil {
 		t.Fatal(err)
@@ -357,12 +373,13 @@ func TestDiscardUnknownIDReturnsNotFound(t *testing.T) {
 func TestQueueDepthOldestQueuedTracksEarliestClaimable(t *testing.T) {
 	dir := t.TempDir()
 	s, _ := Open(dir)
+	t.Cleanup(func() { _ = s.Close() })
 	older := time.Now().UTC().Add(-time.Hour)
 	newer := time.Now().UTC()
-	if _, err := s.Enqueue(Envelope{From: "a@example.at", Route: "r1", Received: newer}, strings.NewReader("x"), 0, time.Hour); err != nil {
+	if _, err := s.Enqueue(Envelope{From: "a@example.at", To: []string{"b@example.net"}, Route: "r1", Received: newer}, strings.NewReader("x"), 0, time.Hour); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.Enqueue(Envelope{From: "a@example.at", Route: "r1", Received: older}, strings.NewReader("x"), 0, time.Hour); err != nil {
+	if _, err := s.Enqueue(Envelope{From: "a@example.at", To: []string{"b@example.net"}, Route: "r1", Received: older}, strings.NewReader("x"), 0, time.Hour); err != nil {
 		t.Fatal(err)
 	}
 	depth := s.QueueDepth(time.Now())
@@ -400,6 +417,7 @@ func TestFailedMessagesStillCountTowardsTheQuota(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = s.Close() })
 	if got := s.usedBytes(); got != 0 {
 		t.Fatalf("empty spool reports %d bytes", got)
 	}
@@ -430,6 +448,7 @@ func TestQuotaIsReleasedWhenFailedFilesGo(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			t.Cleanup(func() { _ = s.Close() })
 			id := enqueueAndFail(t, s, "Subject: x\r\n\r\nbody\r\n")
 			if len(s.failed.index) != 1 {
 				t.Fatalf("failed index holds %d entries", len(s.failed.index))
@@ -452,6 +471,7 @@ func TestSweepFailedHonoursRetention(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = s.Close() })
 	id := enqueueAndFail(t, s, "Subject: x\r\n\r\nbody\r\n")
 
 	// Retention of zero keeps everything, which is the documented opt-out.
@@ -486,13 +506,16 @@ func TestFailedIndexSurvivesReopen(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = s.Close() })
 	enqueueAndFail(t, s, "Subject: x\r\n\r\n"+strings.Repeat("z", 2048)+"\r\n")
 	before := s.usedBytes()
 
+	_ = s.Close()
 	reopened, err := Open(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = reopened.Close() })
 	if got := reopened.usedBytes(); got != before {
 		t.Fatalf("after reopen the spool accounts %d bytes, want %d", got, before)
 	}
@@ -505,6 +528,7 @@ func TestSetQuotaNeverWrapsIntoNoQuota(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = s.Close() })
 	s.SetQuota(1<<40, 80)
 	if s.quota.maxBytes <= 0 {
 		t.Fatalf("an enormous quota became %d, i.e. no quota", s.quota.maxBytes)
@@ -524,10 +548,11 @@ func TestQuotaWarningReportsThresholdCrossing(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = s.Close() })
 
 	// No quota: over must stay false no matter how much is enqueued.
 	s.SetQuota(0, 80)
-	if _, err := s.Enqueue(Envelope{}, strings.NewReader(strings.Repeat("x", 4096)), 0, time.Hour); err != nil {
+	if _, err := s.Enqueue(Envelope{To: []string{"b@example.net"}, Route: "r"}, strings.NewReader(strings.Repeat("x", 4096)), 0, time.Hour); err != nil {
 		t.Fatal(err)
 	}
 	if _, _, over := s.QuotaWarning(); over {
@@ -549,17 +574,18 @@ func TestQuotaWarningReportsThresholdCrossing(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = s2.Close() })
 	s2.quota.maxBytes = 1000
 	s2.quota.warnPercent = 80
 
-	if _, err := s2.Enqueue(Envelope{}, strings.NewReader(strings.Repeat("x", 500)), 0, time.Hour); err != nil {
+	if _, err := s2.Enqueue(Envelope{To: []string{"b@example.net"}, Route: "r"}, strings.NewReader(strings.Repeat("x", 500)), 0, time.Hour); err != nil {
 		t.Fatal(err)
 	}
 	if used, max, over := s2.QuotaWarning(); over || used != 500 || max != 1000 {
 		t.Fatalf("QuotaWarning() = %d, %d, %v below threshold, want 500, 1000, false", used, max, over)
 	}
 
-	if _, err := s2.Enqueue(Envelope{}, strings.NewReader(strings.Repeat("x", 300)), 0, time.Hour); err != nil {
+	if _, err := s2.Enqueue(Envelope{To: []string{"b@example.net"}, Route: "r"}, strings.NewReader(strings.Repeat("x", 300)), 0, time.Hour); err != nil {
 		t.Fatal(err)
 	}
 	if used, max, over := s2.QuotaWarning(); !over || used != 800 || max != 1000 {
@@ -578,7 +604,8 @@ func TestSweepFailedKeepsWhatItCouldNotDelete(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	id, err := s.Enqueue(Envelope{Route: "r"}, strings.NewReader(strings.Repeat("x", 512)), 0, time.Hour)
+	t.Cleanup(func() { _ = s.Close() })
+	id, err := s.Enqueue(Envelope{To: []string{"b@example.net"}, Route: "r"}, strings.NewReader(strings.Repeat("x", 512)), 0, time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -648,24 +675,27 @@ func TestRecoverDropsMetadataWhoseBodyIsGone(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = s.Close() })
 	env := Envelope{From: "a@example.at", To: []string{"b@example.net"}, Origin: "c", Route: "r",
 		Received: time.Now().UTC()}
 	id, err := s.Enqueue(env, strings.NewReader("Subject: x\r\n\r\nbody\r\n"), 0, time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Remove(s.dataPath(id)); err != nil {
+	if err := os.Remove(s.pathOf(dataName(id))); err != nil {
 		t.Fatal(err)
 	}
 
+	_ = s.Close()
 	reopened, err := Open(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = reopened.Close() })
 	if _, indexed := reopened.index[id]; indexed {
 		t.Error("a message whose body is gone was indexed at startup")
 	}
-	if _, err := os.Stat(reopened.metaPath(id)); err == nil {
+	if _, err := os.Stat(reopened.pathOf(metaName(id))); err == nil {
 		t.Error("the orphaned metadata was left on disk, so the next start finds it again")
 	}
 	if m, ok := reopened.Claim(time.Now()); ok {
@@ -684,14 +714,14 @@ func TestRecoverSweepsInterruptedStages(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	leftover := filepath.Join(s.tmp, "interrupted.eml")
+	t.Cleanup(func() { _ = s.Close() })
+	leftover := s.pathOf(tmpDir + "/interrupted.eml")
 	if err := os.WriteFile(leftover, []byte("half a message"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
-	if _, err := Open(dir); err != nil {
-		t.Fatal(err)
-	}
+	_ = s.Close()
+	openForTest(t, dir)
 	if _, err := os.Stat(leftover); err == nil {
 		t.Error("an interrupted stage survived a restart; they accumulate and count toward no quota")
 	}
@@ -723,7 +753,8 @@ func TestRemoveRidesOutAHeldMetadataFile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	id, err := s.Enqueue(Envelope{Route: "r"}, strings.NewReader("body"), 0, time.Hour)
+	t.Cleanup(func() { _ = s.Close() })
+	id, err := s.Enqueue(Envelope{To: []string{"b@example.net"}, Route: "r"}, strings.NewReader("body"), 0, time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -745,10 +776,12 @@ func TestRemoveRidesOutAHeldMetadataFile(t *testing.T) {
 		t.Error("the body survived a successful Remove")
 	}
 
+	_ = s.Close()
 	reopened, err := Open(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = reopened.Close() })
 	if reopened.Has(id) {
 		t.Error("a delivered message came back after a restart")
 	}
@@ -765,7 +798,8 @@ func TestDiscardRidesOutAHeldMetadataFile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	id, err := s.Enqueue(Envelope{Route: "r"}, strings.NewReader("body"), 0, time.Hour)
+	t.Cleanup(func() { _ = s.Close() })
+	id, err := s.Enqueue(Envelope{To: []string{"b@example.net"}, Route: "r"}, strings.NewReader("body"), 0, time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -783,10 +817,12 @@ func TestDiscardRidesOutAHeldMetadataFile(t *testing.T) {
 		t.Error("the body survived a successful Discard")
 	}
 
+	_ = s.Close()
 	reopened, err := Open(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = reopened.Close() })
 	if reopened.Has(id) {
 		t.Fatal("a message the operator deleted came back after a restart")
 	}
@@ -802,7 +838,8 @@ func TestFailRetriesTheRenameItCannotCompleteAtOnce(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	id, err := s.Enqueue(Envelope{Route: "r"}, strings.NewReader("body"), 0, time.Hour)
+	t.Cleanup(func() { _ = s.Close() })
+	id, err := s.Enqueue(Envelope{To: []string{"b@example.net"}, Route: "r"}, strings.NewReader("body"), 0, time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -841,7 +878,8 @@ func TestFailMovesAsideWhenItsOwnMetadataWriteFails(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	id, err := s.Enqueue(Envelope{Route: "r"}, strings.NewReader("body"), 0, time.Hour)
+	t.Cleanup(func() { _ = s.Close() })
+	id, err := s.Enqueue(Envelope{To: []string{"b@example.net"}, Route: "r"}, strings.NewReader("body"), 0, time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -885,7 +923,8 @@ func TestDiscardKeepsWhatItCouldNotRemove(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	id, err := s.Enqueue(Envelope{Route: "r"}, strings.NewReader("body"), 0, time.Hour)
+	t.Cleanup(func() { _ = s.Close() })
+	id, err := s.Enqueue(Envelope{To: []string{"b@example.net"}, Route: "r"}, strings.NewReader("body"), 0, time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -916,7 +955,8 @@ func TestFailChargesWhatItCouldNotMove(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	id, err := s.Enqueue(Envelope{Route: "r"}, strings.NewReader("body"), 0, time.Hour)
+	t.Cleanup(func() { _ = s.Close() })
+	id, err := s.Enqueue(Envelope{To: []string{"b@example.net"}, Route: "r"}, strings.NewReader("body"), 0, time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -956,7 +996,8 @@ func TestRequeueFromFailedPutsTheBodyBackWhenTheMetadataWriteFails(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	id, err := s.Enqueue(Envelope{Route: "r"}, strings.NewReader("body"), 0, time.Hour)
+	t.Cleanup(func() { _ = s.Close() })
+	id, err := s.Enqueue(Envelope{To: []string{"b@example.net"}, Route: "r"}, strings.NewReader("body"), 0, time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1014,6 +1055,7 @@ func TestClaimReturnsTheOldestDueMessage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = s.Close() })
 	base := time.Now().UTC().Add(-time.Hour)
 	// Enqueued youngest first, so insertion order cannot stand in for the
 	// answer and neither can map iteration order.
@@ -1049,6 +1091,7 @@ func TestDeferReschedulesWithoutWritingMetadata(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = s.Close() })
 	env := Envelope{From: "a@example.at", To: []string{"b@example.net"},
 		Origin: "c", Route: "r", Received: time.Now().UTC()}
 	id, err := s.Enqueue(env, strings.NewReader("body\r\n"), 0, time.Hour)
@@ -1097,6 +1140,7 @@ func TestConcurrentRequeueResolvesToOne(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = s.Close() })
 	id := enqueueAndFail(t, s, "Subject: x\r\n\r\nbody\r\n")
 
 	const callers = 8
@@ -1130,10 +1174,10 @@ func TestConcurrentRequeueResolvesToOne(t *testing.T) {
 		t.Fatalf("%d ok + %d busy != %d callers", ok, busy, callers)
 	}
 
-	if _, err := os.Stat(s.failed.path(id, ".eml")); !os.IsNotExist(err) {
+	if _, err := os.Stat(s.pathOf(fileName(failedDir, id, ".eml"))); !os.IsNotExist(err) {
 		t.Errorf("the body is still in spool/failed: %v", err)
 	}
-	if _, err := os.Stat(s.failed.path(id, ".json")); !os.IsNotExist(err) {
+	if _, err := os.Stat(s.pathOf(fileName(failedDir, id, ".json"))); !os.IsNotExist(err) {
 		t.Errorf("the metadata is still in spool/failed: %v", err)
 	}
 	m, claimed := s.Claim(time.Now())
@@ -1157,6 +1201,7 @@ func TestClaimBatchReturnsTheGloballyOldest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = s.Close() })
 	base := time.Now().UTC().Add(-time.Hour)
 	want := make([]queueid.ID, 0, 5)
 	for i := 0; i < 50; i++ {
@@ -1194,6 +1239,7 @@ func TestClaimBatchHonoursSkip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = s.Close() })
 	now := time.Now().UTC()
 	for _, route := range []string{"busy", "free"} {
 		env := Envelope{From: "a@example.at", To: []string{"b@example.net"}, Origin: "c",
@@ -1219,6 +1265,7 @@ func TestClaimBatchRefusesANonPositiveMax(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = s.Close() })
 	enqueueOneForTest(t, s)
 	if got := s.ClaimBatch(time.Now(), 0, nil); got != nil {
 		t.Fatalf("ClaimBatch(max=0) returned %d messages", len(got))
@@ -1236,6 +1283,7 @@ func TestConcurrentCommitsCannotOvershootTheQuota(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = s.Close() })
 	const body = 4096
 	// Room for four bodies, against eight concurrent commits.
 	s.mu.Lock()
@@ -1288,6 +1336,7 @@ func TestQueueDepthServesRepeatedReadsFromCache(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = s.Close() })
 	env := Envelope{From: "a@example.at", To: []string{"b@example.net"},
 		Origin: "c", Route: "r", Received: time.Now().UTC()}
 	if _, err := s.Enqueue(env, strings.NewReader("x"), 0, time.Hour); err != nil {
@@ -1331,6 +1380,7 @@ func TestQueueDepthDoesNotServeADifferentMomentFromCache(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = s.Close() })
 	env := Envelope{From: "a@example.at", To: []string{"b@example.net"},
 		Origin: "c", Route: "r", Received: time.Now().UTC()}
 	id, err := s.Enqueue(env, strings.NewReader("x"), 0, 48*time.Hour)
@@ -1365,6 +1415,7 @@ func TestQueueDepthReturnsACopy(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = s.Close() })
 	env := Envelope{From: "a@example.at", To: []string{"b@example.net"},
 		Origin: "c", Route: "r", Received: time.Now().UTC()}
 	if _, err := s.Enqueue(env, strings.NewReader("x"), 0, time.Hour); err != nil {
@@ -1398,6 +1449,7 @@ func TestRecoverHandlesEveryHalfPairFromOneListing(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = s.Close() })
 	env := Envelope{From: "a@example.at", To: []string{"b@example.net"},
 		Origin: "c", Route: "r", Received: time.Now().UTC()}
 	whole, err := s.Enqueue(env, strings.NewReader("body\r\n"), 0, time.Hour)
@@ -1427,10 +1479,12 @@ func TestRecoverHandlesEveryHalfPairFromOneListing(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	_ = s.Close()
 	s2, err := Open(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = s2.Close() })
 	if s2.Len() != 1 {
 		t.Fatalf("recovered %d messages, want only the complete one", s2.Len())
 	}
@@ -1462,6 +1516,7 @@ func TestRecoverDropsAPairWhoseMetadataIsCorrupt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = s.Close() })
 	env := Envelope{From: "a@example.at", To: []string{"b@example.net"},
 		Origin: "c", Route: "r", Received: time.Now().UTC()}
 	id, err := s.Enqueue(env, strings.NewReader("body\r\n"), 0, time.Hour)
@@ -1473,10 +1528,12 @@ func TestRecoverDropsAPairWhoseMetadataIsCorrupt(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	_ = s.Close()
 	s2, err := Open(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = s2.Close() })
 	if s2.Len() != 0 {
 		t.Errorf("a message with unparsable metadata was recovered")
 	}
@@ -1525,6 +1582,7 @@ func TestRecoverReadsEveryBatch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = s.Close() })
 	if s.Len() != n {
 		t.Fatalf("recovered %d of %d messages; the directory loop stopped early", s.Len(), n)
 	}
@@ -1579,7 +1637,11 @@ func TestEnvelopeOriginKeepsItsOnDiskName(t *testing.T) {
 // counters all key on.
 func TestPreRenameMetadataRecoversItsOrigin(t *testing.T) {
 	dir := t.TempDir()
-	if _, err := Open(dir); err != nil {
+	// Opened only to create the directories, and closed again before the
+	// test writes into them the way an earlier version would have.
+	if s, err := Open(dir); err != nil {
+		t.Fatal(err)
+	} else if err := s.Close(); err != nil {
 		t.Fatal(err)
 	}
 	id, err := queueid.New()
@@ -1602,6 +1664,7 @@ func TestPreRenameMetadataRecoversItsOrigin(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = reopened.Close() })
 	m, ok := reopened.Claim(now.Add(time.Minute))
 	if !ok {
 		t.Fatal("the pre-rename message was not recovered")
@@ -1637,8 +1700,13 @@ func TestWriteStagedCopyRemovesTmpFileOnReadError(t *testing.T) {
 	dir := t.TempDir()
 	tmpPath := filepath.Join(dir, "test.tmp")
 	wantErr := errors.New("read failed")
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = root.Close() })
 
-	if _, err := writeStagedCopy(tmpPath, &failingReader{n: 8, err: wantErr}, ""); !errors.Is(err, wantErr) {
+	if _, err := writeStagedCopy(root, "test.tmp", &failingReader{n: 8, err: wantErr}, ""); !errors.Is(err, wantErr) {
 		t.Fatalf("writeStagedCopy error = %v, want %v", err, wantErr)
 	}
 	if _, err := os.Stat(tmpPath); !os.IsNotExist(err) {
@@ -1654,7 +1722,8 @@ func TestReleaseClearsTheLeaseWhenTheMetadataWriteFails(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	id, err := s.Enqueue(Envelope{Route: "r"}, strings.NewReader("body"), 0, time.Hour)
+	t.Cleanup(func() { _ = s.Close() })
+	id, err := s.Enqueue(Envelope{To: []string{"b@example.net"}, Route: "r"}, strings.NewReader("body"), 0, time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1696,7 +1765,8 @@ func TestReleaseFailureIsRetriedAfterTheDelay(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	id, err := s.Enqueue(Envelope{Route: "r"}, strings.NewReader("body"), 0, time.Hour)
+	t.Cleanup(func() { _ = s.Close() })
+	id, err := s.Enqueue(Envelope{To: []string{"b@example.net"}, Route: "r"}, strings.NewReader("body"), 0, time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}

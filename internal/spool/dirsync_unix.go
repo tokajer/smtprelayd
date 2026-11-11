@@ -7,12 +7,12 @@ package spool
 
 import "os"
 
-// syncDir flushes a directory entry so that a rename survives a power loss.
-// Errors are propagated: on Unix a failed directory fsync means the rename
-// may not be durable, which is exactly the guarantee the spool sells.
-func syncDir(path string) error {
-	//#nosec G304 -- path is one of the three spool directories built in Open from service.data_dir, never from request input
-	d, err := os.Open(path)
+// syncDir flushes dir, one of the spool subdirectories, so that a rename
+// into it survives a power loss. Errors are propagated: on Unix a failed
+// directory fsync means the rename may not be durable, which is exactly the
+// guarantee the spool sells.
+func syncDir(root *os.Root, dir string) error {
+	d, err := root.Open(dir)
 	if err != nil {
 		return err
 	}

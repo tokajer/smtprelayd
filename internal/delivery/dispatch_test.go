@@ -128,6 +128,7 @@ func TestASaturatedRouteDoesNotStallTheOtherRoutes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = sp.Close() })
 	st, err := store.Open(filepath.Join(t.TempDir(), "history.db"), discardLog(), 90, true)
 	if err != nil {
 		t.Fatal(err)
@@ -191,6 +192,7 @@ func TestDispatchHoldsASaturatedRouteAndMovesOn(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = sp.Close() })
 	st, err := store.Open(filepath.Join(t.TempDir(), "history.db"), discardLog(), 90, true)
 	if err != nil {
 		t.Fatal(err)
@@ -257,6 +259,7 @@ func TestDispatchOneReturnsTheSlotWhenTheRateLimiterRefuses(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = sp.Close() })
 	st, err := store.Open(filepath.Join(t.TempDir(), "history.db"), discardLog(), 90, true)
 	if err != nil {
 		t.Fatal(err)

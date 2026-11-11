@@ -5,7 +5,6 @@ package spool
 
 import (
 	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -43,10 +42,10 @@ type failedEntry struct {
 // graph. Both accounting defects fixed that day were cross-index mistakes,
 // which is the failure that shape permits.
 type failedStore struct {
-	// dir is spool/failed. Owned here because reindex and sweep are entirely
-	// about that directory; the Spool methods that move files into or out of
-	// it reach the path through this field.
-	dir string
+	// root is the Spool's own root, shared rather than a second handle on
+	// spool/failed: Fail and requeueFailed rename between the queue and this
+	// directory, and a rename needs both ends under one root.
+	root *os.Root
 
 	mu    sync.Mutex
 	index map[queueid.ID]failedEntry
@@ -54,13 +53,8 @@ type failedStore struct {
 	ttl   time.Duration
 }
 
-func newFailedStore(dir string) *failedStore {
-	return &failedStore{dir: dir, index: map[queueid.ID]failedEntry{}}
-}
-
-// path is the name of one of a failed message's two files.
-func (f *failedStore) path(id queueid.ID, ext string) string {
-	return filepath.Join(f.dir, id.String()+ext)
+func newFailedStore(root *os.Root) *failedStore {
+	return &failedStore{root: root, index: map[queueid.ID]failedEntry{}}
 }
 
 // put records a message now sitting in spool/failed.
@@ -115,7 +109,7 @@ func (f *failedStore) setRetention(d time.Duration) {
 // the only thing that should resurrect one. This only makes them visible to
 // the quota and to the retention sweep.
 func (f *failedStore) reindex() error {
-	entries, err := os.ReadDir(f.dir)
+	entries, err := readDir(f.root, failedDir)
 	if err != nil {
 		return err
 	}
@@ -128,12 +122,15 @@ func (f *failedStore) reindex() error {
 		if err != nil {
 			continue
 		}
-		info, err := e.Info()
+		// Through the root rather than e.Info(), which re-resolves the
+		// directory by its path. Lstat either way: the size of a planted
+		// symlink's target is not what this directory holds.
+		info, err := f.root.Lstat(fileName(failedDir, id, ".json"))
 		if err != nil {
 			continue
 		}
 		size := int64(0)
-		if fi, err := os.Stat(f.path(id, ".eml")); err == nil {
+		if fi, err := f.root.Lstat(fileName(failedDir, id, ".eml")); err == nil {
 			size = fi.Size()
 		}
 		// The body's own size, not Envelope.Size: what the quota is about is
@@ -186,7 +183,7 @@ func (f *failedStore) sweep(now time.Time) (removed int, freed int64) {
 		// precisely because this failure is expected on Windows.
 		gone := true
 		for _, ext := range []string{".json", ".eml"} {
-			if err := removeRetry(f.path(id, ext)); err != nil && !os.IsNotExist(err) {
+			if err := removeRetry(f.root, fileName(failedDir, id, ext)); err != nil && !os.IsNotExist(err) {
 				gone = false
 			}
 		}
@@ -201,18 +198,19 @@ func (f *failedStore) sweep(now time.Time) (removed int, freed int64) {
 		}
 	}
 	if removed > 0 {
-		_ = syncDir(f.dir)
+		_ = syncDir(f.root, failedDir)
 	}
 	return removed, freed
 }
 
-// renameRetry moves a path, retrying briefly, for the reason given on
-// removeRetry: on Windows a handle held by a scanner or a backup agent makes
-// this fail with a sharing violation rather than with a missing file.
-func renameRetry(src, dst string) error {
+// renameRetry moves src to dst within root, retrying briefly, for the reason
+// given on removeRetry: on Windows a handle held by a scanner or a backup
+// agent makes this fail with a sharing violation rather than with a missing
+// file.
+func renameRetry(root *os.Root, src, dst string) error {
 	var err error
 	for i := 0; i < 5; i++ {
-		if err = os.Rename(src, dst); err == nil || os.IsNotExist(err) {
+		if err = root.Rename(src, dst); err == nil || os.IsNotExist(err) {
 			return err
 		}
 		time.Sleep(20 * time.Millisecond)
@@ -246,18 +244,18 @@ func (s *Spool) Fail(m *Meta, reason string) error {
 		src string
 		ext string
 	}{
-		{s.metaPath(m.ID), ".json"},
-		{s.dataPath(m.ID), ".eml"},
+		{metaName(m.ID), ".json"},
+		{dataName(m.ID), ".eml"},
 	} {
-		dst := s.failed.path(m.ID, pair.ext)
+		dst := fileName(failedDir, m.ID, pair.ext)
 		// The body only, matching both the live index and reindex; see
 		// the note there on why the metadata file is left out of all three.
 		if pair.ext == ".eml" {
-			if fi, err := os.Stat(pair.src); err == nil {
+			if fi, err := s.root.Lstat(pair.src); err == nil {
 				onDisk = fi.Size()
 			}
 		}
-		if err := renameRetry(pair.src, dst); err != nil && !os.IsNotExist(err) {
+		if err := renameRetry(s.root, pair.src, dst); err != nil && !os.IsNotExist(err) {
 			// Recorded, not returned: the message has already left the live
 			// index, so returning here would leave whichever half did move
 			// sitting in spool/failed charged to nobody -- the quota would
@@ -277,7 +275,7 @@ func (s *Spool) Fail(m *Meta, reason string) error {
 	if moveErr != nil {
 		return moveErr
 	}
-	return s.syncDir(s.failed.dir)
+	return s.syncDir(failedDir)
 }
 
 // SweepFailed deletes messages whose retention has run out; see

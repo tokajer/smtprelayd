@@ -256,6 +256,7 @@ func serveQueuedCore(t *testing.T, cfg *config.Config, j Journal, reg *metrics.R
 	if err != nil {
 		t.Fatalf("spool.Open: %v", err)
 	}
+	t.Cleanup(func() { _ = sp.Close() })
 
 	cfg.Listeners[0].Address = "127.0.0.1:0"
 	cfg.Normalize()
@@ -815,6 +816,7 @@ func TestSecondRouteCommitFailureWithdrawsTheFirstCopy(t *testing.T) {
 	if err != nil {
 		t.Fatalf("spool.Open: %v", err)
 	}
+	t.Cleanup(func() { _ = sp.Close() })
 	q := &failingQueue{Spool: sp, failOnCommit: 2}
 	st, err := store.Open(filepath.Join(t.TempDir(), "history.db"), discardLog(), 90, true)
 	if err != nil {

@@ -101,8 +101,14 @@ attacker-influenced values and writes them into a message.
   block (`internal/rewrite`), never by concatenating strings. The block parser
   is first-party; `go-message`, which this section named until 2026-08-11, has
   never been a dependency.
-- `X-Original-From` carries a properly encoded value, or is omitted. It is
-  never a raw copy of untrusted input.
+- `X-Original-From` carries the client's `From` value as received, or is
+  omitted. It is not re-encoded: the value is refused outright, not
+  sanitised, if it contains any control character (below 0x20, or 0x7f) or
+  is longer than 512 octets, and a block with more than one `From` is
+  refused as ambiguous. Eight-bit octets pass unchanged, because legacy
+  devices write unencoded UTF-8 display names and those cannot end a header
+  line, which is the property this control exists for. **Decided
+  2026-11-11**; see `MEMORY.md` section 9.
 - Envelope addresses are validated against RFC 5321 length limits: 64 octets
   local part, 255 domain, 254 total.
 - Line length is enforced at 1000 octets including CRLF. Over-long lines are
@@ -173,8 +179,17 @@ attacker-influenced values and writes them into a message.
 - Windows: a dedicated service account, never `LocalSystem`. The data
   directory carries an explicit ACL granting only that account and
   administrators.
-- Spool files 0600, directories 0700. Permissions are verified at startup and
-  a mismatch is a startup failure. On Windows that check reads the data
+- Spool files 0600, directories 0700. Spool files are created 0600 with
+  `O_EXCL` and never widened. The data directory itself is verified at
+  startup and a mismatch there is a startup failure: on Linux it must not be
+  a symlink, must be owned by root or the service account, and must not be
+  writable by group or others. The three spool directories below it are
+  then set to 0700 at every start rather than checked: only root or the
+  service account can change their mode, and either could just as well
+  change the files inside, so refusing to start would protect nothing, while
+  repairing them lets a restore or a manual `cp` that dropped the modes
+  recover without an operator. **Decided 2026-11-11**; see
+  `MEMORY.md` section 9. On Windows the check reads the data
   directory's DACL itself, not only its shape: it is explicit, protected
   against inheritance from `%ProgramData%`, and **every allow entry in it must
   name SYSTEM, `BUILTIN\Administrators` or the service account** — one naming

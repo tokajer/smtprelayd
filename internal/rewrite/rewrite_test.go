@@ -12,7 +12,7 @@ import (
 	"github.com/tokajer/smtprelayd/internal/config"
 )
 
-func compile(t *testing.T, r config.Rewrite) *Rules {
+func compile(t testing.TB, r config.Rewrite) *Rules {
 	t.Helper()
 	rules, err := Compile(r)
 	if err != nil {

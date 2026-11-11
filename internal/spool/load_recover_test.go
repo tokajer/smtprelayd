@@ -71,6 +71,7 @@ func TestLoadRecoveryAtOneMillion(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			t.Cleanup(func() { _ = s.Close() })
 			recover := time.Since(start)
 
 			if s.Len() != n {

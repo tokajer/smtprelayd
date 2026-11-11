@@ -174,6 +174,7 @@ func managerAgainst(t *testing.T, f *fakeSmarthost) (*Manager, *spool.Spool, *st
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = sp.Close() })
 	st, err := store.Open(filepath.Join(t.TempDir(), "history.db"), discardLog(), 90, true)
 	if err != nil {
 		t.Fatal(err)

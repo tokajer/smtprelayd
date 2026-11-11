@@ -81,6 +81,7 @@ func testServer(t *testing.T, cfg *config.Config, deadlines []expiry.Item) (*Ser
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = sp.Close() })
 	srv, err := New(cfg, sp, st, nil, deadlines, nil, "test", discardLog())
 	if err != nil {
 		t.Fatal(err)
@@ -1000,6 +1001,7 @@ func TestJournalFailuresAreStatedOnThePage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = sp.Close() })
 	reg := metrics.New(expiry.Items(cfg, nil), sp, []string{"m365"}, nil)
 	srv, err := New(cfg, sp, st, reg, nil, nil, "test", discardLog())
 	if err != nil {

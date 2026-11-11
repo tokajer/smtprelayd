@@ -9,7 +9,11 @@
 // syntax rules have one home here, independent of the configuration schema.
 package mailaddr
 
-import "strings"
+import (
+	"errors"
+	"fmt"
+	"strings"
+)
 
 // RFC 5321 section 4.5.3.1 length limits.
 const (
@@ -41,6 +45,54 @@ func ValidAddress(s string) bool {
 		return false
 	}
 	return ValidDomain(domain)
+}
+
+// ErrEnvelope is wrapped by every error CheckEnvelope returns. Its text is
+// what the listener puts after the reply code, so it stays as it was when the
+// check lived there.
+var ErrEnvelope = errors.New("malformed address")
+
+// CheckEnvelope checks the structure and length of an envelope address: a
+// MAIL FROM or RCPT TO path as the listener accepts it, and the same address
+// read back from the spool. The empty null reverse path is refused; whether
+// it is acceptable is the caller's decision.
+//
+// This is deliberately looser than ValidAddress, which governs what an
+// operator may write into a header: a device's envelope address may carry
+// eight-bit octets or a quoted local part and still be relayed as is, because
+// it is only ever placed back into MAIL FROM and RCPT TO, never composed into
+// a header line. What both refuse is the same -- control characters, an
+// oversized part, a malformed domain -- so an address that passes here cannot
+// split a line downstream either.
+func CheckEnvelope(addr string) error {
+	if addr == "" {
+		return ErrEnvelope
+	}
+	if len(addr) > maxPathLen {
+		return fmt.Errorf("%w: longer than %d octets", ErrEnvelope, maxPathLen)
+	}
+	for i := 0; i < len(addr); i++ {
+		c := addr[i]
+		if c < 0x20 || c == 0x7f {
+			return fmt.Errorf("%w: control character", ErrEnvelope)
+		}
+	}
+	at := strings.LastIndex(addr, "@")
+	if at <= 0 || at == len(addr)-1 {
+		return fmt.Errorf("%w: expected local@domain", ErrEnvelope)
+	}
+	local, domain := addr[:at], addr[at+1:]
+	if len(local) > maxLocalPart {
+		return fmt.Errorf("%w: local part longer than %d octets", ErrEnvelope, maxLocalPart)
+	}
+	if len(domain) > maxDomainLen {
+		return fmt.Errorf("%w: domain longer than %d octets", ErrEnvelope, maxDomainLen)
+	}
+	if strings.ContainsAny(domain, " \t<>,;\"\\") || strings.Contains(domain, "..") ||
+		strings.HasPrefix(domain, ".") || strings.HasSuffix(domain, ".") {
+		return fmt.Errorf("%w: malformed domain", ErrEnvelope)
+	}
+	return nil
 }
 
 // ValidDomain reports whether d is a plain LDH domain name. Address literals

@@ -4425,6 +4425,20 @@ run on upgrade and repair without anything having exercised it.
 
 Kept for their reasoning, not for action.
 
+**Closed 2026-11-11, six documentation-versus-code gaps from that day's
+security review.** Spool I/O through `os.Root` (EXPLOIT-SURFACE §4);
+envelope validation on read and write with quarantine to `spool/failed`
+(§5); Linux core dumps disabled (§9, Windows WER still open); fuzz targets
+in CI (§11). Two were closed by narrowing the documents instead, because
+the code was judged right: `X-Original-From` is a filtered raw copy, not
+an encoded value (SECURITY.md §4), and `spool.ensureMode` repairs the spool
+directory modes rather than refusing to start (SECURITY.md §6); the
+reasoning is in `MEMORY.md` §9. Found in review of the fix: on Windows
+`os.OpenRoot` holds the directory without `FILE_SHARE_DELETE`, so every
+test must close its spool or `t.TempDir` cleanup fails; and `json.Marshal`
+expands invalid UTF-8 to U+FFFD, so `writeMeta` validates the marshalled
+bytes, not the struct.
+
 
 Reported 2026-09-21 as "two versions in the Control Panel" after installing
 from the raw `.msi` and upgrading with `setup.exe`, and recorded here with two

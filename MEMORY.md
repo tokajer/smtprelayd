@@ -678,7 +678,8 @@ The load-bearing principles:
   sanitisation. Headers are built structurally, never by concatenation.
 - **Least privilege by default.** Unprivileged service account on both
   platforms, capability-based binding for port 25, hardened systemd unit,
-  explicit Windows ACLs, 0600 spool files verified at startup. On Windows the
+  explicit Windows ACLs, 0600 spool files and 0700 spool directories (the
+  directories repaired at startup, see below). On Windows the
   data directory DACL is an invariant, not a default: full control for SYSTEM,
   Administrators and `NT SERVICE\smtprelayd`, inheritable, and **protected**
   against inheritance from `%ProgramData%`, whose `BUILTIN\Users:(OI)(CI)(RX)`
@@ -687,6 +688,27 @@ The load-bearing principles:
   (`ostrust.CheckDataDirACL`) and refuses to run otherwise. The daemon never
   repairs it itself — a service that widens its own permissions at startup
   would defeat the check.
+- **Decided 2026-11-11, three promises narrowed to what the code does.**
+  The security review of that day found `SECURITY.md` and
+  `EXPLOIT-SURFACE.md` promising more than the code enforced; for these the
+  code was judged right and the documents were changed.
+  `X-Original-From` is the client's `From` as received, not an encoded
+  value: anything with a control character or over 512 octets is refused,
+  never sanitised, and eight-bit octets pass, because encoding a legacy
+  device's raw UTF-8 display name would mean guessing its charset and the
+  only property that matters here, that the value cannot end the header
+  line, already holds. `spool.ensureMode` sets the three spool directories
+  to 0700 at every start instead of refusing to start on a wider mode:
+  only root or the service account can change that mode, either could
+  change the files just as easily, and the data directory above them is
+  still checked and refused. Spool metadata is validated on read and on
+  write (`spool.decodeMeta`), but unknown JSON keys are ignored, not
+  refused: a binary rolled back must keep reading metadata a newer version
+  wrote, and a key nothing decodes reaches no code. A parseable metadata
+  file that fails validation is quarantined to `spool/failed` rather than
+  deleted, so a validation rule that turns out too strict leaves the message
+  on disk, counted against the quota and requeueable once a release relaxes
+  the rule, instead of losing it.
 - **Misconfiguration is the realistic attack.** `smtprelayd selftest` actively
   verifies the service is not an open relay and runs in CI.
 - **The service account is the escalation target.** Configuration file,

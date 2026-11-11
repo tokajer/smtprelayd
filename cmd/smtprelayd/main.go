@@ -170,6 +170,12 @@ func serve(ctx context.Context, configPath string, console bool, ready chan<- er
 	}
 	defer func() { notifyReady(err) }()
 
+	// First, before config.Load reads a client secret or a token cache: a
+	// core dump taken after that point would hold them.
+	if err := disableCoreDumps(); err != nil {
+		return err
+	}
+
 	cfg, err := config.Load(configPath)
 	if err != nil {
 		logStartupFailure(configPath, cfg, err)
@@ -218,6 +224,14 @@ func serve(ctx context.Context, configPath string, console bool, ready chan<- er
 	if err != nil {
 		log.Error("spool: failed to open", "error", err)
 		return err
+	}
+	// Deferred here so it runs after the bg.Wait defer below and after
+	// set.Run has returned, which waits for every session: by then nothing
+	// that was handed the spool is still running.
+	defer sp.Close()
+	for _, id := range sp.Quarantined() {
+		log.Warn("spool: metadata failed validation; moved the message to spool/failed",
+			"queue_id", id.String())
 	}
 	// The database sits under spool/, not directly in the data directory: the
 	// composition root owns the data-directory layout, and spool/ already

@@ -5,6 +5,8 @@
 
 package spool
 
+import "os"
+
 // syncDir is a no-op on Windows. FlushFileBuffers requires a handle opened
 // with GENERIC_WRITE, which cannot be obtained for a directory, so the call
 // can only ever fail -- with ERROR_ACCESS_DENIED in practice, not the
@@ -12,7 +14,7 @@ package spool
 // Metadata and body files are individually fsynced before the rename, and
 // NTFS journals the rename itself, so the durability this provides on Unix is
 // already covered by the filesystem here.
-func syncDir(string) error { return nil }
+func syncDir(*os.Root, string) error { return nil }
 
 // ensureMode is a no-op on Windows. Unix mode bits do not restrict access
 // there -- os.Chmod only toggles the read-only attribute -- and access is

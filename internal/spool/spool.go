@@ -31,6 +31,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/tokajer/smtprelayd/internal/mailaddr"
 	"github.com/tokajer/smtprelayd/internal/queueid"
 )
 
@@ -136,13 +137,20 @@ var ErrNotFound = errors.New("spool: message not found")
 // ErrQuotaExceeded is returned when the spool has exceeded its maximum size.
 var ErrQuotaExceeded = errors.New("spool: quota exceeded")
 
+// ErrInvalidMeta is wrapped by every error validate returns: metadata that
+// is well-formed JSON for the right message but describes an envelope the
+// relay would never have accepted.
+var ErrInvalidMeta = errors.New("spool: invalid metadata")
+
 // Spool is a crash-safe queue backed by a directory. A message is only
 // visible once its metadata file has been renamed into place, so a crash
 // halfway through an enqueue leaves rubbish in tmp and nothing in the queue.
 type Spool struct {
-	root  string
-	tmp   string
-	queue string
+	// root is <data_dir>/spool, opened once in Open. Every file operation
+	// after that goes through it with a name relative to it, so a directory
+	// swapped or symlinked in later cannot redirect one; see the names
+	// below for the only way such a name is built.
+	root *os.Root
 
 	// Three locks, not one. They guard three sets of state that share no
 	// invariant: the live queue below, the mirror of spool/failed, and the
@@ -176,7 +184,7 @@ type Spool struct {
 	depthAt     time.Time
 	depthWindow time.Duration
 
-	// failed mirrors the spool/failed directory and owns its path; quota is
+	// failed mirrors the spool/failed directory; quota is
 	// the size ceiling and what has been admitted against it. See failed.go
 	// and quota.go.
 	failed *failedStore
@@ -190,13 +198,68 @@ type Spool struct {
 	// dropped send loses nothing.
 	wake chan struct{}
 
-	// syncDir is syncDir, the package function, indirected so that a test can
-	// make it fail. The only thing that reads it is Commit, whose behaviour
-	// when the directory sync fails -- unlinking a pair that is already
-	// renamed into place, so recover() cannot re-index a message the client
-	// was told was not accepted -- is otherwise unreachable without a
-	// filesystem that refuses fsync on demand.
-	syncDir func(string) error
+	// syncDir is syncDir, the package function, bound to root and indirected
+	// so that a test can make it fail. The only thing that reads it is
+	// Commit, whose behaviour when the directory sync fails -- unlinking a
+	// pair that is already renamed into place, so recover() cannot re-index a
+	// message the client was told was not accepted -- is otherwise
+	// unreachable without a filesystem that refuses fsync on demand.
+	syncDir func(dir string) error
+
+	// quarantined is what recover moved to spool/failed; written only
+	// during Open and read-only afterwards, so it needs no lock.
+	quarantined []queueid.ID
+}
+
+// The three spool subdirectories, as names relative to Spool.root.
+const (
+	tmpDir    = "tmp"
+	queueDir  = "queue"
+	failedDir = "failed"
+)
+
+// fileName is the root-relative name of one of a message's files. It is the
+// one place such a name is built, and it takes a validated ID and one of the
+// directory constants above, so no string from outside the package can
+// become part of a name the spool opens.
+func fileName(dir string, id queueid.ID, ext string) string {
+	return dir + "/" + id.String() + ext
+}
+
+func metaName(id queueid.ID) string { return fileName(queueDir, id, ".json") }
+func dataName(id queueid.ID) string { return fileName(queueDir, id, ".eml") }
+
+// errNotRegular refuses a spool entry that is a symlink or anything else
+// that is not a plain file. os.Root confines resolution to the spool
+// directory but follows a symlink inside it, O_NOFOLLOW included, and
+// docs/dev/EXPLOIT-SURFACE.md requires refusing symlinks outright.
+var errNotRegular = errors.New("spool: not a regular file")
+
+// openRegular opens name for reading only if it is a regular file, never
+// through a symlink. Lstat first, so a symlink or a FIFO is refused before
+// anything is opened; SameFile afterwards, so an entry replaced between the
+// two calls is refused rather than read.
+func (s *Spool) openRegular(name string) (*os.File, error) {
+	before, err := s.root.Lstat(name)
+	if err != nil {
+		return nil, err
+	}
+	if !before.Mode().IsRegular() {
+		return nil, &os.PathError{Op: "open", Path: name, Err: errNotRegular}
+	}
+	f, err := s.root.OpenFile(name, os.O_RDONLY|noFollow|noBlock, 0)
+	if err != nil {
+		return nil, err
+	}
+	after, err := f.Stat()
+	if err == nil && !os.SameFile(before, after) {
+		err = &os.PathError{Op: "open", Path: name, Err: errNotRegular}
+	}
+	if err != nil {
+		_ = f.Close()
+		return nil, err
+	}
+	return f, nil
 }
 
 // putLocked inserts or replaces a message in the live index, keeping
@@ -218,20 +281,15 @@ func (s *Spool) dropLocked(id queueid.ID) {
 	}
 }
 
-// Open prepares the spool directories and recovers any prior state.
+// Open prepares the spool directories and recovers any prior state. The
+// returned Spool holds the spool directory open until Close.
 func Open(dataDir string) (*Spool, error) {
-	s := &Spool{
-		root:    dataDir,
-		tmp:     filepath.Join(dataDir, "spool", "tmp"),
-		queue:   filepath.Join(dataDir, "spool", "queue"),
-		index:   map[queueid.ID]*Meta{},
-		leased:  map[queueid.ID]bool{},
-		failed:  newFailedStore(filepath.Join(dataDir, "spool", "failed")),
-		quota:   newQuotaLedger(),
-		wake:    make(chan struct{}, 1),
-		syncDir: syncDir,
-	}
-	for _, d := range []string{s.tmp, s.queue, s.failed.dir} {
+	dir := filepath.Join(dataDir, "spool")
+	// Created and repaired by path, before the root exists: these are fixed
+	// names under the configured data directory, and the root is what
+	// everything after this point is confined to.
+	for _, sub := range []string{tmpDir, queueDir, failedDir} {
+		d := filepath.Join(dir, sub)
 		if err := os.MkdirAll(d, 0o700); err != nil {
 			return nil, err
 		}
@@ -239,20 +297,42 @@ func Open(dataDir string) (*Spool, error) {
 			return nil, err
 		}
 	}
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		return nil, err
+	}
+	s := &Spool{
+		root:    root,
+		index:   map[queueid.ID]*Meta{},
+		leased:  map[queueid.ID]bool{},
+		failed:  newFailedStore(root),
+		quota:   newQuotaLedger(),
+		wake:    make(chan struct{}, 1),
+		syncDir: func(d string) error { return syncDir(root, d) },
+	}
 	if err := s.recover(); err != nil {
+		_ = root.Close()
 		return nil, err
 	}
 	return s, nil
 }
 
+// Close releases the spool directory. Nothing may use the Spool afterwards.
+// Until then, on Windows, the handle os.OpenRoot holds is opened without
+// FILE_SHARE_DELETE, so neither the directory nor any parent can be renamed
+// or deleted: every caller, tests included, has to close what it opened.
+func (s *Spool) Close() error { return s.root.Close() }
+
 // recover discards partial enqueues and rebuilds the in-memory index.
 func (s *Spool) recover() error {
-	entries, err := os.ReadDir(s.tmp)
+	entries, err := readDir(s.root, tmpDir)
 	if err != nil {
 		return err
 	}
 	for _, e := range entries {
-		_ = os.Remove(filepath.Join(s.tmp, e.Name()))
+		if name, ok := listedName(tmpDir, e.Name()); ok {
+			_ = s.root.Remove(name)
+		}
 	}
 
 	metas, bodies, err := s.scanQueue()
@@ -270,10 +350,28 @@ func (s *Spool) recover() error {
 			// message: the directory pass already knows which bodies are
 			// there, and at 200 000 queued messages that stat cost 0.89s of
 			// a startup the Windows SCM gives 30 seconds for.
-			_ = os.Remove(s.metaPath(id))
+			_ = s.root.Remove(metaName(id))
 			continue
 		}
 		m, err := s.readMeta(id)
+		if errors.Is(err, ErrInvalidMeta) {
+			// Parsed, and for this message, but describing an envelope the
+			// relay would never have written: someone else wrote it. Moved
+			// aside with its body rather than deleted, because the client
+			// may have been told the message was accepted and only an
+			// operator can tell a tampered file from a defect; in
+			// spool/failed reindex accounts for it and Discard removes it,
+			// while Requeue refuses it on the same check.
+			//
+			// Counted as indexed whether or not the move succeeded: a pair
+			// left in the queue directory keeps its body for this start too,
+			// and the next start reads it, refuses it and tries again.
+			indexed[id] = true
+			if s.quarantine(id) == nil {
+				s.quarantined = append(s.quarantined, id)
+			}
+			continue
+		}
 		if err != nil {
 			continue
 		}
@@ -286,15 +384,77 @@ func (s *Spool) recover() error {
 
 	// A body without metadata is an interrupted enqueue: the sender was never
 	// told the message was accepted, so removing it loses nothing. Metadata
-	// that would not parse leaves its body here too, for the same reason --
-	// nothing can be delivered from it.
+	// that would not parse at all leaves its body here too, for the same
+	// reason -- nothing can be delivered from it. Quarantined pairs are
+	// counted as indexed above, so their bodies are not removed here.
 	for id := range bodies {
 		if !indexed[id] {
-			_ = os.Remove(s.dataPath(id))
+			_ = s.root.Remove(dataName(id))
 		}
+	}
+	if len(s.quarantined) > 0 {
+		// Best effort: a quarantine lost to a crash leaves the pair in the
+		// queue directory, where the next start finds and moves it again.
+		_ = s.syncDir(queueDir)
+		_ = s.syncDir(failedDir)
 	}
 
 	return s.failed.reindex()
+}
+
+// quarantine moves a metadata/body pair that failed validate to
+// spool/failed, metadata first, the order and the renameRetry Fail uses. It
+// moves both or neither, because the pair is the evidence: metadata in
+// spool/failed without its body is an entry nobody can judge, and a body
+// left in the queue directory without metadata is deleted by the next
+// start. So a body that will not move takes its metadata back with it.
+//
+// The caller does not fail Open on the error: the pair stays in the queue
+// directory, unindexed, and the next start refuses it and tries again. Only
+// when moving the metadata back fails too is that not so: the body is then
+// alone in the queue directory and the next start removes it, which is why
+// both errors are returned.
+func (s *Spool) quarantine(id queueid.ID) error {
+	failedMeta := fileName(failedDir, id, ".json")
+	if err := renameRetry(s.root, metaName(id), failedMeta); err != nil {
+		return err
+	}
+	if err := renameRetry(s.root, dataName(id), fileName(failedDir, id, ".eml")); err != nil {
+		if rerr := renameRetry(s.root, failedMeta, metaName(id)); rerr != nil {
+			return errors.Join(err, rerr)
+		}
+		return err
+	}
+	return nil
+}
+
+// Quarantined returns the messages Open moved to spool/failed because their
+// metadata failed validation, so the caller can report them: the spool has
+// no logger, and a message that silently leaves the queue is the failure
+// this exists to prevent.
+func (s *Spool) Quarantined() []queueid.ID {
+	return append([]queueid.ID(nil), s.quarantined...)
+}
+
+// readDir lists one of the spool subdirectories through root.
+func readDir(root *os.Root, dir string) ([]os.DirEntry, error) {
+	d, err := root.Open(dir)
+	if err != nil {
+		return nil, err
+	}
+	defer d.Close()
+	return d.ReadDir(-1)
+}
+
+// listedName is the root-relative name of an entry a listing of dir
+// returned. Such an entry is a single path component by construction; this
+// makes that a checked property rather than an assumption about the OS
+// before the name reaches a Remove.
+func listedName(dir, entry string) (string, bool) {
+	if !filepath.IsLocal(entry) || strings.ContainsAny(entry, `/\`) {
+		return "", false
+	}
+	return dir + "/" + entry, true
 }
 
 // recoverBatch is how many directory entries one ReadDir call returns.
@@ -308,7 +468,7 @@ const recoverBatch = 4096
 // (400 000 files) the sorted whole-directory read measured 191ms against
 // 126ms for batches, and the slice it builds is one entry per file.
 func (s *Spool) scanQueue() (metas []queueid.ID, bodies map[queueid.ID]bool, err error) {
-	d, err := os.Open(s.queue)
+	d, err := s.root.Open(queueDir)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -330,7 +490,9 @@ func (s *Spool) scanQueue() (metas []queueid.ID, bodies map[queueid.ID]bool, err
 				} else {
 					// A body whose name is not a queue id can never be
 					// matched to metadata, so it would sit here forever.
-					_ = os.Remove(filepath.Join(s.queue, name))
+					if n, ok := listedName(queueDir, name); ok {
+						_ = s.root.Remove(n)
+					}
 				}
 			}
 		}
@@ -344,15 +506,13 @@ func (s *Spool) scanQueue() (metas []queueid.ID, bodies map[queueid.ID]bool, err
 	return metas, bodies, nil
 }
 
-func (s *Spool) metaPath(id queueid.ID) string { return filepath.Join(s.queue, id.String()+".json") }
-func (s *Spool) dataPath(id queueid.ID) string { return filepath.Join(s.queue, id.String()+".eml") }
-
 // Staged is a message body written to the spool's temporary area so that it
 // can be committed once per route without being read from the client twice.
 // It must be discarded when it is no longer needed; a crash before that is
 // covered by the tmp sweep in recover.
 type Staged struct {
-	path string
+	root *os.Root
+	name string
 	size int64
 }
 
@@ -361,11 +521,11 @@ func (st *Staged) Size() int64 { return st.size }
 
 // Discard removes the staged body. It is idempotent and safe to defer.
 func (st *Staged) Discard() {
-	if st == nil || st.path == "" {
+	if st == nil || st.name == "" {
 		return
 	}
-	_ = os.Remove(st.path)
-	st.path = ""
+	_ = st.root.Remove(st.name)
+	st.name = ""
 }
 
 // Stage streams a message body to disk. maxBytes of zero means no limit
@@ -375,8 +535,8 @@ func (s *Spool) Stage(body io.Reader, maxBytes int64) (*Staged, error) {
 	if err != nil {
 		return nil, err
 	}
-	path := filepath.Join(s.tmp, id.String()+".staged")
-	n, err := writeSynced(path, func(f *os.File) (int64, error) {
+	name := fileName(tmpDir, id, ".staged")
+	n, err := writeSynced(s.root, name, func(f *os.File) (int64, error) {
 		if maxBytes > 0 {
 			n, err := io.Copy(f, io.LimitReader(body, maxBytes+1))
 			if err == nil && n > maxBytes {
@@ -389,17 +549,17 @@ func (s *Spool) Stage(body io.Reader, maxBytes int64) (*Staged, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Staged{path: path, size: n}, nil
+	return &Staged{root: s.root, name: name, size: n}, nil
 }
 
-// writeSynced creates path fresh (O_CREATE|O_EXCL|O_WRONLY), hands it to
-// write, syncs and closes it, and removes it again on any failure along the
-// way -- the "write to a new file, fsync, close, clean up on error" sequence
-// Stage, writeStagedCopy and writeMeta all needed, differing only in what
-// they write.
-func writeSynced(path string, write func(*os.File) (int64, error)) (int64, error) {
-	//#nosec G304 -- every caller builds path from one of this package's own directories joined with a freshly generated or already-validated queue ID; O_NOFOLLOW and O_EXCL close the symlink and pre-creation races
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY|noFollow, 0o600)
+// writeSynced creates name in root fresh (O_CREATE|O_EXCL|O_WRONLY), hands
+// it to write, syncs and closes it, and removes it again on any failure along
+// the way -- the "write to a new file, fsync, close, clean up on error"
+// sequence Stage, writeStagedCopy and writeMeta all needed, differing only in
+// what they write. os.Root never follows a symlink under O_CREATE|O_EXCL, so
+// a planted link fails the create instead of redirecting it.
+func writeSynced(root *os.Root, name string, write func(*os.File) (int64, error)) (int64, error) {
+	f, err := root.OpenFile(name, os.O_CREATE|os.O_EXCL|os.O_WRONLY|noFollow, 0o600)
 	if err != nil {
 		return 0, err
 	}
@@ -412,7 +572,7 @@ func writeSynced(path string, write func(*os.File) (int64, error)) (int64, error
 		err = cerr
 	}
 	if err != nil {
-		_ = os.Remove(path)
+		_ = root.Remove(name)
 		return 0, err
 	}
 	return n, nil
@@ -424,7 +584,7 @@ func writeSynced(path string, write func(*os.File) (int64, error)) (int64, error
 // prefix is why each copy is written rather than renamed: prepending to an
 // existing file is not cheaper than copying it.
 func (s *Spool) Commit(st *Staged, env Envelope, lifetime time.Duration, prefix func(queueid.ID) string) (queueid.ID, error) {
-	if st == nil || st.path == "" {
+	if st == nil || st.name == "" {
 		return "", errors.New("spool: commit of a discarded stage")
 	}
 
@@ -444,18 +604,18 @@ func (s *Spool) Commit(st *Staged, env Envelope, lifetime time.Duration, prefix 
 		return "", err
 	}
 
-	src, err := os.OpenFile(st.path, os.O_RDONLY|noFollow, 0)
+	src, err := s.openRegular(st.name)
 	if err != nil {
 		return "", err
 	}
 	defer src.Close()
 
-	tmpData := filepath.Join(s.tmp, id.String()+".eml")
+	tmpData := fileName(tmpDir, id, ".eml")
 	var head string
 	if prefix != nil {
 		head = prefix(id)
 	}
-	n, err := writeStagedCopy(tmpData, src, head)
+	n, err := writeStagedCopy(s.root, tmpData, src, head)
 	if err != nil {
 		return "", err
 	}
@@ -470,15 +630,15 @@ func (s *Spool) Commit(st *Staged, env Envelope, lifetime time.Duration, prefix 
 		Expires:     now.Add(lifetime),
 	}
 
-	if err := os.Rename(tmpData, s.dataPath(id)); err != nil {
-		_ = os.Remove(tmpData)
+	if err := s.root.Rename(tmpData, dataName(id)); err != nil {
+		_ = s.root.Remove(tmpData)
 		return "", err
 	}
 	if err := s.writeMeta(m); err != nil {
-		_ = os.Remove(s.dataPath(id))
+		_ = s.root.Remove(dataName(id))
 		return "", err
 	}
-	if err := s.syncDir(s.queue); err != nil {
+	if err := s.syncDir(queueDir); err != nil {
 		// Both files are in place, and the caller is about to be told the
 		// commit failed -- so they must not stay. recover() re-indexes a
 		// metadata/body pair at the next start, while the listener has
@@ -486,8 +646,8 @@ func (s *Spool) Commit(st *Staged, env Envelope, lifetime time.Duration, prefix 
 		// client has retried: leaving them here delivers the message twice.
 		// Body first and both attempted, the order Remove gives its reasons
 		// for.
-		_ = removeRetry(s.dataPath(id))
-		_ = removeRetry(s.metaPath(id))
+		_ = removeRetry(s.root, dataName(id))
+		_ = removeRetry(s.root, metaName(id))
 		return "", err
 	}
 
@@ -514,8 +674,8 @@ func (s *Spool) Wake() <-chan struct{} { return s.wake }
 // then src, synced and closed before the caller renames it into place.
 // Removes the tmp file on every error path; n is meaningful only when err is
 // nil.
-func writeStagedCopy(tmpPath string, src io.Reader, head string) (int64, error) {
-	return writeSynced(tmpPath, func(dst *os.File) (int64, error) {
+func writeStagedCopy(root *os.Root, tmpName string, src io.Reader, head string) (int64, error) {
+	return writeSynced(root, tmpName, func(dst *os.File) (int64, error) {
 		return io.Copy(dst, io.MultiReader(strings.NewReader(head), src))
 	})
 }
@@ -531,7 +691,20 @@ func (s *Spool) Enqueue(env Envelope, body io.Reader, maxBytes int64, lifetime t
 	return s.Commit(st, env, lifetime, nil)
 }
 
-// writeMeta replaces the metadata file atomically.
+// maxMetaBytes bounds a metadata file, read or written. It is what bounds
+// Envelope.To.
+//
+// SHORTCUT: clients.max_recipients has no upper bound, and at the default of
+// 100 a copy's metadata stays near 30 KiB; somewhere past four thousand
+// maximum-length recipients on one route a commit is refused here instead.
+// If an operator ever needs that, bound max_recipients in config to what
+// fits rather than raising this.
+const maxMetaBytes = 1 << 20
+
+// writeMeta replaces the metadata file atomically. It refuses metadata that
+// readMetaAt would refuse, so a defect in a caller surfaces here, as an
+// error the client or operator sees, rather than as a message dropped from
+// the queue at the next start.
 func (s *Spool) writeMeta(m *Meta) error {
 	if !m.ID.Valid() {
 		return queueid.ErrInvalid
@@ -539,21 +712,35 @@ func (s *Spool) writeMeta(m *Meta) error {
 	// So that a version reading only the legacy booleans still sees the
 	// kind; see the note on Envelope.Notification.
 	m.Envelope.normalizeKind()
+	if err := m.validate(); err != nil {
+		return err
+	}
 	b, err := json.Marshal(m)
 	if err != nil {
 		return err
 	}
-	tmp := filepath.Join(s.tmp, m.ID.String()+".json")
-	if _, err := writeSynced(tmp, func(f *os.File) (int64, error) {
+	if len(b) > maxMetaBytes {
+		return fmt.Errorf("%w: encodes to more than %d octets", ErrInvalidMeta, maxMetaBytes)
+	}
+	// The bytes about to be written, not m, are what the next start reads:
+	// json.Marshal turns each invalid UTF-8 octet into a three-octet U+FFFD,
+	// so an eight-bit address can pass validate above and fail its length
+	// limit once decoded -- quarantined at the next start after the client
+	// was told 250. Checking the encoding makes the two verdicts one.
+	if _, err := decodeMeta(b, m.ID); err != nil {
+		return err
+	}
+	tmp := fileName(tmpDir, m.ID, ".json")
+	if _, err := writeSynced(s.root, tmp, func(f *os.File) (int64, error) {
 		n, err := f.Write(b)
 		return int64(n), err
 	}); err != nil {
 		return err
 	}
-	if err := os.Rename(tmp, s.metaPath(m.ID)); err != nil {
+	if err := s.root.Rename(tmp, metaName(m.ID)); err != nil {
 		// A leftover tmp file would make every later write for this ID fail
 		// on O_EXCL.
-		_ = os.Remove(tmp)
+		_ = s.root.Remove(tmp)
 		return err
 	}
 	return nil
@@ -563,19 +750,41 @@ func (s *Spool) readMeta(id queueid.ID) (*Meta, error) {
 	if !id.Valid() {
 		return nil, queueid.ErrInvalid
 	}
-	return s.readMetaAt(s.metaPath(id), id)
+	return s.readMetaAt(metaName(id), id)
 }
 
-// readMetaAt reads and decodes one metadata file at path, which the caller
+// readMetaAt reads and decodes one metadata file at name, which the caller
 // has already resolved to either the live queue or spool/failed. Shared by
-// readMeta and requeueFailed so the id check and normalizeKind cannot drift
-// between the two locations a message's metadata can live in.
-func (s *Spool) readMetaAt(path string, id queueid.ID) (*Meta, error) {
-	//#nosec G304 -- path is s.metaPath(id) or s.failed.path(id, ".json"), id validated by the caller
-	b, err := os.ReadFile(path)
+// readMeta and requeueFailed so the bound, the id check and validate cannot
+// drift between the two locations a message's metadata can live in.
+//
+// Not Root.ReadFile: that follows a symlink inside the spool directory, and
+// it reads however much is there.
+func (s *Spool) readMetaAt(name string, id queueid.ID) (*Meta, error) {
+	f, err := s.openRegular(name)
 	if err != nil {
 		return nil, err
 	}
+	defer f.Close()
+	b, err := io.ReadAll(io.LimitReader(f, maxMetaBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(b) > maxMetaBytes {
+		return nil, fmt.Errorf("%w: %s is larger than %d octets", ErrInvalidMeta, name, maxMetaBytes)
+	}
+	return decodeMeta(b, id)
+}
+
+// decodeMeta decodes one metadata file's content for message id and refuses
+// anything validate refuses. Errors wrap ErrInvalidMeta only for that last
+// step: JSON that does not decode, or decodes for another message, is
+// corrupt rather than invalid, and recover treats the two differently.
+//
+// Unknown keys are ignored, not refused: a binary rolled back to an earlier
+// version has to go on reading metadata a newer one wrote, and a key no field
+// declares is never decoded into anything this package reads.
+func decodeMeta(b []byte, id queueid.ID) (*Meta, error) {
 	var m Meta
 	if err := json.Unmarshal(b, &m); err != nil {
 		return nil, err
@@ -584,7 +793,102 @@ func (s *Spool) readMetaAt(path string, id queueid.ID) (*Meta, error) {
 		return nil, fmt.Errorf("spool: metadata for %s claims id %s", id, m.ID)
 	}
 	m.Envelope.normalizeKind()
+	if err := m.validate(); err != nil {
+		return nil, err
+	}
 	return &m, nil
+}
+
+// Field bounds for validate. maxNameField is config's maxNameLen: route,
+// origin and listener are configured names, or the relay's own fixed ones.
+// maxPeerField leaves room for any HELO the listener accepts (255 octets)
+// and any address net.Addr formats.
+const (
+	maxNameField = 64
+	maxPeerField = 512
+)
+
+// validate refuses metadata the relay could not have written: the spool
+// reads it back as untrusted input (docs/dev/EXPLOIT-SURFACE.md section 5),
+// and writeMeta applies the same check so the two can never disagree about a
+// file the relay wrote itself. Errors name the field, never its value.
+func (m *Meta) validate() error {
+	e := &m.Envelope
+	if e.From != "" {
+		if err := mailaddr.CheckEnvelope(e.From); err != nil {
+			return fmt.Errorf("%w: from: %w", ErrInvalidMeta, err)
+		}
+	}
+	if e.OriginalFrom != "" {
+		if err := mailaddr.CheckEnvelope(e.OriginalFrom); err != nil {
+			return fmt.Errorf("%w: original_from: %w", ErrInvalidMeta, err)
+		}
+	}
+	if len(e.To) == 0 {
+		return fmt.Errorf("%w: no recipient", ErrInvalidMeta)
+	}
+	for i, rcpt := range e.To {
+		if err := mailaddr.CheckEnvelope(rcpt); err != nil {
+			return fmt.Errorf("%w: to[%d]: %w", ErrInvalidMeta, i, err)
+		}
+	}
+	if !validRouteName(e.Route) {
+		return fmt.Errorf("%w: route", ErrInvalidMeta)
+	}
+	for _, f := range []struct {
+		name, value string
+		max         int
+	}{
+		{"client", e.Origin, maxNameField},
+		{"listener", e.Listener, maxNameField},
+		{"remote_addr", e.RemoteAddr, maxPeerField},
+	} {
+		if len(f.value) > f.max || hasControl(f.value) {
+			return fmt.Errorf("%w: %s", ErrInvalidMeta, f.name)
+		}
+	}
+	// Only what the listener's doHelo refuses: it accepts other control
+	// characters, and refusing them here would turn a message the listener
+	// took into a commit failure.
+	if len(e.Helo) > maxPeerField || strings.ContainsAny(e.Helo, "\r\n\x00") {
+		return fmt.Errorf("%w: helo", ErrInvalidMeta)
+	}
+	switch e.Kind {
+	case KindClient, KindNotification, KindCanary:
+	default:
+		return fmt.Errorf("%w: kind", ErrInvalidMeta)
+	}
+	if e.Size < 0 {
+		return fmt.Errorf("%w: size", ErrInvalidMeta)
+	}
+	if m.Attempts < 0 {
+		return fmt.Errorf("%w: attempts", ErrInvalidMeta)
+	}
+	return nil
+}
+
+// validRouteName mirrors config.ValidName, which spool cannot import: 1 to
+// 64 octets of printable ASCII, space included, without the double quote or
+// the backslash.
+func validRouteName(s string) bool {
+	if s == "" || len(s) > maxNameField {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if c := s[i]; c < 0x20 || c > 0x7e || c == '"' || c == '\\' {
+			return false
+		}
+	}
+	return true
+}
+
+func hasControl(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if c := s[i]; c < 0x20 || c == 0x7f {
+			return true
+		}
+	}
+	return false
 }
 
 // OpenBody returns the message body for reading. Named apart from the
@@ -594,7 +898,7 @@ func (s *Spool) OpenBody(id queueid.ID) (*os.File, error) {
 	if !id.Valid() {
 		return nil, queueid.ErrInvalid
 	}
-	return os.OpenFile(s.dataPath(id), os.O_RDONLY|noFollow, 0)
+	return s.openRegular(dataName(id))
 }
 
 // Claim returns the oldest message due for delivery and marks it in flight.
@@ -729,12 +1033,12 @@ func (s *Spool) Remove(id queueid.ID) error {
 	// message goes out a second time. The metadata is unlinked even when the
 	// body could not be, for that same reason -- a stranded body costs disk
 	// until the next start, a stranded pair costs a duplicate delivery.
-	dataErr := removeRetry(s.dataPath(id))
-	metaErr := removeRetry(s.metaPath(id))
+	dataErr := removeRetry(s.root, dataName(id))
+	metaErr := removeRetry(s.root, metaName(id))
 	if err := firstRealError(dataErr, metaErr); err != nil {
 		return err
 	}
-	return s.syncDir(s.queue)
+	return s.syncDir(queueDir)
 }
 
 // firstRealError returns the first error that is not simply a missing file.
@@ -749,7 +1053,7 @@ func firstRealError(errs ...error) error {
 	return nil
 }
 
-// removeRetry unlinks a path, retrying briefly. On Windows an on-access
+// removeRetry unlinks name in root, retrying briefly. On Windows an on-access
 // scanner or a backup agent can hold a handle for a few milliseconds after
 // the file was last written, which surfaces as a sharing violation rather
 // than as a missing file. Retrying costs nothing on Unix, where the first
@@ -760,10 +1064,10 @@ func firstRealError(errs ...error) error {
 // only occupies disk until the next restart -- but metadata left behind
 // beside its body is re-indexed at the next start and delivered again. The
 // callers unlink the body first for that reason.
-func removeRetry(path string) error {
+func removeRetry(root *os.Root, name string) error {
 	var err error
 	for i := 0; i < 5; i++ {
-		if err = os.Remove(path); err == nil || os.IsNotExist(err) {
+		if err = root.Remove(name); err == nil || os.IsNotExist(err) {
 			return err
 		}
 		time.Sleep(20 * time.Millisecond)
@@ -963,7 +1267,7 @@ func (s *Spool) requeueLive(m *Meta) error {
 // requeueFailed moves a message from spool/failed back into the queue. The
 // caller holds the lease, which is what keeps Discard away from the renames.
 func (s *Spool) requeueFailed(id queueid.ID) error {
-	failedMeta := s.failed.path(id, ".json")
+	failedMeta := fileName(failedDir, id, ".json")
 	m, err := s.readMetaAt(failedMeta, id)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -977,8 +1281,8 @@ func (s *Spool) requeueFailed(id queueid.ID) error {
 	// held by a scanner makes this fail with a sharing violation rather than
 	// with a missing file, and losing that race here refuses an operator's
 	// requeue for a message that is perfectly intact.
-	failedBody := s.failed.path(id, ".eml")
-	if err := renameRetry(failedBody, s.dataPath(id)); err != nil {
+	failedBody := fileName(failedDir, id, ".eml")
+	if err := renameRetry(s.root, failedBody, dataName(id)); err != nil {
 		return err
 	}
 	if err := s.writeMeta(m); err != nil {
@@ -995,18 +1299,18 @@ func (s *Spool) requeueFailed(id queueid.ID) error {
 		// directory, where recover() drops a body without metadata at the
 		// next start. Both errors are reported: the second one is why the
 		// message is now only in the journal.
-		if rerr := renameRetry(s.dataPath(id), failedBody); rerr != nil {
+		if rerr := renameRetry(s.root, dataName(id), failedBody); rerr != nil {
 			return errors.Join(err, rerr)
 		}
 		return err
 	}
-	if err := os.Remove(failedMeta); err != nil && !os.IsNotExist(err) {
+	if err := s.root.Remove(failedMeta); err != nil && !os.IsNotExist(err) {
 		return err
 	}
-	if err := s.syncDir(s.queue); err != nil {
+	if err := s.syncDir(queueDir); err != nil {
 		return err
 	}
-	if err := s.syncDir(s.failed.dir); err != nil {
+	if err := s.syncDir(failedDir); err != nil {
 		return err
 	}
 	s.mu.Lock()
@@ -1046,18 +1350,18 @@ func (s *Spool) Discard(id queueid.ID) error {
 	// Both files are attempted before any error is reported, so one that
 	// cannot be unlinked does not leave the other in place.
 	var failure error
-	removeOne := func(path string) {
-		switch err := removeRetry(path); {
+	removeOne := func(name string) {
+		switch err := removeRetry(s.root, name); {
 		case err == nil:
 			removed = true
 		case !os.IsNotExist(err) && failure == nil:
 			failure = err
 		}
 	}
-	removeOne(s.dataPath(id))
-	removeOne(s.metaPath(id))
-	removeOne(s.failed.path(id, ".eml"))
-	removeOne(s.failed.path(id, ".json"))
+	removeOne(dataName(id))
+	removeOne(metaName(id))
+	removeOne(fileName(failedDir, id, ".eml"))
+	removeOne(fileName(failedDir, id, ".json"))
 	if failure != nil {
 		// Whatever could not be unlinked is still occupying the filesystem the
 		// quota exists to protect, so it stays accounted for: both index
@@ -1079,10 +1383,10 @@ func (s *Spool) Discard(id queueid.ID) error {
 	if !removed {
 		return ErrNotFound
 	}
-	if err := s.syncDir(s.queue); err != nil {
+	if err := s.syncDir(queueDir); err != nil {
 		return err
 	}
-	return s.syncDir(s.failed.dir)
+	return s.syncDir(failedDir)
 }
 
 // tryLease claims id's lease, the way Requeue and Discard both need to keep

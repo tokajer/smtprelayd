@@ -78,6 +78,7 @@ func TestQueueSizeReflectsSpool(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = sp.Close() })
 	if _, err := sp.Enqueue(spool.Envelope{From: "a@example.at", To: []string{"b@example.net"}, Route: "m365"},
 		strings.NewReader("x"), 0, 0); err != nil {
 		t.Fatal(err)
@@ -199,6 +200,7 @@ func TestStatusIncludesOldestQueued(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = sp.Close() })
 	old := time.Now().Add(-time.Hour)
 	if _, err := sp.Enqueue(spool.Envelope{From: "a@example.at", To: []string{"b@example.net"}, Route: "m365", Received: old},
 		strings.NewReader("x"), 0, time.Hour); err != nil {

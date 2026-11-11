@@ -42,6 +42,7 @@ func TestLoadSpoolOnDisk(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			t.Cleanup(func() { _ = s.Close() })
 			env := Envelope{
 				From: "device@example.at", To: []string{"someone@partner.example"},
 				Origin: "printers", Route: "m365", Listener: "smtp",
@@ -56,10 +57,12 @@ func TestLoadSpoolOnDisk(t *testing.T) {
 			enqueue := time.Since(start)
 
 			start = time.Now()
+			_ = s.Close()
 			s2, err := Open(dir)
 			if err != nil {
 				t.Fatal(err)
 			}
+			t.Cleanup(func() { _ = s2.Close() })
 			reopen := time.Since(start)
 
 			if s2.Len() != n {

@@ -32,6 +32,7 @@ func testNotifier(t *testing.T, cfg *config.Config) (*Notifier, *spool.Spool, *s
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = sp.Close() })
 	// The store is opened with the same retain_subjects the configuration
 	// carries, which is how cmd/smtprelayd wires the two. Hardcoding true
 	// here while a test flipped only the config field meant the two halves
@@ -237,6 +238,7 @@ func TestDispatchCarriesOverFailuresWhenSendingFails(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = sp.Close() })
 	st, err := store.Open(filepath.Join(t.TempDir(), "history.db"), discardLog(), 90, true)
 	if err != nil {
 		t.Fatal(err)
@@ -444,6 +446,7 @@ func TestDigestListsAtMostMaxEntriesAndSaysHowManyItLeftOut(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = sp.Close() })
 	st, err := store.Open(filepath.Join(t.TempDir(), "history.db"), discardLog(), 90, true)
 	if err != nil {
 		t.Fatal(err)
@@ -487,6 +490,7 @@ func TestDigestUnderTheCapListsEverythingAndSaysNothingExtra(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = sp.Close() })
 	st, err := store.Open(filepath.Join(t.TempDir(), "history.db"), discardLog(), 90, true)
 	if err != nil {
 		t.Fatal(err)

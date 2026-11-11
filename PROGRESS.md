@@ -12,7 +12,29 @@ live deployment: the Microsoft 365 route delivers with both `file:` and
 the Burn `setup.exe`, `.rpm` and `.deb` (install, upgrade in every
 combination, uninstall with and without purging the data directory).
 
-**Last session**: 2026-11-11 — Security review (repository-wide, no
+**Last session**: 2026-11-11 (second) — Six of the open defects closed:
+
+- Spool I/O goes through one `os.Root` on `<data_dir>/spool`
+  (`Spool.Close` is new; every test now closes its spool, because on
+  Windows an open root blocks `t.TempDir` cleanup). `os.Root` follows a
+  symlink inside the root even with `O_NOFOLLOW`, so reads go through
+  `openRegular` (Lstat, open with `O_NONBLOCK`, `os.SameFile`).
+- Spool metadata is validated on read and on write (`decodeMeta`, 1 MiB
+  bound, `mailaddr.CheckEnvelope` moved out of the listener unchanged);
+  `writeMeta` validates the marshalled bytes, so write and read cannot
+  disagree. A parseable but invalid pair is quarantined to `spool/failed`
+  all-or-nothing and logged at startup (`Spool.Quarantined`).
+- Seven fuzz targets, `scripts/fuzz.sh`, a "Fuzz" step in CI and `make ci`.
+- Core dumps off on Linux: `LimitCORE=0` in the unit, `RLIMIT_CORE` zeroed
+  first thing in `serve` (startup error if that fails).
+- `X-Original-From` and the spool-mode repair kept as they are; SECURITY.md
+  reworded, decisions in `MEMORY.md` §9.
+- Verified: `make ci` exit 0 on go1.27.4 (all steps incl. gosec,
+  staticcheck, govulncheck, fuzz 10 s per target). The Windows test job
+  was not run locally; the Root share-mode and cleanup reasoning rests on
+  the Go source and needs that CI run.
+
+**Previous session**: 2026-11-11 — Security review (repository-wide, no
 HIGH/MEDIUM finding at confidence 8+). Two rewrite gaps fixed:
 
 - `MAIL FROM:<>` no longer skips the header policy: under `force` and
@@ -29,8 +51,8 @@ HIGH/MEDIUM finding at confidence 8+). Two rewrite gaps fixed:
   and `go version -m` lists the same modules on linux and windows. `make ci`
   is green on go1.27.4 with gosec v2.30.0 and staticcheck 2026.2.2
   unchanged; the Windows test job is still CI-only.
-- Nine places where `SECURITY.md` / `EXPLOIT-SURFACE.md` promise more than
-  the code does are listed under "Open defects"; each needs a decision.
+- Eight places where `SECURITY.md` / `EXPLOIT-SURFACE.md` promised more
+  than the code did were listed under "Open defects".
 
 **Previous session**: 2026-11-05 — Small items from the fifth review:
 
@@ -166,27 +188,32 @@ for each is in `docs/dev/HISTORY.md`; grep for the quoted term.
 
 ## Open defects
 
-Documented guarantees the code does not enforce (security review
-2026-11-11). Each needs a decision: implement, or strike the promise and
-record that in `MEMORY.md`. Low practical impact.
+From the security review of 2026-11-11 (each needs a decision: implement,
+or strike the promise and record that in `MEMORY.md`), and from the fixes
+that followed it. Low practical impact.
 
-1. SECURITY.md §4: `X-Original-From` is a raw copy of the client's `From`
-   (control characters and length filtered only), not an encoded value.
-2. EXPLOIT-SURFACE §1: on Windows `ostrust` checks only reparse point and
+1. EXPLOIT-SURFACE §1: on Windows `ostrust` checks only reparse point and
    file type, never the binary directory ACL; `[tls] key_file` has no
    owner/mode check on either platform.
-3. EXPLOIT-SURFACE §4: the spool rebuilds `filepath.Join(dir, id+ext)` and
-   `readMetaAt` uses `os.ReadFile` (follows symlinks) instead of `os.Root`.
-4. EXPLOIT-SURFACE §5: `spool.readMetaAt` validates only the embedded ID;
-   `Envelope.From/To/Route` reach delivery unvalidated.
-5. EXPLOIT-SURFACE §2/§11: no explicit service DACL, no
+2. EXPLOIT-SURFACE §2/§11: no explicit service DACL, no
    `SetDefaultDllDirectories`, no installer test for either.
-6. EXPLOIT-SURFACE §9: core dumps are not disabled (no `RLIMIT_CORE`, no
-   `LimitCORE=` in the unit).
-7. EXPLOIT-SURFACE §11: no fuzz targets exist for the header, address or
-   envelope parsers.
-8. SECURITY.md §6: `spool.ensureMode` repairs spool modes instead of
-   failing startup; only the data-dir root is refused.
+3. EXPLOIT-SURFACE §9: Windows Error Reporting dumps are not disabled for
+   the service (Linux core dumps are).
+4. Pre-existing: an envelope address with invalid UTF-8 is silently changed
+   by `json.Marshal` (each bad octet becomes U+FFFD), so after a restart or
+   requeue it is delivered to a different address than the client gave.
+   Refusing non-UTF-8 in the listener or in `validate` closes it, but
+   changes what the listener accepts.
+5. Pre-existing: `mailaddr.CheckEnvelope` (formerly the listener's check)
+   does not restrict the local part, so `MAIL FROM:<<a@b.example>` is
+   accepted as `<a@b.example>` and relayed as is.
+6. `clients.max_recipients` has no upper bound, while the spool now refuses
+   metadata over 1 MiB (about 4000 maximum-length recipients on one route);
+   such a message gets 451 at commit. Bounding `max_recipients` is a schema
+   change (`SHORTCUT:` on `maxMetaBytes`).
+7. Pre-existing: `go vet -tags loadtest ./internal/store` fails
+   (`load_journal_test.go:203`, `retentionCleanup` arguments); CI does not
+   build the `loadtest` tag.
 
 Closed defects and their reasoning are in `docs/dev/HISTORY.md`.
 

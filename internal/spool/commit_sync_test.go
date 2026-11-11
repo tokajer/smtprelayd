@@ -26,6 +26,7 @@ func TestCommitLeavesNothingBehindWhenTheDirectorySyncFails(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = s.Close() })
 
 	wantErr := errors.New("sync failed")
 	original := s.syncDir
@@ -46,7 +47,7 @@ func TestCommitLeavesNothingBehindWhenTheDirectorySyncFails(t *testing.T) {
 	if n := s.Len(); n != 0 {
 		t.Errorf("index holds %d messages after a failed commit, want 0", n)
 	}
-	entries, err := os.ReadDir(s.queue)
+	entries, err := os.ReadDir(s.pathOf(queueDir))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -57,10 +58,12 @@ func TestCommitLeavesNothingBehindWhenTheDirectorySyncFails(t *testing.T) {
 
 	// And the proof of that last claim: a restart finds an empty queue.
 	s.syncDir = original
-	reopened, err := Open(filepath.Dir(filepath.Dir(s.queue)))
+	_ = s.Close()
+	reopened, err := Open(filepath.Dir(s.root.Name()))
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = reopened.Close() })
 	if n := reopened.Len(); n != 0 {
 		t.Errorf("a restart re-indexed %d message(s) from a commit that failed", n)
 	}

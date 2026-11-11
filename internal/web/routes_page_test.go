@@ -32,6 +32,7 @@ func TestRoutesPageShowsEveryRouteCounter(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = sp.Close() })
 
 	reg := metrics.New(expiry.Items(cfg, nil), sp, []string{"m365"}, nil)
 	reg.Delivered("m365")

@@ -71,6 +71,7 @@ func testManager(t *testing.T, tokens map[string]smarthost.TokenSource) (*Manage
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = sp.Close() })
 	st, err := store.Open(filepath.Join(t.TempDir(), "history.db"), discardLog(), 90, true)
 	if err != nil {
 		t.Fatal(err)
@@ -372,6 +373,7 @@ func TestJournalWriteFailureIsCounted(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = sp.Close() })
 	reg := testRegistry(cfg, sp)
 	m, err := New(cfg, sp, failingJournal{}, reg, nil, nil, discardLog())
 	if err != nil {
@@ -404,6 +406,7 @@ func TestExpiredTemporaryFailureIsRecordedAsExpiredNotDeferred(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = sp.Close() })
 	st, err := store.Open(filepath.Join(t.TempDir(), "history.db"), discardLog(), 90, true)
 	if err != nil {
 		t.Fatal(err)
@@ -498,6 +501,7 @@ func TestFailStillReportsAPermanentFailureWhenMovingItAsideFails(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = sp.Close() })
 	st, err := store.Open(filepath.Join(t.TempDir(), "history.db"), discardLog(), 90, true)
 	if err != nil {
 		t.Fatal(err)

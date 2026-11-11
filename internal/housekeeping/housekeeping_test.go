@@ -85,6 +85,7 @@ func TestPassSweepsFailedAndHistoryAndThrottles(t *testing.T) {
 	if err != nil {
 		t.Fatalf("spool.Open: %v", err)
 	}
+	t.Cleanup(func() { _ = sp.Close() })
 	st, err := store.Open(filepath.Join(t.TempDir(), "history.db"), slog.New(slog.NewTextHandler(io.Discard, nil)), 1, true)
 	if err != nil {
 		t.Fatalf("store.Open: %v", err)

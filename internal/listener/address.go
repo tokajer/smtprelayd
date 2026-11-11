@@ -4,21 +4,19 @@
 package listener
 
 import (
-	"errors"
-	"fmt"
 	"strings"
+
+	"github.com/tokajer/smtprelayd/internal/mailaddr"
 )
 
-// RFC 5321 section 4.5.3.1 size limits. Exceeding them is rejected rather
-// than truncated, because a truncated address is a misdelivered message.
-const (
-	maxLocalPart = 64
-	maxDomain    = 255
-	maxPath      = 254
-	maxLineOctet = 1000 // including CRLF
-)
+// maxLineOctet is the RFC 5321 section 4.5.3.1.6 text line limit. A line
+// that exceeds it is rejected rather than truncated.
+const maxLineOctet = 1000 // including CRLF
 
-var errBadAddress = errors.New("malformed address")
+// errBadAddress is mailaddr.ErrEnvelope rather than a sentinel of its own:
+// the check moved there so the spool can apply it to what it reads back, and
+// one value keeps both the reply text and errors.Is unchanged.
+var errBadAddress = mailaddr.ErrEnvelope
 
 // parsePath extracts the address from a MAIL FROM or RCPT TO argument of the
 // form "<addr>" optionally followed by ESMTP parameters. Anything containing
@@ -44,46 +42,12 @@ func parsePath(arg string) (addr string, params []string, err error) {
 	return addr, params, nil
 }
 
-// validateAddress checks structure and length. allowEmpty covers the null
-// reverse path used by bounces.
-//
-// This is deliberately looser than mailaddr.ValidAddress, which governs what an
-// operator may write into a header: a device's envelope address may carry
-// eight-bit octets or a quoted local part and still be relayed as is, because
-// it is only ever placed back into MAIL FROM and RCPT TO, never composed into
-// a header line. What both refuse is the same -- control characters, an
-// oversized part, a malformed domain -- so an address that passes here cannot
-// split a line downstream either.
+// validateAddress checks structure and length; see mailaddr.CheckEnvelope
+// for why that is looser than mailaddr.ValidAddress. allowEmpty covers the
+// null reverse path used by bounces.
 func validateAddress(addr string, allowEmpty bool) error {
-	if addr == "" {
-		if allowEmpty {
-			return nil
-		}
-		return errBadAddress
+	if addr == "" && allowEmpty {
+		return nil
 	}
-	if len(addr) > maxPath {
-		return fmt.Errorf("%w: longer than %d octets", errBadAddress, maxPath)
-	}
-	for i := 0; i < len(addr); i++ {
-		c := addr[i]
-		if c < 0x20 || c == 0x7f {
-			return fmt.Errorf("%w: control character", errBadAddress)
-		}
-	}
-	at := strings.LastIndex(addr, "@")
-	if at <= 0 || at == len(addr)-1 {
-		return fmt.Errorf("%w: expected local@domain", errBadAddress)
-	}
-	local, domain := addr[:at], addr[at+1:]
-	if len(local) > maxLocalPart {
-		return fmt.Errorf("%w: local part longer than %d octets", errBadAddress, maxLocalPart)
-	}
-	if len(domain) > maxDomain {
-		return fmt.Errorf("%w: domain longer than %d octets", errBadAddress, maxDomain)
-	}
-	if strings.ContainsAny(domain, " \t<>,;\"\\") || strings.Contains(domain, "..") ||
-		strings.HasPrefix(domain, ".") || strings.HasSuffix(domain, ".") {
-		return fmt.Errorf("%w: malformed domain", errBadAddress)
-	}
-	return nil
+	return mailaddr.CheckEnvelope(addr)
 }
