@@ -4,6 +4,7 @@
 package mailaddr
 
 import (
+	"errors"
 	"strings"
 	"testing"
 )
@@ -95,5 +96,35 @@ func TestDomainOf(t *testing.T) {
 	}
 	if got := DomainOf("nobody"); got != "" {
 		t.Fatalf("got %q, want empty", got)
+	}
+}
+
+// json.Marshal in the spool rewrites every invalid UTF-8 octet as U+FFFD, so
+// an address carrying one was relayed to a different address after a
+// restart; an angle bracket inside the path is one the listener's parser
+// stopped short of. Both used to pass.
+func TestCheckEnvelopeRefusesWhatTheSpoolOrTheParserWouldChange(t *testing.T) {
+	for _, tc := range []struct{ addr, detail string }{
+		{"m\xfcller@example.at", "not valid UTF-8"},
+		{"ops@example.\xff", "not valid UTF-8"},
+		{"<a@b.example", "angle bracket"},
+		{"a<b@c.example", "angle bracket"},
+		{"a>b@c.example", "angle bracket"},
+	} {
+		err := CheckEnvelope(tc.addr)
+		if !errors.Is(err, ErrEnvelope) {
+			t.Errorf("CheckEnvelope(%q) = %v, want ErrEnvelope", tc.addr, err)
+			continue
+		}
+		if !strings.Contains(err.Error(), tc.detail) {
+			t.Errorf("CheckEnvelope(%q) = %v, want the detail %q", tc.addr, err, tc.detail)
+		}
+	}
+	// Valid UTF-8 is still carried as is: a device may name a recipient with
+	// an umlaut, and the smarthost decides whether it accepts SMTPUTF8.
+	for _, addr := range []string{"jörg@example.at", "\"quoted local\"@example.at"} {
+		if err := CheckEnvelope(addr); err != nil {
+			t.Errorf("CheckEnvelope(%q) = %v, want nil", addr, err)
+		}
 	}
 }

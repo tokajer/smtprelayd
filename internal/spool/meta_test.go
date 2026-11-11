@@ -4,6 +4,7 @@
 package spool
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"os"
@@ -14,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/tokajer/smtprelayd/internal/mailaddr"
 	"github.com/tokajer/smtprelayd/internal/queueid"
 )
 
@@ -184,27 +186,161 @@ func TestCommitRefusesAnInvalidEnvelope(t *testing.T) {
 	}
 }
 
-// An address that passes validate as written but not as json.Marshal
-// encodes it -- each invalid UTF-8 octet becomes three -- must get one
-// verdict, on the way out and at the next start. writeMeta checks the
-// encoding, so the commit is refused rather than accepted and quarantined
-// after a restart.
+// A field that passes validate as written but not as json.Marshal encodes
+// it -- each invalid UTF-8 octet becomes three -- must get one verdict, on
+// the way out and at the next start. An address can no longer be that field:
+// mailaddr.CheckEnvelope refuses invalid UTF-8, so validate refuses it as
+// written. HELO could too, since the listener takes up to 255 octets of it
+// and validate bounds it at maxPeerField, which 200 octets pass and the 600
+// they encode to do not; Commit now makes it valid UTF-8 before writing, so
+// the message is kept rather than refused on every retry. writeMeta's own
+// check on the encoded bytes stays the backstop for any other field.
 func TestWriteAndReadAgreeOnInvalidUTF8(t *testing.T) {
-	dir := t.TempDir()
-	s := openForTest(t, dir)
 	env := listenerEnvelope()
 	env.To = []string{strings.Repeat("\xff", 30) + "@example.net"}
-	if err := (&Meta{ID: fixedID, Envelope: env}).validate(); err != nil {
-		t.Fatalf("precondition: the raw address should pass validate: %v", err)
+	if err := (&Meta{ID: fixedID, Envelope: env}).validate(); !errors.Is(err, ErrInvalidMeta) {
+		t.Fatalf("validate of an address that is not UTF-8: error = %v, want ErrInvalidMeta", err)
 	}
-	if _, err := s.Enqueue(env, strings.NewReader("body"), 0, time.Hour); !errors.Is(err, ErrInvalidMeta) {
-		t.Fatalf("Enqueue error = %v, want ErrInvalidMeta", err)
+
+	dir := t.TempDir()
+	s := openForTest(t, dir)
+	env = listenerEnvelope()
+	// 200 invalid octets would encode to 600 and fail the 512-octet bound on
+	// read; Commit makes the HELO valid UTF-8 first, so the message is
+	// accepted and survives a restart instead of drawing 451 forever.
+	env.Helo = "printer-" + strings.Repeat("\xff", 200)
+	id, err := s.Enqueue(env, strings.NewReader("body"), 0, time.Hour)
+	if err != nil {
+		t.Fatalf("Enqueue with an eight-bit HELO: %v", err)
 	}
 	_ = s.Close()
 	reopened := openForTest(t, dir)
-	if reopened.Len() != 0 || len(reopened.Quarantined()) != 0 {
-		t.Errorf("a refused commit left something for the next start: len=%d quarantined=%v",
+	if reopened.Len() != 1 || len(reopened.Quarantined()) != 0 {
+		t.Fatalf("after restart: len=%d quarantined=%v, want 1 and none",
 			reopened.Len(), reopened.Quarantined())
+	}
+	m, err := reopened.readMeta(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.Envelope.Helo != "printer-?" {
+		t.Errorf("stored HELO = %q, want %q", m.Envelope.Helo, "printer-?")
+	}
+}
+
+// maxMetaBytes is not raised to fit max_recipients; config bounds
+// max_recipients to what fits instead (maxClientRecipients there). This
+// asserts the arithmetic that bound relies on: the largest envelope config
+// lets the listener build -- every recipient at the 254-octet path limit,
+// made of whichever characters CheckEnvelope allows that encode largest, and
+// every other field at its own limit -- encodes with room to spare.
+//
+// The first version of this test only tried '&' in the local part. json's
+// default HTML escaping writes '&' as six octets and the domain allows it
+// too, so 1000 such recipients came to about 1.5 MB; encodeMeta now turns
+// that escaping off, and this tries every candidate in both halves.
+func TestTheLargestEnvelopeConfigAllowsFits(t *testing.T) {
+	const maxClientRecipients = 1000  // config.maxClientRecipients
+	const ls, ps = "\u2028", "\u2029" // three octets each, escaped as six
+
+	// 64 octets of local part and 189 of domain: 254 with the '@'.
+	locals := []string{
+		strings.Repeat("&", 64),
+		strings.Repeat(`"`, 64),
+		strings.Repeat(`\`, 64),
+		strings.Repeat(ls, 21) + `"`,
+		strings.Repeat(ps, 21) + `"`,
+	}
+	// The domain rule refuses '"' and '\', so those two are not candidates.
+	domains := []string{
+		strings.Repeat("&", 189),
+		strings.Repeat(ls, 63),
+		strings.Repeat(ps, 63),
+	}
+	encodedLen := func(addr string) int {
+		b, err := encodeMeta(&Meta{Envelope: Envelope{To: []string{addr}}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return len(b)
+	}
+	var worst string
+	for _, l := range locals {
+		for _, d := range domains {
+			addr := l + "@" + d
+			if len(addr) != 254 {
+				t.Fatalf("precondition: candidate is %d octets, want 254", len(addr))
+			}
+			if err := mailaddr.CheckEnvelope(addr); err != nil {
+				t.Fatalf("precondition: candidate %q is refused: %v", addr, err)
+			}
+			if worst == "" || encodedLen(addr) > encodedLen(worst) {
+				worst = addr
+			}
+		}
+	}
+
+	m := validMeta()
+	m.Envelope.From = worst
+	m.Envelope.OriginalFrom = worst
+	m.Envelope.To = make([]string, maxClientRecipients)
+	for i := range m.Envelope.To {
+		m.Envelope.To[i] = worst
+	}
+	m.Envelope.Origin = strings.Repeat("o", maxNameField)
+	m.Envelope.Route = strings.Repeat("r", maxNameField)
+	m.Envelope.Listener = strings.Repeat("l", maxNameField)
+	m.Envelope.RemoteAddr = strings.Repeat(`"`, maxPeerField)
+	// HELO may carry control characters other than CR, LF and NUL, each of
+	// which json writes as a six-octet \u00XX.
+	m.Envelope.Helo = strings.Repeat("\x01", maxPeerField)
+	// LastError is a smarthost's reply, which nothing bounds; a multiline
+	// reply of this size is already far past what one ever sends.
+	m.LastError = strings.Repeat("\x01", 16<<10)
+	if err := m.validate(); err != nil {
+		t.Fatalf("precondition: the maximal envelope fails validate: %v", err)
+	}
+	b, err := encodeMeta(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A quarter in reserve, so that a field added later does not silently
+	// eat the whole margin.
+	if limit := maxMetaBytes * 3 / 4; len(b) > limit {
+		t.Fatalf("%d recipients of %d octets encode to %d octets, over %d (three quarters of maxMetaBytes)",
+			maxClientRecipients, len(worst), len(b), limit)
+	}
+	t.Logf("maximal metadata: %d of %d octets", len(b), maxMetaBytes)
+}
+
+// The escaping encodeMeta turns off is only a spelling: a file a previous
+// version wrote with "\u0026" decodes to the same envelope as one written
+// with a raw '&', in both directions.
+func TestEncodeMetaReadsTheSameAsEscapedJSON(t *testing.T) {
+	m := validMeta()
+	m.Envelope.To = []string{"a&b@x&y.example"}
+	raw, err := encodeMeta(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(raw, []byte(`\u0026`)) || bytes.HasSuffix(raw, []byte("\n")) {
+		t.Fatalf("encodeMeta wrote %s", raw)
+	}
+	escaped, err := json.Marshal(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(escaped, []byte(`\u0026`)) {
+		t.Fatalf("precondition: json.Marshal no longer escapes '&': %s", escaped)
+	}
+	for _, b := range [][]byte{raw, escaped} {
+		got, err := decodeMeta(b, m.ID)
+		if err != nil {
+			t.Fatalf("decodeMeta(%s): %v", b, err)
+		}
+		if !reflect.DeepEqual(got.Envelope.To, m.Envelope.To) {
+			t.Errorf("decoded %q, want %q", got.Envelope.To, m.Envelope.To)
+		}
 	}
 }
 

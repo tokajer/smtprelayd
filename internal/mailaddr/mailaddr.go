@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"unicode/utf8"
 )
 
 // RFC 5321 section 4.5.3.1 length limits.
@@ -59,11 +60,18 @@ var ErrEnvelope = errors.New("malformed address")
 //
 // This is deliberately looser than ValidAddress, which governs what an
 // operator may write into a header: a device's envelope address may carry
-// eight-bit octets or a quoted local part and still be relayed as is, because
-// it is only ever placed back into MAIL FROM and RCPT TO, never composed into
-// a header line. What both refuse is the same -- control characters, an
-// oversized part, a malformed domain -- so an address that passes here cannot
-// split a line downstream either.
+// valid UTF-8 or a quoted local part and still be relayed as is, because it
+// is only ever placed back into MAIL FROM and RCPT TO, never composed into a
+// header line. What both refuse is the same -- control characters, an
+// oversized part, a malformed domain, an angle bracket -- so an address that
+// passes here cannot split a line downstream either.
+//
+// Eight-bit octets that are not valid UTF-8 are refused: the spool stores the
+// envelope as JSON, and json.Marshal rewrites each invalid byte as U+FFFD, so
+// the message read back after a restart would go to an address the client
+// never named. An angle bracket is refused because it is the path delimiter:
+// "MAIL FROM:<<a@b.example>" used to be accepted as "<a@b.example", which is
+// a path no client meant and no smarthost parses the same way.
 func CheckEnvelope(addr string) error {
 	if addr == "" {
 		return ErrEnvelope
@@ -76,6 +84,12 @@ func CheckEnvelope(addr string) error {
 		if c < 0x20 || c == 0x7f {
 			return fmt.Errorf("%w: control character", ErrEnvelope)
 		}
+	}
+	if !utf8.ValidString(addr) {
+		return fmt.Errorf("%w: not valid UTF-8", ErrEnvelope)
+	}
+	if strings.ContainsAny(addr, "<>") {
+		return fmt.Errorf("%w: angle bracket", ErrEnvelope)
 	}
 	at := strings.LastIndex(addr, "@")
 	if at <= 0 || at == len(addr)-1 {

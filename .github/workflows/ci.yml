@@ -49,6 +49,11 @@ jobs:
       - name: Vet for windows/amd64
         run: GOOS=windows GOARCH=amd64 go vet ./...
 
+      # The load tests sit behind a build tag no other step sets, so a
+      # signature change broke internal/store's for weeks unnoticed.
+      - name: Vet load tests
+        run: go vet -tags loadtest ./...
+
       - name: Test
         run: go test -race ./...
 

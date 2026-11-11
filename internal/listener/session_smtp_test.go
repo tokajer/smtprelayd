@@ -199,6 +199,37 @@ func TestDeclaredSizeOverTheLimitIsRefused(t *testing.T) {
 	}
 }
 
+// An address the spool could not store as written is refused at the command
+// that names it, with the same 501 every other malformed path gets: the
+// spool's JSON encoding rewrites an invalid UTF-8 octet as U+FFFD, which used
+// to turn an accepted message into one delivered elsewhere after a restart.
+// An angle bracket inside the path is refused for the same reason in the
+// parser's terms: what it stops at is not what the client wrote.
+func TestEnvelopeAddressesTheSpoolWouldChangeAreRefused(t *testing.T) {
+	s := serveTest(t, plainConfig(localClient()))
+	s.send("EHLO probe.test")
+	s.expect("EHLO", "250")
+
+	s.send("%s", "MAIL FROM:<m\xfcller@example.test>")
+	if got := s.expect("MAIL FROM with invalid UTF-8", "501"); !strings.Contains(got, "5.1.7") {
+		t.Errorf("refusal was %q, want the 5.1.7 bad-sender status", got)
+	}
+	s.send("MAIL FROM:<<device@example.test>")
+	s.expect("MAIL FROM with a doubled angle bracket", "501")
+
+	s.send("MAIL FROM:<device@example.test>")
+	s.expect("MAIL FROM", "250")
+	s.send("RCPT TO:<a<b@c.example>")
+	if got := s.expect("RCPT TO with an angle bracket", "501"); !strings.Contains(got, "5.1.3") {
+		t.Errorf("refusal was %q, want the 5.1.3 bad-recipient status", got)
+	}
+	s.send("%s", "RCPT TO:<ops\xff@example.test>")
+	s.expect("RCPT TO with invalid UTF-8", "501")
+	// Valid UTF-8 is still carried as is.
+	s.send("RCPT TO:<jörg@example.at>")
+	s.expect("RCPT TO with a UTF-8 local part", "250")
+}
+
 // require_tls must be enforced at MAIL FROM, not merely advertised: an
 // allowlisted client that skips STARTTLS is refused, and the same client is
 // accepted once the handshake has happened.

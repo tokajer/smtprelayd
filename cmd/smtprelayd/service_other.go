@@ -21,3 +21,7 @@ func controlService(action, _ string) error {
 func runWindowsService(_ string, _ bool) error {
 	return fmt.Errorf("not running as a Windows service host")
 }
+
+func hardenInstalledService() error {
+	return fmt.Errorf("harden-service is only implemented on Windows; on Linux the systemd unit is installed root-owned by the package and only root can change it")
+}

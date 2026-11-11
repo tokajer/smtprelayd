@@ -12,7 +12,27 @@ live deployment: the Microsoft 365 route delivers with both `file:` and
 the Burn `setup.exe`, `.rpm` and `.deb` (install, upgrade in every
 combination, uninstall with and without purging the data directory).
 
-**Last session**: 2026-11-11 (second) — Six of the open defects closed:
+**Last session**: 2026-11-11 (third) — Every remaining open defect closed:
+
+- Windows: `ostrust.CheckExecutable` (binary and directory owner and DACL),
+  `ostrust.CheckKeyFile` (key, its owner and its directory; Linux checks
+  owner and mode, `0640 root:smtprelayd` passes), run by `serve` and
+  `check`. `install` writes and verifies a restrictive service DACL and
+  removes a half-installed service; new `harden-service`, run by the MSI
+  (`HardenServiceCA`) on every install and upgrade.
+  `SetDefaultDllDirectories(SYSTEM32)` first in `main`. Startup refuses
+  `GOTRACEBACK=crash|wer`.
+- Envelope addresses: invalid UTF-8 and `<`/`>` refused (`501`); HELO made
+  valid UTF-8 in `Commit`. `max_recipients` capped at 1000; metadata
+  encoded without HTML escaping (worst case 614 kB for 1000 recipients).
+- `go vet -tags loadtest` fixed and added to CI and `make ci`.
+- Verified: `make ci` exit 0 on go1.27.4, `xmllint` clean on the wxs.
+  **Not run anywhere yet: every Windows test**, including the elevated
+  service-install test, the SDDL strings in the new ACL tests, and whether
+  the SCM accepts a protected DACL on a service handle. Watch the first
+  Windows CI run; an MSI upgrade on a test machine is the hardware check.
+
+**Previous session**: 2026-11-11 (second) — Six of the open defects closed:
 
 - Spool I/O goes through one `os.Root` on `<data_dir>/spool`
   (`Spool.Close` is new; every test now closes its spool, because on
@@ -188,32 +208,10 @@ for each is in `docs/dev/HISTORY.md`; grep for the quoted term.
 
 ## Open defects
 
-From the security review of 2026-11-11 (each needs a decision: implement,
-or strike the promise and record that in `MEMORY.md`), and from the fixes
-that followed it. Low practical impact.
-
-1. EXPLOIT-SURFACE §1: on Windows `ostrust` checks only reparse point and
-   file type, never the binary directory ACL; `[tls] key_file` has no
-   owner/mode check on either platform.
-2. EXPLOIT-SURFACE §2/§11: no explicit service DACL, no
-   `SetDefaultDllDirectories`, no installer test for either.
-3. EXPLOIT-SURFACE §9: Windows Error Reporting dumps are not disabled for
-   the service (Linux core dumps are).
-4. Pre-existing: an envelope address with invalid UTF-8 is silently changed
-   by `json.Marshal` (each bad octet becomes U+FFFD), so after a restart or
-   requeue it is delivered to a different address than the client gave.
-   Refusing non-UTF-8 in the listener or in `validate` closes it, but
-   changes what the listener accepts.
-5. Pre-existing: `mailaddr.CheckEnvelope` (formerly the listener's check)
-   does not restrict the local part, so `MAIL FROM:<<a@b.example>` is
-   accepted as `<a@b.example>` and relayed as is.
-6. `clients.max_recipients` has no upper bound, while the spool now refuses
-   metadata over 1 MiB (about 4000 maximum-length recipients on one route);
-   such a message gets 451 at commit. Bounding `max_recipients` is a schema
-   change (`SHORTCUT:` on `maxMetaBytes`).
-7. Pre-existing: `go vet -tags loadtest ./internal/store` fails
-   (`load_journal_test.go:203`, `retentionCleanup` arguments); CI does not
-   build the `loadtest` tag.
+1. `gosec` run for `GOOS=windows` reports G115 (int to uint32 conversion) at
+   `internal/ostrust/dpapi_windows.go:57`. Pre-existing; CI runs gosec for
+   Linux only, so it never surfaced. Fix the conversion, then consider a
+   Windows gosec step in CI.
 
 Closed defects and their reasoning are in `docs/dev/HISTORY.md`.
 

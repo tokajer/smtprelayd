@@ -4425,6 +4425,17 @@ run on upgrade and repair without anything having exercised it.
 
 Kept for their reasoning, not for action.
 
+**Closed 2026-11-11, third pass: the seven defects left after the second.**
+Windows binary-directory and key ACL checks, the service DACL (written at
+install, re-applied by `harden-service` on upgrade, which the MSI had never
+re-registered), `SetDefaultDllDirectories`, refusing `GOTRACEBACK=crash|wer`
+(the runtime keeps WER out otherwise), envelope addresses limited to valid
+UTF-8 without angle brackets, `max_recipients` capped at 1000, and the
+`loadtest` build fixed and vetted in CI. Found in review: `&` encoded as
+six octets made "1000 recipients fit in 1 MiB" false until metadata was
+written without HTML escaping; the Windows key check first ignored the
+key's owner and directory; and an SDDL token in a test did not exist.
+
 **Closed 2026-11-11, six documentation-versus-code gaps from that day's
 security review.** Spool I/O through `os.Root` (EXPLOIT-SURFACE §4);
 envelope validation on read and write with quarantine to `spool/failed`

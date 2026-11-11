@@ -20,6 +20,7 @@
 package spool
 
 import (
+	"bytes"
 	"container/heap"
 	"encoding/json"
 	"errors"
@@ -622,6 +623,13 @@ func (s *Spool) Commit(st *Staged, env Envelope, lifetime time.Duration, prefix 
 
 	env.Size = n
 	env.normalizeKind()
+	// HELO is the one client-supplied field CheckEnvelope does not govern, and
+	// the listener passes eight-bit octets through. json.Marshal would expand
+	// each invalid one to the three octets of U+FFFD, so a long enough HELO
+	// would fail decodeMeta's length bound and the commit would answer 451 on
+	// every retry. It is informational only; a run of invalid octets becomes
+	// one "?", which can only shorten it.
+	env.Helo = strings.ToValidUTF8(env.Helo, "?")
 	now := time.Now().UTC()
 	m := &Meta{
 		ID:          id,
@@ -694,11 +702,14 @@ func (s *Spool) Enqueue(env Envelope, body io.Reader, maxBytes int64, lifetime t
 // maxMetaBytes bounds a metadata file, read or written. It is what bounds
 // Envelope.To.
 //
-// SHORTCUT: clients.max_recipients has no upper bound, and at the default of
-// 100 a copy's metadata stays near 30 KiB; somewhere past four thousand
-// maximum-length recipients on one route a commit is refused here instead.
-// If an operator ever needs that, bound max_recipients in config to what
-// fits rather than raising this.
+// The listener cannot build a copy this refuses: config caps
+// clients.max_recipients at 1000 (maxClientRecipients there), and encodeMeta
+// never escapes an address octet to more than two, so 1000 recipients of the
+// maximum 254 octets stay near 500 KiB even when every octet is one that
+// doubles ('"', '\', or U+2028 and U+2029, which stay escaped as six octets
+// for three). TestTheLargestEnvelopeConfigAllowsFits builds that worst case.
+// The bound is the config's to move, not this: a commit refused here is a 451
+// the client retries forever.
 const maxMetaBytes = 1 << 20
 
 // writeMeta replaces the metadata file atomically. It refuses metadata that
@@ -715,7 +726,7 @@ func (s *Spool) writeMeta(m *Meta) error {
 	if err := m.validate(); err != nil {
 		return err
 	}
-	b, err := json.Marshal(m)
+	b, err := encodeMeta(m)
 	if err != nil {
 		return err
 	}
@@ -723,10 +734,12 @@ func (s *Spool) writeMeta(m *Meta) error {
 		return fmt.Errorf("%w: encodes to more than %d octets", ErrInvalidMeta, maxMetaBytes)
 	}
 	// The bytes about to be written, not m, are what the next start reads:
-	// json.Marshal turns each invalid UTF-8 octet into a three-octet U+FFFD,
-	// so an eight-bit address can pass validate above and fail its length
-	// limit once decoded -- quarantined at the next start after the client
-	// was told 250. Checking the encoding makes the two verdicts one.
+	// the encoder turns each invalid UTF-8 octet into a three-octet U+FFFD,
+	// so a field validate bounds by length but not by encoding -- HELO,
+	// today; addresses must be valid UTF-8 since 2026-11-11 -- can pass
+	// validate above and fail its limit once decoded, quarantined at the next
+	// start after the client was told 250. Checking the encoding makes the
+	// two verdicts one.
 	if _, err := decodeMeta(b, m.ID); err != nil {
 		return err
 	}
@@ -744,6 +757,26 @@ func (s *Spool) writeMeta(m *Meta) error {
 		return err
 	}
 	return nil
+}
+
+// encodeMeta is the one encoding of a metadata file. HTML escaping is off:
+// json.Marshal writes '&', '<' and '>' as six-octet \u0026-style escapes, and
+// '&' is legal throughout an envelope address, so with it on a recipient list
+// config allows could encode past maxMetaBytes. A JSON decoder reads an
+// escape and the raw character identically, so files written before and
+// after this change stay readable by either version.
+//
+// Encoder.Encode ends its output with a newline, which is trimmed so that the
+// bytes, and so the size bound, are the same as json.Marshal's apart from the
+// escaping.
+func encodeMeta(m *Meta) ([]byte, error) {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(m); err != nil {
+		return nil, err
+	}
+	return bytes.TrimSuffix(buf.Bytes(), []byte("\n")), nil
 }
 
 func (s *Spool) readMeta(id queueid.ID) (*Meta, error) {

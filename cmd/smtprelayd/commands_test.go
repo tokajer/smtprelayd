@@ -34,9 +34,10 @@ func TestEveryDocumentedCommandIsWiredUp(t *testing.T) {
 	opts := cmdOptions{configPath: "/nonexistent/smtprelayd.toml", scope: "read"}
 	for _, c := range commands {
 		if c.controlsService {
-			// Registering, starting or stopping a Windows service is not
-			// something this test may do as a side effect when it runs on
-			// Windows. TestEveryCommandHasAHandler covers these four.
+			// Registering, starting, stopping or re-ACLing a Windows
+			// service is not something this test may do as a side effect
+			// when it runs on Windows. TestEveryCommandHasAHandler covers
+			// these.
 			continue
 		}
 		t.Run(c.name, func(t *testing.T) {

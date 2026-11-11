@@ -62,9 +62,9 @@ type command struct {
 	// manager rather than doing work in this process. It changes nothing
 	// about dispatch -- run reaches these through handler like every other
 	// command -- and exists so that the test which invokes every documented
-	// command to prove it is wired up skips exactly these four. Registering,
-	// starting or stopping a service is not something a test run on Windows
-	// may do as a side effect.
+	// command to prove it is wired up skips exactly these. Registering,
+	// starting, stopping or re-ACLing a service is not something a test run
+	// on Windows may do as a side effect.
 	controlsService bool
 
 	// handler carries the command out. Every entry sets it; there is no
@@ -106,6 +106,11 @@ var commands = []command{
 		help: []string{"start the registered Windows service"}},
 	{name: "stop", windows: true, controlsService: true, handler: serviceControl("stop"),
 		help: []string{"stop the registered Windows service"}},
+	{name: "harden-service", windows: true, controlsService: true, handler: func(cmdOptions) error { return hardenInstalledService() },
+		help: []string{
+			"write the restrictive service DACL onto the registered service;",
+			"run by the MSI on every installation and upgrade",
+		}},
 	{name: "secure-datadir", windows: true, help: []string{"write the data directory ACL the service requires to start"},
 		handler: func(o cmdOptions) error { return secureDataDir(o.configPath) }},
 	{name: "purge-datadir", windows: true, help: []string{
@@ -139,6 +144,11 @@ func serviceControl(name string) func(cmdOptions) error {
 func cmdCheck(o cmdOptions) error {
 	cfg, err := config.Load(o.configPath)
 	if err != nil {
+		return err
+	}
+	// The same refusal serve would give at startup, so check does not pass a
+	// configuration the service then will not start with.
+	if err := checkKeyFile(cfg); err != nil {
 		return err
 	}
 	if err := checkBind(cfg, os.Stdout); err != nil {

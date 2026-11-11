@@ -9,6 +9,7 @@
 package store
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"log/slog"
@@ -200,7 +201,7 @@ func TestLoadQueriesAtOneMillion(t *testing.T) {
 		t.Fatal(err)
 	}
 	start = time.Now()
-	s.retentionCleanup(time.Now().Add(365 * 24 * time.Hour))
+	s.retentionCleanup(context.Background(), time.Now().Add(365*24*time.Hour))
 	elapsed = time.Since(start)
 	var afterMsgs, afterAttempts int
 	if err := s.db.QueryRow(`SELECT COUNT(*) FROM messages`).Scan(&afterMsgs); err != nil {

@@ -87,3 +87,118 @@ func TestCheckDirRefusesASymlink(t *testing.T) {
 		t.Fatalf("failed for an unrelated reason: %v", err)
 	}
 }
+
+// writeKey puts a key file of mode perm in a fresh 0750 directory, the
+// layout gen-cert leaves.
+func writeKey(t *testing.T, perm os.FileMode) string {
+	t.Helper()
+	dir := filepath.Join(t.TempDir(), "tls")
+	if err := os.Mkdir(dir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "relay.key")
+	if err := os.WriteFile(path, []byte("key"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// WriteFile's mode passes through the umask; Chmod does not.
+	if err := os.Chmod(path, perm); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// gen-cert writes the key 0600 and then widens it to 0640 with the
+// configuration file's group so the service account can read it; both have
+// to start. Anything that lets the group write, or anyone else at all, must
+// not: the key is what lets a device trust it is talking to this relay.
+func TestCheckKeyFileModes(t *testing.T) {
+	for _, tc := range []struct {
+		perm os.FileMode
+		ok   bool
+	}{
+		{0o600, true},
+		{0o640, true},
+		{0o400, true},
+		{0o644, false},
+		{0o660, false},
+		{0o604, false},
+		{0o601, false},
+	} {
+		err := CheckKeyFile(writeKey(t, tc.perm))
+		switch {
+		case tc.ok && err != nil:
+			t.Errorf("mode %04o was refused: %v", tc.perm, err)
+		case !tc.ok && err == nil:
+			t.Errorf("mode %04o was accepted", tc.perm)
+		case !tc.ok && !strings.Contains(err.Error(), "chmod 0640"):
+			t.Errorf("mode %04o: the error does not name the fix: %v", tc.perm, err)
+		}
+	}
+}
+
+func TestCheckKeyFileRefusesASymlink(t *testing.T) {
+	real := writeKey(t, 0o600)
+	link := filepath.Join(filepath.Dir(real), "relay-link.key")
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatal(err)
+	}
+	err := CheckKeyFile(link)
+	if err == nil {
+		t.Fatal("a symlinked key was accepted")
+	}
+	if !strings.Contains(err.Error(), "symlink") {
+		t.Fatalf("failed for an unrelated reason: %v", err)
+	}
+}
+
+// A group-writable directory lets another account replace a key whose own
+// mode is sound.
+func TestCheckKeyFileRefusesAWritableDirectory(t *testing.T) {
+	path := writeKey(t, 0o640)
+	if err := os.Chmod(filepath.Dir(path), 0o770); err != nil {
+		t.Fatal(err)
+	}
+	err := CheckKeyFile(path)
+	if err == nil {
+		t.Fatal("a key in a group-writable directory was accepted")
+	}
+	if !strings.Contains(err.Error(), "directory of TLS key") {
+		t.Fatalf("failed for an unrelated reason: %v", err)
+	}
+}
+
+// The directory alone used to be checked, so a binary anyone could rewrite
+// passed as long as it sat in a sound directory.
+func TestCheckExecutableRefusesAWritableBinary(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "bin")
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	exe := filepath.Join(dir, "smtprelayd")
+	if err := os.WriteFile(exe, []byte("#!"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(exe, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := CheckExecutable(exe); err != nil {
+		t.Fatalf("a 0755 binary in a 0755 directory was refused: %v", err)
+	}
+
+	if err := os.Chmod(exe, 0o775); err != nil {
+		t.Fatal(err)
+	}
+	if err := CheckExecutable(exe); err == nil {
+		t.Fatal("a group-writable binary was accepted")
+	}
+
+	if err := os.Chmod(exe, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dir, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	if err := CheckExecutable(exe); err == nil {
+		t.Fatal("a binary in a world-writable directory was accepted")
+	}
+}

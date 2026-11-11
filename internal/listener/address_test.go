@@ -23,6 +23,12 @@ func TestParsePathRejectsInjection(t *testing.T) {
 		"<a@" + strings.Repeat("b", 256) + ">",
 		"<a@b..example>",
 		"<a@.example>",
+		// Accepted until 2026-11-11 as "<a@b.example": the parser stops at
+		// the first '>', so a second '<' became part of the address.
+		"<<a@b.example>",
+		"<a<b@c.example>",
+		// json.Marshal in the spool rewrites the octet as U+FFFD.
+		"<m\xfcller@example.at>",
 	}
 	for _, in := range bad {
 		if addr, _, err := parsePath(in); err == nil {
@@ -39,6 +45,7 @@ func TestParsePathAccepts(t *testing.T) {
 		{"<user@example.at> SIZE=1234", "user@example.at"},
 		{"  <first.last+tag@sub.example.at>", "first.last+tag@sub.example.at"},
 		{"<>", ""},
+		{"<jörg@example.at>", "jörg@example.at"},
 	}
 	for _, c := range cases {
 		got, _, err := parsePath(c.in)

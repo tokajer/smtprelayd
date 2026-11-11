@@ -72,6 +72,12 @@ with absolutely no warranty. See the LICENSE file.
 `
 
 func main() {
+	// First, before anything else can cause a DLL to be loaded.
+	if err := hardenProcess(); err != nil {
+		fmt.Fprintln(os.Stderr, "smtprelayd:", err)
+		os.Exit(1)
+	}
+
 	fs := flag.NewFlagSet("smtprelayd", flag.ExitOnError)
 	configPath := fs.String("config", defaultConfigPath(), "path to the configuration file")
 	console := fs.Bool("console", false, "also log to stderr when a log file is configured")
@@ -370,10 +376,10 @@ func logStartupFailure(configPath string, cfg *config.Config, cause error) {
 	log.Error("startup failed", "config", configPath, "error", cause)
 }
 
-// checkEnvironment refuses to start when the data directory or the directory
-// holding the binary could be modified by an unprivileged local user. Each of
-// those turns a local account into control of a privileged process, so this
-// aborts rather than warns.
+// checkEnvironment refuses to start when the data directory, the binary or
+// the directory holding it could be modified by an unprivileged local user.
+// Each of those turns a local account into control of a privileged process,
+// so this aborts rather than warns.
 func checkEnvironment(cfg *config.Config) error {
 	if err := os.MkdirAll(cfg.Service.DataDir, 0o700); err != nil {
 		return err
@@ -388,8 +394,28 @@ func checkEnvironment(cfg *config.Config) error {
 	if err != nil {
 		return err
 	}
-	if err := ostrust.CheckDir(filepath.Dir(exe)); err != nil {
-		return fmt.Errorf("binary directory: %w", err)
+	if err := ostrust.CheckExecutable(exe); err != nil {
+		return fmt.Errorf("binary or its directory: %w", err)
+	}
+	return nil
+}
+
+// checkKeyFile applies ostrust.CheckKeyFile to a configured TLS key, for
+// serve and for check alike. The key, not the certificate: the certificate is
+// handed to every client anyway, while a key another account can read lets it
+// impersonate the relay, and one it can write lets it choose the key.
+//
+// It runs after config.Load, which has by then already read the pair once to
+// validate it, rather than inside config validation: on Windows the check
+// resolves NT SERVICE\smtprelayd, and every configuration test that loads a
+// certificate would fail on a machine where the service is not installed.
+// That first read only parses; nothing is served from it.
+func checkKeyFile(cfg *config.Config) error {
+	if cfg.TLS.CertFile == "" || cfg.TLS.KeyFile == "" {
+		return nil
+	}
+	if err := ostrust.CheckKeyFile(cfg.TLS.KeyFile); err != nil {
+		return fmt.Errorf("tls key_file: %w", err)
 	}
 	return nil
 }
@@ -399,6 +425,9 @@ func checkEnvironment(cfg *config.Config) error {
 func loadCertificate(cfg *config.Config) (*tls.Certificate, error) {
 	if cfg.TLS.CertFile == "" {
 		return nil, nil
+	}
+	if err := checkKeyFile(cfg); err != nil {
+		return nil, err
 	}
 	cert, err := tls.LoadX509KeyPair(cfg.TLS.CertFile, cfg.TLS.KeyFile)
 	if err != nil {

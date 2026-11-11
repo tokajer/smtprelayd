@@ -6,6 +6,7 @@ package listener
 import (
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 func FuzzParsePath(f *testing.F) {
@@ -25,6 +26,9 @@ func FuzzParsePath(f *testing.F) {
 		"<a@>",
 		"<@b.example>",
 		"<<a@b.example>>",
+		"<<a@b.example>",
+		"<a<b@c.example>",
+		"<m\xfcller@example.at>",
 		"<" + strings.Repeat("a", 65) + "@b.example>",
 		"<a@" + strings.Repeat("b", 256) + ">",
 		"<a@b..example>",
@@ -39,17 +43,19 @@ func FuzzParsePath(f *testing.F) {
 		// Properties of the result itself, not a restatement of the check
 		// parsePath calls: whatever that check becomes, these must hold for
 		// an address that is written back into MAIL FROM or RCPT TO.
-		//
-		// '<' is not asserted: mailaddr.CheckEnvelope does not restrict the
-		// local part's characters, so "<<a@b.example>" yields "<a@b.example".
 		if !strings.Contains(arg, addr) {
 			t.Fatalf("parsePath(%q) = %q, not part of its input", arg, addr)
 		}
 		if len(addr) > 254 {
 			t.Fatalf("parsePath(%q) accepted %d octets", arg, len(addr))
 		}
-		if strings.ContainsRune(addr, '>') {
-			t.Fatalf("parsePath(%q) = %q contains '>'", arg, addr)
+		if strings.ContainsAny(addr, "<>") {
+			t.Fatalf("parsePath(%q) = %q contains an angle bracket", arg, addr)
+		}
+		// The spool stores the envelope as JSON, which would rewrite an
+		// invalid octet as U+FFFD and so deliver to another address.
+		if !utf8.ValidString(addr) {
+			t.Fatalf("parsePath(%q) = %q is not valid UTF-8", arg, addr)
 		}
 		for i := 0; i < len(addr); i++ {
 			if c := addr[i]; c < 0x20 || c == 0x7f {

@@ -148,6 +148,15 @@ const (
 	// merely non-positive, since a negative value is clients()'s to reject.
 	defaultClientMaxRecipients = 100
 
+	// maxClientRecipients is the most max_recipients may be set to. RFC 5321
+	// section 4.5.3.1.8 requires accepting 100; the ceiling comes from the
+	// spool, which refuses metadata over 1 MiB (internal/spool maxMetaBytes).
+	// 1000 recipients of the maximum 254 octets always fit in that as the
+	// spool encodes them (TestTheLargestEnvelopeConfigAllowsFits there), and
+	// a larger value could only turn a large transaction into a 451 at commit
+	// that the client retries forever.
+	maxClientRecipients = 1000
+
 	// defaultReadTimeoutSec, defaultWriteTimeoutSec and defaultDataTimeoutSec
 	// are the [limits] fallbacks, applied to any of the three left at zero or
 	// negative; also used directly by Defaults().
@@ -465,6 +474,9 @@ func (v *validator) clients() {
 		if cl.MaxMessageMB < 0 || cl.MaxRecipients < 0 || cl.RateLimitPerMin < 0 || cl.MaxConnections < 0 {
 			v.add("%s: max_message_mb, max_recipients, rate_limit_per_min and max_connections must not be negative "+
 				"(0 means unlimited)", where)
+		}
+		if cl.MaxRecipients > maxClientRecipients {
+			v.add("%s: max_recipients must not exceed %d", where, maxClientRecipients)
 		}
 	}
 }

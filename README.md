@@ -101,7 +101,9 @@ roots regardless. See
 
 On Windows, `smtprelayd install` / `uninstall` / `start` / `stop` (elevated
 prompt required) register the service under the SCM as
-`NT SERVICE\smtprelayd`. On Linux, install the packaged unit and use
+`NT SERVICE\smtprelayd`; `install` also writes a restrictive service DACL,
+and `harden-service` re-applies it to a service registered by an earlier
+version (the MSI runs it on every install and upgrade). On Linux, install the packaged unit and use
 `systemctl` instead — see Install below.
 
 ## Install
@@ -120,6 +122,11 @@ The Linux packages create a dedicated `smtprelayd` system user and fix
 ownership of `/etc/smtprelayd` and `/var/lib/smtprelayd`. The `.msi` registers
 the Windows service under the virtual account `NT SERVICE\smtprelayd` and
 sets an explicit ACL on `%ProgramData%\SMTPRelayd`, verified at every startup.
+Startup also refuses a binary, or a binary directory, that anyone but SYSTEM,
+Administrators or TrustedInstaller can write (so run it from where the MSI
+put it, under `%ProgramFiles%`), a TLS key readable by anyone but the service
+and administrators, and `GOTRACEBACK=crash` or `wer` in the service's
+environment, which would let Windows Error Reporting dump its memory.
 
 On Windows, prefer `setup.exe`. It elevates once up front, so uninstalling
 through Apps & Features shows the full UI, including the choice to delete the

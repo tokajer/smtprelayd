@@ -69,6 +69,57 @@ func CheckSecretFile(path string) error {
 	return nil
 }
 
+// CheckExecutable applies checkTrusted to the running binary and the
+// directory holding it: a writable binary, or a directory it can be replaced
+// in, is code execution as the service account at the next restart
+// (docs/dev/EXPLOIT-SURFACE.md section 1). The directory alone used to be
+// checked, which left a binary chmod'ed 0666 inside a sound directory.
+func CheckExecutable(exe string) error {
+	if err := checkTrusted(filepath.Dir(exe), true); err != nil {
+		return err
+	}
+	return checkTrusted(exe, false)
+}
+
+// CheckKeyFile applies the trust check to the listener's TLS private key and
+// the directory holding it (docs/dev/EXPLOIT-SURFACE.md section 1). It is
+// CheckSecretFile with one difference: the group may read. gen-cert, run as
+// root, gives the key the configuration file's group and mode 0640 so the
+// service account can read it, and that layout -- root:smtprelayd 0640 in a
+// 0750 directory -- is the one the package documents. Nobody else may do
+// anything with it, and nobody but the owner may write it: whoever reads the
+// key can impersonate the relay to every device that trusts it, and whoever
+// writes it chooses the key the relay presents.
+func CheckKeyFile(path string) error {
+	if err := checkTrusted(filepath.Dir(path), true); err != nil {
+		return fmt.Errorf("directory of TLS key %s: %w", path, err)
+	}
+	fi, err := os.Lstat(path)
+	if err != nil {
+		return err
+	}
+	if fi.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("TLS key %s is a symlink; point key_file at the file itself", path)
+	}
+	if !fi.Mode().IsRegular() {
+		return fmt.Errorf("TLS key %s is not a regular file", path)
+	}
+	st, ok := fi.Sys().(*syscall.Stat_t)
+	if !ok {
+		return fmt.Errorf("%s: cannot determine ownership", path)
+	}
+	uid := os.Getuid()
+	if int(st.Uid) != 0 && int(st.Uid) != uid {
+		return fmt.Errorf("TLS key %s is owned by uid %d, expected root or uid %d; "+
+			"fix it with: chown root:<service group> %s", path, st.Uid, uid, path)
+	}
+	if perm := fi.Mode().Perm(); perm&0o027 != 0 {
+		return fmt.Errorf("TLS key %s has mode %04o, which lets the group write it or other accounts use it; "+
+			"fix it with: chmod 0640 %s", path, perm, path)
+	}
+	return nil
+}
+
 func checkTrusted(path string, wantDir bool) error {
 	fi, err := os.Lstat(path)
 	if err != nil {

@@ -14,6 +14,8 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+
+	"github.com/tokajer/smtprelayd/internal/config"
 )
 
 // This lives in its own file rather than behind a runtime skip. syscall.Stat_t
@@ -85,5 +87,40 @@ func TestGenCertNamesTheGroupItWidenedTheKeyTo(t *testing.T) {
 
 	if !strings.Contains(out.String(), "readable by group "+want) {
 		t.Errorf("the output does not name the group the key was widened to (%s):\n%s", want, out.String())
+	}
+}
+
+// What gen-cert writes has to pass the key check serve applies before it
+// loads the pair, or the documented first-start sequence ends in a refusal;
+// and the same key made world-readable has to be refused there and by check.
+func TestLoadCertificateChecksTheKeyGenCertWrote(t *testing.T) {
+	certDir := filepath.Join(t.TempDir(), "tls")
+	path := writeConfig(t, tlsConfigBody(t, certDir))
+	if err := genCert(path, false, 0, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("the configuration does not load after gen-cert: %v", err)
+	}
+	if _, err := loadCertificate(cfg); err != nil {
+		t.Fatalf("the key gen-cert wrote was refused: %v", err)
+	}
+
+	if err := os.Chmod(cfg.TLS.KeyFile, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err = loadCertificate(cfg)
+	if err == nil {
+		t.Fatal("a world-readable key was loaded")
+	}
+	if !strings.Contains(err.Error(), "chmod 0640") {
+		t.Errorf("the refusal does not name the fix: %v", err)
+	}
+	// check has to refuse what serve refuses, or it passes a configuration
+	// the service then will not start with.
+	err = cmdCheck(cmdOptions{configPath: path})
+	if err == nil || !strings.Contains(err.Error(), "chmod 0640") {
+		t.Errorf("check with a world-readable key: %v, want the key refusal", err)
 	}
 }

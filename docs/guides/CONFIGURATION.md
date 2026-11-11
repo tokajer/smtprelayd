@@ -102,11 +102,15 @@ and caveats under *Self-signed certificates* below.
 whatever CA the network already trusts (internal PKI, ACME, or a purchased
 cert). smtprelayd never renews certificates.
 
-2. Place `cert_file` and `key_file` on disk. The loader does not enforce
-   permissions on these two paths the way it does for `file:` secrets, so set
-   them the way `gen-cert` does: on Linux `root:smtprelayd`, directory `0750`
-   and key `0640`, so the service account can read it and no other local
-   account can; on Windows, put it inside the data directory so it inherits
+2. Place `cert_file` and `key_file` on disk. The key is checked before it is
+   read and a violation is a startup error, so set it the way `gen-cert`
+   does: on Linux `root:smtprelayd`, directory `0750` and key `0640` — owned
+   by root or the service account, readable by at most its group, writable
+   by nobody else, and not a symlink (copy a Let's Encrypt `privkey.pem` out
+   of `live/` with a deploy hook rather than pointing at the link); on
+   Windows, owned by SYSTEM, Administrators or the service account, in a
+   directory nobody else can write, readable by nobody else — put it inside
+   the data directory so it inherits
    the protected ACL `SecureDataDir` sets there (see
    `docs/guides/MS365-AUTH.md`'s `file:` option for exactly how that inheritance
    works).
@@ -238,6 +242,17 @@ max_recipients     = 20
 rate_limit_per_min  = 30
 max_connections     = 10
 ```
+
+`max_recipients` defaults to 100 when left at zero and may not exceed 1000.
+The bound is not arbitrary: every recipient of a message is stored in its
+spool metadata, which the relay refuses above 1 MiB, and 1000 recipients of
+the maximum 254 octets always fit. A larger value could only turn into a
+`451` at the end of the data phase that the device retries forever, so it is
+a startup error instead.
+
+Envelope addresses (`MAIL FROM`, `RCPT TO`) may carry UTF-8 and quoted local
+parts, but not invalid UTF-8 and not `<` or `>` inside the address; either is
+refused with `501` before any data is accepted.
 
 Sender rewriting (`[client.rewrite]`) has three modes — the example
 configuration ships one client per mode, so the fastest path is copying

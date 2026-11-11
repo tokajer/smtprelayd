@@ -176,6 +176,31 @@ func TestNormalizeSettlesClientMaxRecipientsButLeavesNegativeForValidation(t *te
 	}
 }
 
+// The spool refuses metadata over 1 MiB, so a max_recipients past what fits
+// in it would only move the refusal from RCPT TO, where the client is told
+// 452 and sends the rest separately, to the commit, where it is told 451 for
+// the whole message and retries it unchanged forever.
+func TestClientMaxRecipientsIsBounded(t *testing.T) {
+	withMax := func(n int) string {
+		return strings.Replace(baseConfig, `route = "m365"`, fmt.Sprintf("route = \"m365\"\nmax_recipients = %d", n), 1)
+	}
+	cfg, err := Load(write(t, withMax(1000)))
+	if err != nil {
+		t.Fatalf("max_recipients = 1000 was rejected: %v", err)
+	}
+	if got := cfg.Clients[0].MaxRecipients; got != 1000 {
+		t.Fatalf("max_recipients 1000 settled to %d", got)
+	}
+
+	_, err = Load(write(t, withMax(1001)))
+	if err == nil {
+		t.Fatal("max_recipients = 1001 was accepted")
+	}
+	if !strings.Contains(err.Error(), "max_recipients must not exceed 1000") {
+		t.Errorf("refused for an unrelated reason: %v", err)
+	}
+}
+
 func TestLoadBaseline(t *testing.T) {
 	if _, err := Load(write(t, baseConfig)); err != nil {
 		t.Fatalf("baseline configuration rejected: %v", err)

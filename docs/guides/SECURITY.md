@@ -110,7 +110,12 @@ attacker-influenced values and writes them into a message.
   line, which is the property this control exists for. **Decided
   2026-11-11**; see `MEMORY.md` section 9.
 - Envelope addresses are validated against RFC 5321 length limits: 64 octets
-  local part, 255 domain, 254 total.
+  local part, 255 domain, 254 total. They are refused, never repaired, if
+  they contain a control character, `<` or `>`, or invalid UTF-8
+  (`mailaddr.CheckEnvelope`, one rule for the listener and the spool).
+  Invalid UTF-8 is refused because the spool's JSON encoding would replace
+  each such octet with U+FFFD, so a message recovered after a restart would
+  go to an address the client never gave. **Decided 2026-11-11.**
 - Line length is enforced at 1000 octets including CRLF. Over-long lines are
   rejected during the data phase, not repaired.
 - Limits on header count and total header size prevent parser resource

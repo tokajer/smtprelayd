@@ -6,6 +6,7 @@ package mailaddr
 import (
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 var addressSeeds = []string{
@@ -13,6 +14,10 @@ var addressSeeds = []string{
 	"first.last+tag@sub.example.at",
 	"\"quoted local\"@example.at",
 	"m\xc3\xbcller@example.at",
+	"m\xfcller@example.at",
+	"\xff\xfe@example.at",
+	"<a@example.at",
+	"a>b@example.at",
 	"a@b",
 	"@example.at",
 	"a@",
@@ -52,6 +57,14 @@ func FuzzCheckEnvelope(f *testing.F) {
 		}
 		if at := strings.LastIndex(s, "@"); at <= 0 || at == len(s)-1 {
 			t.Fatalf("CheckEnvelope accepted %q without local@domain", s)
+		}
+		// What the spool's JSON encoding would rewrite, and the delimiter
+		// the listener parsed the path out of.
+		if !utf8.ValidString(s) {
+			t.Fatalf("CheckEnvelope accepted invalid UTF-8 %q", s)
+		}
+		if strings.ContainsAny(s, "<>") {
+			t.Fatalf("CheckEnvelope accepted an angle bracket in %q", s)
 		}
 	})
 }

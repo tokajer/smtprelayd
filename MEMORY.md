@@ -709,6 +709,27 @@ The load-bearing principles:
   deleted, so a validation rule that turns out too strict leaves the message
   on disk, counted against the quota and requeueable once a release relaxes
   the rule, instead of losing it.
+- **Decided 2026-11-11, second pass: the remaining review gaps closed in
+  code.** Envelope addresses must be valid UTF-8 and carry no `<` or `>`
+  (`mailaddr.CheckEnvelope`, listener and spool alike, `501` at MAIL/RCPT):
+  the spool's JSON would otherwise rewrite invalid octets to U+FFFD and a
+  recovered message would go to an address the client never gave, and an
+  angle bracket inside a path is never a real address. HELO is the one
+  eight-bit field still accepted; it is informational, so `Commit` makes it
+  valid UTF-8 instead. `clients.max_recipients` is capped at 1000, a
+  schema change made so that the spool's 1 MiB metadata bound can never
+  turn an accepted transaction into a `451` retried forever; metadata is
+  written without HTML escaping so the worst-case encoding stays at twice
+  the address length. On Windows, startup refuses a binary or binary
+  directory writable by anyone but SYSTEM, Administrators or
+  TrustedInstaller (the service account included), a TLS key or key
+  directory open to anyone but those and the service account, and
+  `GOTRACEBACK=crash|wer`, the only settings under which the Go runtime
+  hands a crash to WER. On Linux the binary and the key get the matching
+  owner and mode checks; `gen-cert`'s `0640 root:smtprelayd` key passes.
+  The service DACL is written by `install` and re-applied by
+  `harden-service`, which the MSI runs on every install and upgrade
+  because an upgrade keeps the old registration.
 - **Misconfiguration is the realistic attack.** `smtprelayd selftest` actively
   verifies the service is not an open relay and runs in CI.
 - **The service account is the escalation target.** Configuration file,
