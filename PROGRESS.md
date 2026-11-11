@@ -12,7 +12,24 @@ live deployment: the Microsoft 365 route delivers with both `file:` and
 the Burn `setup.exe`, `.rpm` and `.deb` (install, upgrade in every
 combination, uninstall with and without purging the data directory).
 
-**Last session**: 2026-11-05 — Small items from the fifth review:
+**Last session**: 2026-11-11 — Security review (repository-wide, no
+HIGH/MEDIUM finding at confidence 8+). Two rewrite gaps fixed:
+
+- `MAIL FROM:<>` no longer skips the header policy: under `force` and
+  `if_unauthorized` the null reverse path stays null on the envelope but
+  `From`, `X-Original-From` and `reply_to` apply (`rewrite.Apply`).
+- `header_from = "keep"` no longer accepts a mailbox list whose last entry
+  aligns: `addrOfMailbox` refuses lists, groups, comments, an addr-spec in
+  the display-name position, trailing text, stray backslashes and
+  unterminated quotes. Reviewed twice (Sonnet, then Fable 5.1); each review
+  found one further bypass, both fixed and pinned by tests.
+- `make ci` fails only on govulncheck: GO-2026-6859 (`net/http`
+  MaxBytesReader header race) in go1.27.3, fixed in go1.27.4. Not caused by
+  this change; the toolchain raise is the next item.
+- Nine places where `SECURITY.md` / `EXPLOIT-SURFACE.md` promise more than
+  the code does are listed under "Open defects"; each needs a decision.
+
+**Previous session**: 2026-11-05 — Small items from the fifth review:
 
 - `store.backfillSummaries` runs on every Open as a repair for rows with
   attempts but no `last_class` (an interrupted migration), behind a
@@ -146,8 +163,29 @@ for each is in `docs/dev/HISTORY.md`; grep for the quoted term.
 
 ## Open defects
 
-None as of 2026-09-29. Closed defects and their reasoning are in
-`docs/dev/HISTORY.md`.
+Documented guarantees the code does not enforce (security review
+2026-11-11). Each needs a decision: implement, or strike the promise and
+record that in `MEMORY.md`. Low practical impact.
+
+1. SECURITY.md §4: `X-Original-From` is a raw copy of the client's `From`
+   (control characters and length filtered only), not an encoded value.
+2. EXPLOIT-SURFACE §1: on Windows `ostrust` checks only reparse point and
+   file type, never the binary directory ACL; `[tls] key_file` has no
+   owner/mode check on either platform.
+3. EXPLOIT-SURFACE §4: the spool rebuilds `filepath.Join(dir, id+ext)` and
+   `readMetaAt` uses `os.ReadFile` (follows symlinks) instead of `os.Root`.
+4. EXPLOIT-SURFACE §5: `spool.readMetaAt` validates only the embedded ID;
+   `Envelope.From/To/Route` reach delivery unvalidated.
+5. EXPLOIT-SURFACE §2/§11: no explicit service DACL, no
+   `SetDefaultDllDirectories`, no installer test for either.
+6. EXPLOIT-SURFACE §9: core dumps are not disabled (no `RLIMIT_CORE`, no
+   `LimitCORE=` in the unit).
+7. EXPLOIT-SURFACE §11: no fuzz targets exist for the header, address or
+   envelope parsers.
+8. SECURITY.md §6: `spool.ensureMode` repairs spool modes instead of
+   failing startup; only the data-dir root is refused.
+
+Closed defects and their reasoning are in `docs/dev/HISTORY.md`.
 
 ## Phases
 

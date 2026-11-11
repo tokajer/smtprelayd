@@ -262,6 +262,20 @@ whichever one matches:
 envelope, DMARC checks the header, so a mismatch fails alignment at the
 smarthost regardless of what the smarthost itself accepts.
 
+A message submitted with the null reverse path (`MAIL FROM:<>`) keeps it on
+the envelope, since a bounce that is given a sender can start a notification
+loop. Its headers are rewritten like any other message's: `From`,
+`X-Original-From` and `reply_to` apply under `force` and `if_unauthorized`
+alike, because an empty sender is never in `allowed_senders`.
+
+Under `header_from = "keep"` only a single aligned mailbox survives. A `From`
+carrying a mailbox list, a group, a comment, an address in the display-name
+position, trailing text or an unterminated quote is replaced, because
+aligning on one entry would let a foreign first mailbox through. The same
+reading decides the automatic `Reply-To` under `reply_to = "preserve"`: a
+`From` it cannot read as one mailbox is not used, and the declared envelope
+sender takes its place, or no `Reply-To` is added when there is none.
+
 A client can override the global bounce recipients:
 
 ```toml

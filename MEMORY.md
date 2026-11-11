@@ -367,6 +367,11 @@ Rules when rewriting:
 - Set `Reply-To` to the original sender, but only if the message does not
   already carry one.
 - Preserve the original in `X-Original-From` for diagnostics.
+- The null reverse path stays null on the envelope (loop prevention), but its
+  headers go through the same policy; `MAIL FROM:<>` is never a way past it.
+  Decided 2026-11-11 after the security review.
+- `header_from = "keep"` keeps only a single aligned mailbox; a list or group
+  is replaced.
 - Rewriting invalidates any pre-existing DKIM signature. Acceptable because
   Microsoft 365 signs on egress.
 

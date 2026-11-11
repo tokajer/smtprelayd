@@ -199,13 +199,21 @@ type Result struct {
 func (r *Rules) Apply(in Input) (Result, error) {
 	res := Result{EnvelopeFrom: in.EnvelopeFrom, Headers: in.Headers}
 
-	// The null reverse path belongs to a bounce and is never rewritten:
-	// giving it a sender is how a notification loop starts.
-	if r == nil || r.mode == ModeOff || in.EnvelopeFrom == "" {
+	if r == nil || r.mode == ModeOff {
 		return res, nil
 	}
+	// An empty sender is never authorised, so the null reverse path always
+	// reaches the header policy below; skipping it would let MAIL FROM:<>
+	// carry any From and Reply-To past a force or if_unauthorized client.
 	if r.mode == ModeIfUnauthorized && r.Authorized(in.EnvelopeFrom) {
 		return res, nil
+	}
+	// The null reverse path itself stays on the envelope: a bounce relayed
+	// with a sender can be bounced back, which is how a notification loop
+	// starts.
+	envOut := r.envFrom
+	if in.EnvelopeFrom == "" {
+		envOut = ""
 	}
 
 	blk, err := parseBlock(in.Headers)
@@ -229,7 +237,7 @@ func (r *Rules) Apply(in Input) (Result, error) {
 	if r.keepsFrom(orig) {
 		// The From is already aligned with the new envelope sender, so only
 		// the envelope changes and nothing is lost that needs preserving.
-		res.EnvelopeFrom = r.envFrom
+		res.EnvelopeFrom = envOut
 		res.Headers = blk.String()
 		res.Rewritten = true
 		res.OriginalFrom = in.EnvelopeFrom
@@ -257,7 +265,7 @@ func (r *Rules) Apply(in Input) (Result, error) {
 		}
 	}
 
-	res.EnvelopeFrom = r.envFrom
+	res.EnvelopeFrom = envOut
 	res.Headers = blk.String()
 	res.Rewritten = true
 	res.OriginalFrom = in.EnvelopeFrom
@@ -313,16 +321,28 @@ func checkHeaderValue(s string) error {
 	return nil
 }
 
-// addrOfMailbox extracts the addr-spec from a From value. A group list or a
-// comment is not something to guess at, so it yields nothing.
+// addrOfMailbox extracts the addr-spec from a From value. A group list, a
+// mailbox list or a comment is not something to guess at, so it yields
+// nothing: aligning on one entry of a list would let a foreign first mailbox,
+// the one a reader sees, pass as aligned.
 func addrOfMailbox(s string) string {
 	s = strings.TrimSpace(s)
 	if s == "" {
 		return ""
 	}
+	bare, ok := unquoted(s)
+	if !ok || strings.Contains(bare, ",") || strings.Count(bare, "<") > 1 {
+		return ""
+	}
 	if i := strings.LastIndex(s, "<"); i >= 0 {
+		// What precedes the angle-addr must be a phrase. An addr-spec or group
+		// syntax there is read as the first mailbox by a real parser.
+		k := strings.IndexByte(bare, '<')
+		if k < 0 || strings.ContainsAny(bare[:k], "@:;>[]") {
+			return ""
+		}
 		j := strings.Index(s[i:], ">")
-		if j < 0 {
+		if j < 0 || strings.TrimSpace(s[i+j+1:]) != "" {
 			return ""
 		}
 		return strings.TrimSpace(s[i+1 : i+j])
@@ -331,6 +351,30 @@ func addrOfMailbox(s string) string {
 		return ""
 	}
 	return s
+}
+
+// unquoted returns s with every quoted-string removed, so that a comma or an
+// angle bracket inside a display name is not read as list syntax. It reports
+// false for anything where its reading could differ from a real parser's: an
+// unterminated quote, a comment (inside one a quote is plain text, so it
+// would hide a mailbox) and a backslash outside a quoted string.
+func unquoted(s string) (string, bool) {
+	var b strings.Builder
+	quoted := false
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case !quoted && (c == '(' || c == '\\'):
+			return "", false
+		case quoted && c == '\\':
+			i++
+		case c == '"':
+			quoted = !quoted
+		case !quoted:
+			b.WriteByte(c)
+		}
+	}
+	return b.String(), !quoted
 }
 
 func splitAddress(addr string) (local, domain string) {

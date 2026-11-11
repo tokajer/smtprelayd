@@ -150,19 +150,120 @@ func TestReplyToDropAndFixed(t *testing.T) {
 	}
 }
 
-func TestOffAndNullSenderAreUntouched(t *testing.T) {
+func TestOffIsUntouched(t *testing.T) {
 	off := compile(t, config.Rewrite{Mode: ModeOff})
 	res, err := off.Apply(Input{EnvelopeFrom: "scanner@printer.local", Headers: plainHeaders})
 	if err != nil || res.Rewritten || res.Headers != plainHeaders {
 		t.Errorf("mode off changed the message: %v %v", res.Rewritten, err)
 	}
+}
 
-	// A null reverse path is a bounce. Giving it a sender is how a
-	// notification loop starts.
-	force := compile(t, config.Rewrite{Mode: ModeForce, EnvelopeFrom: "relay@example.at"})
-	res, err = force.Apply(Input{EnvelopeFrom: "", Headers: plainHeaders})
-	if err != nil || res.Rewritten || res.EnvelopeFrom != "" {
-		t.Errorf("the null reverse path was rewritten: %q %v", res.EnvelopeFrom, err)
+// MAIL FROM:<> must not be a way past the header policy. The envelope stays
+// null, because giving a bounce a sender is how a notification loop starts,
+// but From, X-Original-From and Reply-To are treated as for any sender.
+func TestNullSenderKeepsEnvelopeButNotHeaders(t *testing.T) {
+	spoofed := "From: CEO <ceo@example.at>\r\nReply-To: <attacker@evil.example>\r\n\r\n"
+	for _, rw := range []config.Rewrite{
+		{Mode: ModeForce, EnvelopeFrom: "relay@example.at", ReplyTo: "drop"},
+		{Mode: ModeIfUnauthorized, AllowedSenders: []string{"*@example.at"},
+			EnvelopeFrom: "relay@example.at", ReplyTo: "drop"},
+	} {
+		t.Run(rw.Mode, func(t *testing.T) {
+			res, err := compile(t, rw).Apply(Input{EnvelopeFrom: "", Headers: spoofed})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if res.EnvelopeFrom != "" {
+				t.Errorf("the null reverse path was given sender %q", res.EnvelopeFrom)
+			}
+			if !res.Rewritten || res.OriginalFrom != "" {
+				t.Errorf("rewritten=%v original=%q", res.Rewritten, res.OriginalFrom)
+			}
+			if !strings.Contains(res.Headers, "From: <relay@example.at>\r\n") ||
+				!strings.Contains(res.Headers, "X-Original-From: CEO <ceo@example.at>\r\n") {
+				t.Errorf("the From policy was skipped:\n%s", res.Headers)
+			}
+			if strings.Contains(res.Headers, "Reply-To:") {
+				t.Errorf("Reply-To survived drop:\n%s", res.Headers)
+			}
+		})
+	}
+}
+
+// Under keep only a single aligned mailbox survives. A list whose last entry
+// aligns must not carry a foreign first entry past the check.
+func TestKeepRefusesMailboxLists(t *testing.T) {
+	r := compile(t, config.Rewrite{Mode: ModeForce, EnvelopeFrom: "erp@example.at", HeaderFrom: HeaderFromKeep})
+	for _, from := range []string{
+		"<attacker@evil.example>, <invoice@example.at>",
+		"\"Attacker\" <attacker@evil.example>, <invoice@example.at>",
+		"<attacker@evil.example> <invoice@example.at>",
+		"<attacker@evil.example> (<invoice@example.at>)",
+		"<invoice@example.at> attacker@evil.example",
+		"\"Unterminated <invoice@example.at>",
+		"(\" ) <attacker@evil.example>, (\") <invoice@example.at>",
+		"\\\" <attacker@evil.example>, \"<invoice@example.at>",
+		"\"x\\\\\" <attacker@evil.example>, <invoice@example.at>",
+		"Sales (Vienna) <invoice@example.at>",
+		"attacker@evil.example <invoice@example.at>",
+		"attacker@evil.example; <invoice@example.at>",
+		"g: attacker@evil.example; <invoice@example.at>",
+		"Sales: <invoice@example.at>",
+		"attacker@evil.example > <invoice@example.at>",
+	} {
+		in := "From: " + from + "\r\n\r\n"
+		res, err := r.Apply(Input{EnvelopeFrom: "erp@erp.local", Headers: in})
+		if err != nil {
+			t.Fatalf("%s: %v", from, err)
+		}
+		if !strings.Contains(res.Headers, "From: <erp@example.at>\r\n") {
+			t.Errorf("%s: the From was kept:\n%s", from, res.Headers)
+		}
+	}
+
+	for _, from := range []string{
+		"\"Invoicing, Vienna <AT>\" <invoice@example.at>",
+		"\"Say \\\"hi, there\\\"\" <invoice@example.at>",
+	} {
+		in := "From: " + from + "\r\n\r\n"
+		res, err := r.Apply(Input{EnvelopeFrom: "erp@erp.local", Headers: in})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if res.Headers != in {
+			t.Errorf("%s: a quoted display name was read as list syntax:\n%s", from, res.Headers)
+		}
+	}
+}
+
+func TestNullSenderKeepAndPreserve(t *testing.T) {
+	keep := compile(t, config.Rewrite{Mode: ModeForce, EnvelopeFrom: "erp@example.at", HeaderFrom: HeaderFromKeep})
+	aligned := "From: Invoicing <invoice@example.at>\r\n\r\n"
+	res, err := keep.Apply(Input{EnvelopeFrom: "", Headers: aligned})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.EnvelopeFrom != "" || !res.Rewritten || res.Headers != aligned {
+		t.Errorf("null sender under keep: envelope %q rewritten=%v\n%s", res.EnvelopeFrom, res.Rewritten, res.Headers)
+	}
+
+	// Under preserve the null sender gets the same Reply-To as any sender:
+	// the From address when it is readable, and nothing to fall back to
+	// otherwise, since the envelope is empty.
+	preserve := compile(t, config.Rewrite{Mode: ModeForce, EnvelopeFrom: "relay@example.at"})
+	for from, want := range map[string]string{
+		"<printer@printer.local>":            "Reply-To: <printer@printer.local>\r\n",
+		"<relay@example.at>":                 "",
+		"<a@evil.example>, <b@evil.example>": "",
+	} {
+		res, err = preserve.Apply(Input{EnvelopeFrom: "", Headers: "From: " + from + "\r\n\r\n"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if want == "" && strings.Contains(res.Headers, "Reply-To:") ||
+			want != "" && !strings.Contains(res.Headers, want) {
+			t.Errorf("%s: want Reply-To %q:\n%s", from, want, res.Headers)
+		}
 	}
 }
 
