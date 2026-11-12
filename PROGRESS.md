@@ -26,6 +26,12 @@ combination, uninstall with and without purging the data directory).
   valid UTF-8 in `Commit`. `max_recipients` capped at 1000; metadata
   encoded without HTML escaping (worst case 614 kB for 1000 recipients).
 - `go vet -tags loadtest` fixed and added to CI and `make ci`.
+- Two flaky tests from the first CI run fixed (both pre-existing, neither a
+  product defect): the metrics loopback test left a dialled-but-unused
+  client connection that `Shutdown` counts as active for 5 s (Go issue
+  22682), failing about 6 runs in 15; the implicit-TLS admission-cap test
+  assumed the last connection dialled is the one refused, which the
+  per-connection admission goroutines do not guarantee under `-race`.
 - Verified: `make ci` exit 0 on go1.27.4, `xmllint` clean on the wxs.
   **Not run anywhere yet: every Windows test**, including the elevated
   service-install test, the SDDL strings in the new ACL tests, and whether

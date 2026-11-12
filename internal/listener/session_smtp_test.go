@@ -707,33 +707,48 @@ func TestImplicitTLSAdmissionCapHoldsDuringAStalledHandshake(t *testing.T) {
 		return c
 	}
 
-	// Fill the unmatched source's admission cap with connections that never
-	// send a ClientHello, then add one more: the cap is checked before the
-	// handshake, so this one must be refused rather than simply becoming a
-	// third stalled handshake.
-	for i := 0; i < unmatchedMaxConns; i++ {
-		dial()
+	// Open one connection more than the unmatched source's admission cap,
+	// none of which ever sends a ClientHello. Admission runs in each
+	// connection's own goroutine, so which of them is refused is up to the
+	// scheduler -- under -race on a loaded runner the last one dialled won a
+	// slot often enough to fail CI -- and the assertion is about the cap, not
+	// the order: exactly one is closed within cap + refusalTimeout, and the
+	// rest are still being held by their stalled handshakes.
+	conns := make([]net.Conn, unmatchedMaxConns+1)
+	for i := range conns {
+		conns[i] = dial()
 	}
-	over := dial()
 
-	// A client-side deadline much longer than what is under test here (cap +
-	// refusalTimeout = 5s): if the server never closed this connection early,
-	// this fires first, and the timeout check below reports that as a
-	// failure instead of a false pass.
-	_ = over.SetReadDeadline(time.Now().Add(readTimeoutSec * time.Second))
+	// Well past the refusal (refusalTimeout, 5s) and well short of the
+	// stalled handshakes' own deadline (read_timeout_sec, 30s), so a closed
+	// connection inside it can only be the admission refusal.
+	const window = 8 * time.Second
 	start := time.Now()
-	_, err := over.Read(make([]byte, 1))
-	elapsed := time.Since(start)
+	closed := make(chan error, len(conns))
+	for _, c := range conns {
+		_ = c.SetReadDeadline(start.Add(window))
+		go func(c net.Conn) {
+			_, err := c.Read(make([]byte, 1))
+			closed <- err
+		}(c)
+	}
 
-	if err == nil {
-		t.Fatal("the over-cap connection is still open; the admission cap did not close it")
+	refused, held := 0, 0
+	for range conns {
+		err := <-closed
+		var netErr net.Error
+		switch {
+		case err == nil:
+			t.Fatal("a stalled connection received data; the server wrote before any handshake")
+		case errors.Is(err, os.ErrDeadlineExceeded) || (errors.As(err, &netErr) && netErr.Timeout()):
+			held++
+		default:
+			refused++
+		}
 	}
-	var netErr net.Error
-	if errors.Is(err, os.ErrDeadlineExceeded) || (errors.As(err, &netErr) && netErr.Timeout()) {
-		t.Fatalf("read timed out after %v; the admission cap did not close the connection: %v", elapsed, err)
-	}
-	if want := 8 * time.Second; elapsed > want {
-		t.Fatalf("over-cap connection closed after %v, want within %v (cap + refusalTimeout)", elapsed, want)
+	if refused != 1 || held != unmatchedMaxConns {
+		t.Fatalf("after %v: %d connection(s) refused and %d held, want 1 refused and %d held (the admission cap)",
+			time.Since(start), refused, held, unmatchedMaxConns)
 	}
 }
 

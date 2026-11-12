@@ -330,6 +330,11 @@ func TestLoopbackServeGuardsTheExpositionWithTheHostHeader(t *testing.T) {
 		}
 	}
 
+	// The transport can keep a connection it dialled while an idle one became
+	// free, never sending a request on it. Shutdown counts such a connection
+	// as active until it is five seconds old (net/http issue 22682), exactly
+	// shutdownGrace, so without this the test failed about one run in three.
+	http.DefaultClient.CloseIdleConnections()
 	cancel()
 	if err := <-done; err != nil {
 		t.Errorf("Serve returned %v", err)
