@@ -32,6 +32,12 @@ combination, uninstall with and without purging the data directory).
   22682), failing about 6 runs in 15; the implicit-TLS admission-cap test
   assumed the last connection dialled is the one refused, which the
   per-connection admission goroutines do not guarantee under `-race`.
+- A third flaky test fixed 2026-11-13 (again not a product defect): the
+  implicit-TLS global-cap test redialled right after closing the slot
+  holder, but the slot is released by the holder's session goroutine after
+  its stalled handshake fails, so on a loaded runner the redial hit the cap
+  and got EOF. It now waits for `len(sem) == 0` before redialling, the
+  mirror of its existing wait for the claim.
 - Verified: `make ci` exit 0 on go1.27.4, `xmllint` clean on the wxs.
   **Not run anywhere yet: every Windows test**, including the elevated
   service-install test, the SDDL strings in the new ACL tests, and whether

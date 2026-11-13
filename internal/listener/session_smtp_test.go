@@ -818,6 +818,21 @@ func TestImplicitTLSGlobalCapRefusalDoesNotHangTheAcceptLoop(t *testing.T) {
 	// connections, not stuck from the refusal above.
 	_ = holder.Close()
 
+	// The slot is released by the holder's session goroutine, after its
+	// stalled handshake has failed on the close and handle has returned,
+	// not by Close itself. A dial that lands before that release hits the
+	// global cap again, is closed without writing, and fails below with an
+	// EOF that has nothing to do with the accept loop -- which is how this
+	// test failed in CI on 2026-11-13. Wait for the release, the mirror of
+	// the wait for the claim above.
+	deadline = time.Now().Add(5 * time.Second)
+	for len(srv.sem) != 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("timed out waiting for the holder's closed connection to release the global slot")
+		}
+		time.Sleep(time.Millisecond)
+	}
+
 	client, err := tls.DialWithDialer(&net.Dialer{Timeout: 2 * time.Second}, "tcp", addr,
 		&tls.Config{InsecureSkipVerify: true, ServerName: "127.0.0.1", MinVersion: tls.VersionTLS12}) //#nosec G402 -- dialing this test's own listener
 	if err != nil {
